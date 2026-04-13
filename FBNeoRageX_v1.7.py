@@ -15,7 +15,11 @@ from OpenGL.GL import *
 # 기존 고정 파이프라인 렌더링이 동시에 동작한다.
 _gl_fmt = QSurfaceFormat()
 _gl_fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
-_gl_fmt.setVersion(2, 1)           # GLSL 1.20 (RetroArch 표준 쉐이더 기준)
+if IS_WINDOWS:
+    # Windows: 2.1 명시 → GLSL 1.20 쉐이더 호환
+    _gl_fmt.setVersion(2, 1)
+# Linux/SteamDeck: 버전 미지정 → Mesa가 지원 최고 버전(보통 4.6) 자동 선택
+# XWayland GLX 에서 2.1 CompatibilityProfile 을 못 찾는 문제 우회
 _gl_fmt.setDepthBufferSize(0)      # 2D 렌더링만 하므로 depth 불필요
 _gl_fmt.setStencilBufferSize(0)
 QSurfaceFormat.setDefaultFormat(_gl_fmt)
