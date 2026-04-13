@@ -1,0 +1,178 @@
+name: Build FBNeoRageX
+
+on:
+  push:
+    branches: [ main ]
+    tags:     [ 'v*' ]
+  workflow_dispatch:   # allow manual trigger from GitHub UI
+
+jobs:
+
+  # ── Windows Build ──────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pyside6 pyopengl pyopengl-accelerate pillow numpy sounddevice
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller FBNeoRageX_Windows.spec --noconfirm
+
+      - name: Write README
+        run: |
+          echo "FBNeoRageX" > dist\FBNeoRageX\README.txt
+          echo. >> dist\FBNeoRageX\README.txt
+          echo REQUIRED: Place fbneo_libretro.dll next to FBNeoRageX.exe >> dist\FBNeoRageX\README.txt
+          echo Then run FBNeoRageX.exe - no installation needed. >> dist\FBNeoRageX\README.txt
+          echo. >> dist\FBNeoRageX\README.txt
+          echo Get fbneo_libretro.dll from RetroArch Core Downloader (FinalBurn Neo) >> dist\FBNeoRageX\README.txt
+        shell: cmd
+
+      - name: Create ZIP
+        run: |
+          Compress-Archive -Path dist\FBNeoRageX -DestinationPath FBNeoRageX_Windows.zip -Force
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FBNeoRageX-Windows
+          path: FBNeoRageX_Windows.zip
+
+  # ── Linux / Steam Deck Build ───────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system libraries (Qt/OpenGL/audio)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libgl1-mesa-dev libgles2-mesa-dev \
+            libegl1-mesa-dev libxcb-xinerama0 \
+            libxcb-cursor0 libxkbcommon-x11-0 \
+            libportaudio2 portaudio19-dev \
+            libpulse0 libasound2-dev \
+            libdbus-1-3 libglib2.0-0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pyside6 pyopengl pyopengl-accelerate pillow numpy sounddevice
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller FBNeoRageX_Linux.spec --noconfirm
+
+      - name: Write launcher script
+        run: |
+          cat > dist/FBNeoRageX/run.sh << 'EOF'
+          #!/bin/bash
+          SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+          # fbneo_libretro.so must be in the same folder
+          if [ ! -f "$SCRIPT_DIR/fbneo_libretro.so" ]; then
+              echo "ERROR: fbneo_libretro.so not found in $SCRIPT_DIR"
+              echo "Place fbneo_libretro.so next to run.sh and try again."
+              exit 1
+          fi
+
+          export LD_LIBRARY_PATH="$SCRIPT_DIR:$SCRIPT_DIR/_internal:$LD_LIBRARY_PATH"
+
+          if [ -n "$WAYLAND_DISPLAY" ]; then
+              export QT_QPA_PLATFORM=wayland
+          elif [ -n "$DISPLAY" ]; then
+              export QT_QPA_PLATFORM=xcb
+          else
+              export DISPLAY=:1
+              export QT_QPA_PLATFORM=xcb
+          fi
+
+          export QT_XCB_NO_MITSHM=1
+          export QT_SCALE_FACTOR=1
+
+          cd "$SCRIPT_DIR"
+          exec "$SCRIPT_DIR/FBNeoRageX" "$@"
+          EOF
+          chmod +x dist/FBNeoRageX/run.sh
+
+      - name: Write README
+        run: |
+          cat > dist/FBNeoRageX/README.txt << 'EOF'
+          FBNeoRageX - Steam Deck / Linux
+
+          REQUIRED: Place fbneo_libretro.so next to run.sh
+          Then run: ./run.sh  (no installation needed)
+
+          To add to Steam:
+            Add Non-Steam Game -> Browse -> select run.sh
+
+          Get fbneo_libretro.so from RetroArch Core Downloader (FinalBurn Neo)
+          EOF
+
+      - name: Set executable permission
+        run: chmod +x dist/FBNeoRageX/FBNeoRageX
+
+      - name: Create tar.gz
+        run: |
+          cd dist
+          tar -czf ../FBNeoRageX_SteamDeck.tar.gz FBNeoRageX/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FBNeoRageX-SteamDeck
+          path: FBNeoRageX_SteamDeck.tar.gz
+
+  # ── GitHub Release (태그 push 시 자동 배포) ────────────────
+  release:
+    needs: [ build-windows, build-linux ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FBNeoRageX-Windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FBNeoRageX-SteamDeck
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            FBNeoRageX_Windows.zip
+            FBNeoRageX_SteamDeck.tar.gz
+          body: |
+            ## FBNeoRageX ${{ github.ref_name }}
+
+            ### Windows
+            1. Download `FBNeoRageX_Windows.zip` and extract
+            2. Place `fbneo_libretro.dll` next to `FBNeoRageX.exe`
+            3. Run `FBNeoRageX.exe` — no installation needed
+
+            ### Steam Deck / Linux
+            1. Download `FBNeoRageX_SteamDeck.tar.gz` and extract
+            2. Place `fbneo_libretro.so` next to `run.sh`
+            3. Run `./run.sh` — no installation needed
+
+            Get the core from RetroArch Core Downloader (search: FinalBurn Neo)
