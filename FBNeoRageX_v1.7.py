@@ -48,6 +48,14 @@ CURRENT_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 os.chdir(CURRENT_PATH)
 CONFIG_FILE = os.path.join(CURRENT_PATH, "config.json")
 
+# PyInstaller onefile 번들 감지
+# frozen 실행 시 번들 리소스(dll, assets 등)는 _MEIPASS 임시폴더에 압축 해제됨
+# 사용자 데이터(config, roms, saves)는 exe 옆 CURRENT_PATH 에 유지
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    BUNDLE_PATH = sys._MEIPASS   # 번들 내부 리소스 경로
+else:
+    BUNDLE_PATH = CURRENT_PATH   # 일반 실행 시 동일
+
 # ════════════════════════════════════════════════════════════
 #  설정
 # ════════════════════════════════════════════════════════════
@@ -1681,7 +1689,7 @@ class NeoRageXApp(QMainWindow):
             os.makedirs(_d, exist_ok=True)
         self.setWindowTitle("FBNEORAGEX Core Edition 1.8v")
         self.setFixedSize(1280, 800)
-        _ico_path = os.path.join(CURRENT_PATH, "assets", "Neo.ico")
+        _ico_path = os.path.join(BUNDLE_PATH, "assets", "Neo.ico")
         if os.path.exists(_ico_path):
             icon = QIcon()
             icon.addFile(_ico_path, QSize(16,16))
@@ -3696,7 +3704,8 @@ class NeoRageXApp(QMainWindow):
     #  코어 초기화
     # ════════════════════════════════════════════════════════════
     def _setup_core(self):
-        dll = os.path.join(CURRENT_PATH, CORE_LIB)
+        # frozen exe: DLL은 _MEIPASS, 일반 실행: exe 옆 폴더
+        dll = os.path.join(BUNDLE_PATH, CORE_LIB)
         try:
             self.core=ctypes.CDLL(dll) if IS_LINUX else ctypes.CDLL(dll,winmode=0)
 
