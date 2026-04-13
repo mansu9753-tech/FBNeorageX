@@ -65,7 +65,7 @@ class AppSettings:
     screenshot_path     = os.path.join(CURRENT_PATH, "screenshots")
     audio_volume        = 100
     audio_sample_rate   = 48000
-    audio_buffer_ms     = 48    # DRC 목표 버퍼 크기 (ms). 권장: 32~128
+    audio_buffer_ms     = 64    # DRC 목표 버퍼 크기 (ms). 권장: 32~128
     audio_drc_max       = 0.005 # DRC 최대 보정률 (0.005 = ±0.5%)
     video_scale_mode    = "Fill"
     video_smooth        = False
@@ -3704,8 +3704,14 @@ class NeoRageXApp(QMainWindow):
     #  코어 초기화
     # ════════════════════════════════════════════════════════════
     def _setup_core(self):
-        # frozen exe: DLL은 _MEIPASS, 일반 실행: exe 옆 폴더
-        dll = os.path.join(BUNDLE_PATH, CORE_LIB)
+        # 1순위: 번들 내부(_MEIPASS 또는 스크립트 폴더)
+        # 2순위: exe/스크립트 옆에 별도 배치된 DLL (frozen 시 사용자가 직접 복사한 경우)
+        _bundle_dll  = os.path.join(BUNDLE_PATH,  CORE_LIB)
+        _current_dll = os.path.join(CURRENT_PATH, CORE_LIB)
+        if os.path.exists(_bundle_dll):
+            dll = _bundle_dll
+        else:
+            dll = _current_dll
         try:
             self.core=ctypes.CDLL(dll) if IS_LINUX else ctypes.CDLL(dll,winmode=0)
 
@@ -3953,14 +3959,8 @@ class NeoRageXApp(QMainWindow):
                     else:
                         _afl_free = float(_afl_raw)
                     _afl_fill = 1.0 - _afl_free / _afl_total
-                    # 0.85 미만일 때만 스킵 — 기존 0.70보다 여유를 줘서
-                    # 오디오 드라이버가 느린 PC에서도 프레임이 자주 건너뛰어지지 않도록 함.
-                    # 연속 스킵 최대 2프레임 제한 — 무한 스킵 방지 (입력 딜레이 누적 차단)
-                    _afl_skip_count = getattr(self, '_afl_skip_count', 0)
-                    if _afl_fill > 0.85 and _afl_skip_count < 2:
-                        self._afl_skip_count = _afl_skip_count + 1
+                    if _afl_fill > 0.70:
                         return   # 버퍼 충분 → 이번 틱 건너뜀
-                    self._afl_skip_count = 0   # 프레임 실행 시 카운터 리셋
 
             _afl_fps = state.core_fps if state.core_fps > 0 else 60.0
             _afl_interval = 1.0 / _afl_fps
