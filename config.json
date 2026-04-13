@@ -1,0 +1,65 @@
+{
+  "global_bindings": {
+    "up": 16777235,
+    "down": 16777237,
+    "left": 16777234,
+    "right": 16777236,
+    "a": 83,
+    "b": 65,
+    "c": 68,
+    "d": 70,
+    "e": 71,
+    "f": 72,
+    "start": 49,
+    "coin": 53
+  },
+  "hotkey_bindings": {
+    "save_state": 16777268,
+    "load_state": 16777270,
+    "fast_forward": 16777269,
+    "slot_next": 16777265,
+    "slot_prev": 16777264
+  },
+  "game_bindings": {
+    "kof95": {
+      "up": 16777235,
+      "down": 16777237,
+      "left": 16777234,
+      "right": 16777236,
+      "a": 83,
+      "b": 65,
+      "c": 70,
+      "d": 68,
+      "e": 81,
+      "f": 87,
+      "start": 49,
+      "coin": 53
+    },
+    "dino": {
+      "up": 16777235,
+      "down": 16777237,
+      "left": 16777234,
+      "right": 16777236,
+      "a": 83,
+      "b": 65,
+      "c": 68,
+      "d": 70,
+      "e": 71,
+      "f": 72,
+      "start": 49,
+      "coin": 53
+    }
+  },
+  "settings": {
+    "rom_path": "C:\\Users\\\ub9cc\uc218\\Documents\\ai\\FBNeoragex1.5v\\roms",
+    "preview_path": "C:\\Users\\\ub9cc\uc218\\Documents\\ai\\FBNeoragex1.5v\\previews",
+    "screenshot_path": "C:\\Users\\\ub9cc\uc218\\Documents\\ai\\FBNeoragex1.5v\\screenshots",
+    "audio_volume": 100,
+    "audio_sample_rate": 48000,
+    "video_scale_mode": "Fill",
+    "video_smooth": true,
+    "video_crt_mode": true,
+    "video_crt_intensity": 0.2,
+    "region": "Japan"
+  }
+}
