@@ -82,36 +82,51 @@ jobs:
 
       - name: Write launcher script
         run: |
-          cat > dist/FBNeoRageX/run.sh << 'RUNEOF'
+          python3 - << 'PYEOF'
+          import os, textwrap
+          script = textwrap.dedent("""\
           #!/bin/bash
           SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+          LOG="$SCRIPT_DIR/run.log"
+          exec > >(tee -a "$LOG") 2>&1
+          echo "=== FBNeoRageX launch $(date) ==="
 
-          # fbneo_libretro.so must be in the same folder
           if [ ! -f "$SCRIPT_DIR/fbneo_libretro.so" ]; then
               echo "ERROR: fbneo_libretro.so not found in $SCRIPT_DIR"
-              echo "Place fbneo_libretro.so next to run.sh and try again."
               exit 1
           fi
 
           export LD_LIBRARY_PATH="$SCRIPT_DIR:$SCRIPT_DIR/_internal:$LD_LIBRARY_PATH"
 
-          # Steam Deck: Wayland+EGL 우선 (XWayland GLX 에서 CompatibilityProfile 미지원 우회)
+          # Steam Deck: Wayland+EGL uses EGL which supports CompatibilityProfile on Mesa/AMD
+          # XWayland GLX does NOT expose CompatibilityProfile - causes immediate crash
           if [ -n "$WAYLAND_DISPLAY" ]; then
               export QT_QPA_PLATFORM=wayland
+              export QT_OPENGL=desktop
+              echo "INFO: Using Wayland+EGL (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
           elif [ -n "$DISPLAY" ]; then
               export QT_QPA_PLATFORM=xcb
+              echo "INFO: Using X11 (DISPLAY=$DISPLAY)"
           else
               export DISPLAY=:1
               export QT_QPA_PLATFORM=xcb
+              echo "INFO: No display found, forcing DISPLAY=:1"
           fi
 
           export QT_XCB_NO_MITSHM=1
           export QT_SCALE_FACTOR=1
 
+          echo "INFO: QT_QPA_PLATFORM=$QT_QPA_PLATFORM"
+          echo "INFO: Launching FBNeoRageX..."
           cd "$SCRIPT_DIR"
           exec "$SCRIPT_DIR/FBNeoRageX" "$@"
-          RUNEOF
-          chmod +x dist/FBNeoRageX/run.sh
+          """)
+          out = "dist/FBNeoRageX/run.sh"
+          with open(out, "w", newline="\n") as f:
+              f.write(script)
+          os.chmod(out, 0o755)
+          print("run.sh written OK")
+          PYEOF
 
       - name: Write README
         run: |
