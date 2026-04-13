@@ -82,7 +82,7 @@ jobs:
 
       - name: Write launcher script
         run: |
-          cat > dist/FBNeoRageX/run.sh << 'EOF'
+          cat > dist/FBNeoRageX/run.sh << 'RUNEOF'
           #!/bin/bash
           SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
@@ -95,8 +95,12 @@ jobs:
 
           export LD_LIBRARY_PATH="$SCRIPT_DIR:$SCRIPT_DIR/_internal:$LD_LIBRARY_PATH"
 
+          # Mesa: force OpenGL Compatibility Profile (required for Steam Deck / AMD GPU)
+          export MESA_GL_VERSION_OVERRIDE=3.3COMPAT
+          export MESA_GLSL_VERSION_OVERRIDE=330
+
           if [ -n "$WAYLAND_DISPLAY" ]; then
-              export QT_QPA_PLATFORM=wayland
+              export QT_QPA_PLATFORM=xcb   # GLX needs X11 even on Wayland (XWayland)
           elif [ -n "$DISPLAY" ]; then
               export QT_QPA_PLATFORM=xcb
           else
@@ -109,7 +113,7 @@ jobs:
 
           cd "$SCRIPT_DIR"
           exec "$SCRIPT_DIR/FBNeoRageX" "$@"
-          EOF
+          RUNEOF
           chmod +x dist/FBNeoRageX/run.sh
 
       - name: Write README
