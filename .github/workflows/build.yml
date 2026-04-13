@@ -27,19 +27,21 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller FBNeoRageX_Windows.spec --noconfirm
 
-      - name: Write README
+      - name: Prepare release folder
         run: |
-          echo "FBNeoRageX" > dist\FBNeoRageX\README.txt
-          echo. >> dist\FBNeoRageX\README.txt
-          echo REQUIRED: Place fbneo_libretro.dll next to FBNeoRageX.exe >> dist\FBNeoRageX\README.txt
-          echo Then run FBNeoRageX.exe - no installation needed. >> dist\FBNeoRageX\README.txt
-          echo. >> dist\FBNeoRageX\README.txt
-          echo Get fbneo_libretro.dll from RetroArch Core Downloader (FinalBurn Neo) >> dist\FBNeoRageX\README.txt
+          mkdir release
+          copy dist\FBNeoRageX.exe release\FBNeoRageX.exe
+          echo FBNeoRageX > release\README.txt
+          echo. >> release\README.txt
+          echo REQUIRED: Place fbneo_libretro.dll next to FBNeoRageX.exe >> release\README.txt
+          echo Then run FBNeoRageX.exe - no installation needed. >> release\README.txt
+          echo. >> release\README.txt
+          echo Get fbneo_libretro.dll from RetroArch Core Downloader (FinalBurn Neo) >> release\README.txt
         shell: cmd
 
       - name: Create ZIP
         run: |
-          Compress-Archive -Path dist\FBNeoRageX -DestinationPath FBNeoRageX_Windows.zip -Force
+          Compress-Archive -Path release\* -DestinationPath FBNeoRageX_Windows.zip -Force
         shell: pwsh
 
       - name: Upload artifact
