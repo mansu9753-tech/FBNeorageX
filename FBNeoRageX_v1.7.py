@@ -468,7 +468,8 @@ class EmulatorState:
     video_buffer = None
     width = 320; height = 224; pitch = 0
     pixel_format = 0
-    keys      = [0] * 16
+    keys      = [0] * 16   # P1 입력
+    p2_keys   = [0] * 16   # P2 입력 (넷플레이 클라이언트/2P 로컬)
     is_paused = False
     game_loaded = False
     save_slot = 0
@@ -502,6 +503,169 @@ class EmulatorState:
 state = EmulatorState()
 audio_sink = None   # QAudioSink
 audio_io   = None   # QAudioSink.start() 반환 QIODevice (push 모드)
+
+# ════════════════════════════════════════════════════════════
+#  넷플레이 (LAN P2P, Delay-Based)
+#  Host = P1 로컬 + P2 원격  /  Client = P2 로컬 + P1 원격
+# ════════════════════════════════════════════════════════════
+import socket as _socket
+import threading as _threading
+
+class NetplayManager:
+    """지연 기반 P2P 넷플레이 (TCP, INPUT_DELAY 프레임 딜레이)"""
+    INPUT_DELAY    = 3       # 입력 딜레이 프레임 수
+    DEFAULT_PORT   = 7845
+    CONNECT_TIMEOUT = 10.0  # 접속 대기 타임아웃(초)
+    RECV_TIMEOUT   = 0.12   # 프레임당 원격 입력 수신 최대 대기(초) ≒ 2프레임
+
+    def __init__(self):
+        self.active      = False
+        self.is_host     = False
+        self._sock       = None    # 연결된 소켓 (양방향)
+        self._srv_sock   = None    # 호스트만 사용: 대기 소켓
+        self._lock       = _threading.Lock()
+        self._remote_q   = []      # 수신된 원격 입력 큐
+        self._local_q    = []      # 딜레이 큐 (INPUT_DELAY 프레임 buffering)
+        self._recv_th    = None
+
+    # ── 공개 IP 조회 ──────────────────────────────────────
+    @staticmethod
+    def local_ip() -> str:
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]; s.close(); return ip
+        except:
+            return "127.0.0.1"
+
+    # ── 호스트: 포트 바인드 & 비동기 클라이언트 대기 ────
+    def host_listen(self, port: int = DEFAULT_PORT):
+        """소켓을 바인드하고 accept()를 백그라운드에서 대기."""
+        self._srv_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._srv_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        self._srv_sock.bind(('', port))
+        self._srv_sock.listen(1)
+        self._srv_sock.settimeout(120.0)   # 2분 내 연결 없으면 포기
+        th = _threading.Thread(target=self._accept_loop, daemon=True)
+        th.start()
+
+    def _accept_loop(self):
+        try:
+            conn, _ = self._srv_sock.accept()
+            conn.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+            with self._lock:
+                self._sock = conn
+                self._local_q.clear(); self._remote_q.clear()
+            self.is_host = True
+            self.active  = True
+            self._start_recv()
+            if self._on_connected:
+                self._on_connected(True)   # 메인 스레드 콜백
+        except Exception as e:
+            if self._on_error:
+                self._on_error(str(e))
+        finally:
+            try: self._srv_sock.close()
+            except: pass
+
+    # ── 클라이언트: 호스트에 접속 ────────────────────────
+    def client_connect(self, ip: str, port: int = DEFAULT_PORT):
+        def _conn():
+            try:
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                s.settimeout(self.CONNECT_TIMEOUT)
+                s.connect((ip, port))
+                s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                with self._lock:
+                    self._sock = s
+                    self._local_q.clear(); self._remote_q.clear()
+                self.is_host = False
+                self.active  = True
+                self._start_recv()
+                if self._on_connected:
+                    self._on_connected(False)
+            except Exception as e:
+                if self._on_error:
+                    self._on_error(str(e))
+        _threading.Thread(target=_conn, daemon=True).start()
+
+    # ── 수신 스레드 ───────────────────────────────────────
+    def _start_recv(self):
+        self._recv_th = _threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_th.start()
+
+    def _recv_loop(self):
+        while self.active:
+            data = self._recv_exact(2)
+            if data is None: break
+            bits = struct.unpack('<H', data)[0]
+            with self._lock:
+                self._remote_q.append(bits)
+        self.active = False
+        if self._on_disconnected:
+            self._on_disconnected()
+
+    def _recv_exact(self, n: int):
+        data = b''
+        try:
+            while len(data) < n:
+                chunk = self._sock.recv(n - len(data))
+                if not chunk: return None
+                data += chunk
+        except:
+            return None
+        return data
+
+    # ── 프레임 입력 교환 (에뮬루프에서 호출) ─────────────
+    def exchange(self, local_bits: int):
+        """
+        로컬 입력을 보내고 원격 입력을 받는다.
+        Returns (my_bits, remote_bits) — 딜레이 적용 후 실제 사용할 값.
+        """
+        # 딜레이 큐에 현재 입력 넣기
+        self._local_q.append(local_bits)
+
+        # INPUT_DELAY 프레임이 쌓이기 전에는 0 전송
+        delayed = self._local_q.pop(0) if len(self._local_q) > self.INPUT_DELAY else 0
+
+        # 지연된 로컬 입력 전송
+        try:
+            with self._lock:
+                sock = self._sock
+            if sock:
+                sock.sendall(struct.pack('<H', delayed))
+        except:
+            self.active = False
+            return delayed, 0
+
+        # 원격 입력 수신 대기 (타임아웃 100ms)
+        deadline = time.perf_counter() + self.RECV_TIMEOUT
+        while self.active:
+            with self._lock:
+                if self._remote_q:
+                    return delayed, self._remote_q.pop(0)
+            if time.perf_counter() > deadline:
+                return delayed, 0
+            time.sleep(0.001)
+        return delayed, 0
+
+    # ── 종료 ─────────────────────────────────────────────
+    def stop(self):
+        self.active = False
+        for s in [self._sock, self._srv_sock]:
+            if s:
+                try: s.close()
+                except: pass
+        self._sock = self._srv_sock = None
+        self._local_q.clear(); self._remote_q.clear()
+        for i in range(16): state.p2_keys[i] = 0
+
+    # 콜백 (메인 스레드로 Signal emit 용도 — NeoRageXApp에서 연결)
+    _on_connected    = None   # callable(is_host: bool)
+    _on_disconnected = None   # callable()
+    _on_error        = None   # callable(msg: str)
+
+netplay = NetplayManager()
 _dip_value_bufs: dict = {}
 
 # ════════════════════════════════════════════════════════════
@@ -809,7 +973,9 @@ def audio_batch_cb(data, frames):
     return frames
 
 def input_state_cb(port, device, index, id):
-    if port == 0 and id < 16: return state.keys[id]
+    if id < 16:
+        if port == 0: return state.keys[id]
+        if port == 1: return state.p2_keys[id]
     return 0
 
 ENV_CB   = CFUNCTYPE(c_bool,   c_uint, c_void_p)
@@ -1662,8 +1828,12 @@ QPushButton:pressed {{ background-color: #000033; color: #aabbff; }}
 # ════════════════════════════════════════════════════════════
 class NeoRageXApp(QMainWindow):
     # 백그라운드 스레드 → 메인 스레드 안전 통신용 Signal
-    _sig_save_done     = Signal(str, str)  # (msg, filepath)
-    _sig_save_progress = Signal(int)       # 0-100
+    _sig_save_done        = Signal(str, str)  # (msg, filepath)
+    _sig_save_progress    = Signal(int)       # 0-100
+    # 넷플레이 시그널 (백그라운드 소켓 스레드 → 메인 스레드)
+    _sig_net_connected    = Signal(bool)      # is_host
+    _sig_net_disconnected = Signal()
+    _sig_net_error        = Signal(str)
 
     # NeoRAGE 클래식 체커보드 배경 (paintEvent)
     _CHECKER_A = QColor(38,  38,  52)   # 어두운 칸
@@ -1691,7 +1861,10 @@ class NeoRageXApp(QMainWindow):
                    os.path.join(CURRENT_PATH, "cheats")]:
             os.makedirs(_d, exist_ok=True)
         self.setWindowTitle("FBNEORAGEX Core Edition 1.8v")
-        self.setFixedSize(1280, 800)
+        self._windowed_size = QSize(1280, 800)
+        self._is_fullscreen = False
+        self.resize(self._windowed_size)
+        self.setMinimumSize(800, 600)
         _ico_path = os.path.join(BUNDLE_PATH, "assets", "Neo.ico")
         if os.path.exists(_ico_path):
             icon = QIcon()
@@ -1756,6 +1929,15 @@ class NeoRageXApp(QMainWindow):
         self._gp_gui_timer.timeout.connect(self._poll_gui_gamepad)
         self._gp_gui_timer.start(50)   # 50ms = 20fps 폴링
 
+        # 넷플레이 시그널 연결 (소켓 스레드 → 메인 스레드)
+        self._sig_net_connected.connect(self._on_net_connected)
+        self._sig_net_disconnected.connect(self._on_net_disconnected)
+        self._sig_net_error.connect(self._on_net_error)
+        netplay._on_connected    = lambda h: self._sig_net_connected.emit(h)
+        netplay._on_disconnected = lambda: self._sig_net_disconnected.emit()
+        netplay._on_error        = lambda m: self._sig_net_error.emit(m)
+        self._netplay_status_lbl = None   # 넷플레이 상태 표시 레이블 (탭에서 생성)
+
     # ── 전역 이벤트 필터 ─────────────────────────────────────
     # 모든 게임 키 입력을 여기서 처리 (QApplication 레벨 — 포커스와 무관하게 동작)
     def eventFilter(self, obj, event):
@@ -1776,6 +1958,13 @@ class NeoRageXApp(QMainWindow):
             # Tab: 게임화면 ↔ 메뉴화면 자유 전환 (항상 소비)
             if k == Qt.Key_Tab and not ar:
                 self._toggle_pause()
+                return True
+
+            # Alt+Enter: 전체화면 ↔ 창 전환 (게임 화면 중에만)
+            if (k in (Qt.Key_Return, Qt.Key_Enter) and not ar
+                    and (event.modifiers() & Qt.AltModifier)
+                    and self.stack.currentIndex() == 1):
+                self._toggle_fullscreen()
                 return True
 
             # GUI 화면 방향키 네비게이션 — 게임리스트 Up/Down 만 처리
@@ -1993,6 +2182,11 @@ class NeoRageXApp(QMainWindow):
             except: pass
         state.game_loaded=False; state.is_paused=False
         state.video_buffer=None; state.dip_variables.clear()
+        # 전체화면 중 게임 종료 → 창 모드로 복귀
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+            self.showNormal()
+            self.resize(self._windowed_size)
         self.stack.setCurrentIndex(0)
         self.log("⏹  게임 종료")
 
@@ -2195,6 +2389,7 @@ class NeoRageXApp(QMainWindow):
         stk.addWidget(self._wrap_back(self._tab_machine()))  # 5
         stk.addWidget(self._wrap_back(self._tab_shotfactory())) # 6
         stk.addWidget(self._wrap_back(self._tab_cheats()))   # 7
+        stk.addWidget(self._wrap_back(self._tab_multiplayer())) # 8
         return stk
 
     def _build_options_menu(self) -> QWidget:
@@ -2211,7 +2406,7 @@ class NeoRageXApp(QMainWindow):
             "QPushButton:pressed{color:#00ffff;background:rgba(0,20,80,150);}")
         items = [("CONTROLS",1),("DIRECTORIES",2),("VIDEO OPTIONS",3),
                  ("AUDIO OPTIONS",4),("MACHINE SETTINGS",5),("SHOTS FACTORY",6),
-                 ("CHEATS",7)]
+                 ("CHEATS",7),("MULTIPLAYER",8)]
         for label, idx in items:
             btn = QPushButton(label); btn.setStyleSheet(MENU_STYLE)
             btn.clicked.connect(lambda _,i=idx: self._show_options_page(i))
@@ -2231,7 +2426,8 @@ class NeoRageXApp(QMainWindow):
         return wrapper
 
     _OPTION_TITLES = {0:'OPTIONS',1:'CONTROLS',2:'DIRECTORIES',3:'VIDEO',
-                      4:'AUDIO',5:'MACHINE',6:'SHOT FACTORY'}
+                      4:'AUDIO',5:'MACHINE',6:'SHOT FACTORY',7:'CHEATS',
+                      8:'MULTIPLAYER'}
 
     def _show_options_page(self, idx: int):
         self.options_stack.setCurrentIndex(idx)
@@ -3881,6 +4077,159 @@ class NeoRageXApp(QMainWindow):
                     f"게임: {get_display_name(self.selected_game)}")
             self._auto_load_game_cheats(self.selected_game)
 
+    # ── ⑧ MULTIPLAYER ────────────────────────────────────────
+    def _tab_multiplayer(self) -> QWidget:
+        """LAN P2P 넷플레이 탭"""
+        STYLE_BTN = (
+            "QPushButton{background:#000055;color:#88aaff;border:1px solid #0000cc;"
+            "font-family:'Courier New';font-size:15px;font-weight:bold;"
+            "padding:6px 14px;border-radius:3px;}"
+            "QPushButton:hover{background:#0000aa;color:#ffffff;}"
+            "QPushButton:disabled{color:#445566;border-color:#223355;}")
+        STYLE_INPUT = (
+            "QLineEdit{background:#000022;color:#88ccff;border:1px solid #003388;"
+            "font-family:'Courier New';font-size:15px;padding:4px 8px;}"
+            "QLineEdit:focus{border-color:#0077ff;}")
+        STYLE_LBL_H = "color:#ffdd88;font-family:'Courier New';font-size:15px;font-weight:bold;"
+        STYLE_LBL   = "color:#aabbcc;font-family:'Courier New';font-size:14px;"
+
+        w = QWidget(); w.setStyleSheet("background:transparent;")
+        v = QVBoxLayout(w); v.setContentsMargins(10,8,10,8); v.setSpacing(10)
+
+        # ── 상태 표시 ────────────────────────────────────
+        self._netplay_status_lbl = QLabel("● 오프라인")
+        self._netplay_status_lbl.setStyleSheet("color:#ff4444;font-size:16px;font-weight:bold;")
+        v.addWidget(self._netplay_status_lbl)
+
+        _sep1 = QFrame(); _sep1.setFrameShape(QFrame.HLine); _sep1.setStyleSheet("background:#223355;min-height:1px;max-height:1px;")
+        v.addWidget(_sep1)
+
+        # ── 호스트 섹션 ──────────────────────────────────
+        grp_host = QGroupBox("🖥  HOST  —  게임 방 만들기")
+        gh = QVBoxLayout(grp_host); gh.setSpacing(6)
+
+        ip_row = QHBoxLayout()
+        ip_lbl = QLabel(f"내 IP 주소:"); ip_lbl.setStyleSheet(STYLE_LBL)
+        my_ip  = NetplayManager.local_ip()
+        ip_val = QLabel(f"  {my_ip}"); ip_val.setStyleSheet("color:#00ff88;font-size:15px;font-weight:bold;")
+        port_lbl = QLabel("  포트:"); port_lbl.setStyleSheet(STYLE_LBL)
+        self._np_host_port = QLineEdit(str(NetplayManager.DEFAULT_PORT))
+        self._np_host_port.setFixedWidth(80); self._np_host_port.setStyleSheet(STYLE_INPUT)
+        ip_row.addWidget(ip_lbl); ip_row.addWidget(ip_val)
+        ip_row.addStretch(); ip_row.addWidget(port_lbl); ip_row.addWidget(self._np_host_port)
+        gh.addLayout(ip_row)
+
+        hint = QLabel("친구에게 위 IP와 포트를 알려주면 접속할 수 있습니다.")
+        hint.setStyleSheet(STYLE_LBL); gh.addWidget(hint)
+
+        self._np_btn_host = QPushButton("▶  HOST 시작  (방 만들기)")
+        self._np_btn_host.setStyleSheet(STYLE_BTN)
+        self._np_btn_host.clicked.connect(self._netplay_host)
+        gh.addWidget(self._np_btn_host)
+        v.addWidget(grp_host)
+
+        # ── 클라이언트 섹션 ──────────────────────────────
+        grp_join = QGroupBox("🔗  JOIN  —  방에 참가하기")
+        gj = QVBoxLayout(grp_join); gj.setSpacing(6)
+
+        self._np_host_ip = QLineEdit("192.168.0."); self._np_host_ip.setFixedWidth(160)
+        self._np_host_ip.setStyleSheet(STYLE_INPUT)
+        self._np_join_port = QLineEdit(str(NetplayManager.DEFAULT_PORT))
+        self._np_join_port.setFixedWidth(80); self._np_join_port.setStyleSheet(STYLE_INPUT)
+
+        join_row = QHBoxLayout(); join_row.setSpacing(8)
+        lbl_ip = QLabel("호스트 IP:"); lbl_ip.setStyleSheet(STYLE_LBL)
+        lbl_pt = QLabel("포트:");     lbl_pt.setStyleSheet(STYLE_LBL)
+        join_row.addWidget(lbl_ip); join_row.addWidget(self._np_host_ip)
+        join_row.addWidget(lbl_pt); join_row.addWidget(self._np_join_port)
+        join_row.addStretch()
+        gj.addLayout(join_row)
+
+        self._np_btn_join = QPushButton("🔗  JOIN  (방에 참가)")
+        self._np_btn_join.setStyleSheet(STYLE_BTN)
+        self._np_btn_join.clicked.connect(self._netplay_join)
+        gj.addWidget(self._np_btn_join)
+        v.addWidget(grp_join)
+
+        # ── 연결 해제 ────────────────────────────────────
+        self._np_btn_disc = QPushButton("✖  연결 해제")
+        self._np_btn_disc.setStyleSheet(
+            STYLE_BTN.replace("#000055","#330000").replace("#0000cc","#550000")
+                     .replace("#0000aa","#660000"))
+        self._np_btn_disc.setEnabled(False)
+        self._np_btn_disc.clicked.connect(self._netplay_disconnect)
+        v.addWidget(self._np_btn_disc)
+
+        _sep2 = QFrame(); _sep2.setFrameShape(QFrame.HLine); _sep2.setStyleSheet("background:#223355;min-height:1px;max-height:1px;")
+        v.addWidget(_sep2)
+
+        # ── 안내 ─────────────────────────────────────────
+        guide = QLabel(
+            "사용 방법\n"
+            "1. HOST가 먼저 [HOST 시작] → 대기 상태\n"
+            "2. CLIENT가 IP/포트 입력 후 [JOIN]\n"
+            "3. 둘 다 같은 ROM을 LAUNCH\n"
+            "4. HOST = P1 조작,  CLIENT = P2 조작\n"
+            "5. 게임 종료(ESC) 시 연결 유지 (재시작 가능)\n\n"
+            "⚠  같은 ROM 파일이 양쪽에 있어야 합니다.\n"
+            "⚠  공유기 사용 시 포트포워딩이 필요할 수 있습니다."
+        )
+        guide.setStyleSheet(STYLE_LBL); guide.setWordWrap(True)
+        v.addWidget(guide)
+        v.addStretch()
+
+        # 초기 버튼 상태 설정
+        self._np_btn_host.setEnabled(True)
+        self._np_btn_join.setEnabled(True)
+        self._np_btn_disc.setEnabled(False)
+
+        return w
+
+    def _netplay_host(self):
+        if netplay.active:
+            self.log("🌐 이미 연결됨"); return
+        try:
+            port = int(self._np_host_port.text().strip())
+        except:
+            port = NetplayManager.DEFAULT_PORT
+        try:
+            netplay.host_listen(port)
+            ip = NetplayManager.local_ip()
+            self.log(f"🌐 HOST 대기 중 — {ip}:{port}  클라이언트 접속 기다리는 중...")
+            if self._netplay_status_lbl:
+                self._netplay_status_lbl.setText(f"◌ 대기 중  [{ip}:{port}]")
+                self._netplay_status_lbl.setStyleSheet("color:#ffdd00;font-weight:bold;")
+            self._np_btn_host.setEnabled(False)
+            self._np_btn_join.setEnabled(False)
+        except Exception as e:
+            self.log(f"🌐 HOST 오류: {e}")
+
+    def _netplay_join(self):
+        if netplay.active:
+            self.log("🌐 이미 연결됨"); return
+        ip = self._np_host_ip.text().strip()
+        if not ip:
+            self.log("🌐 호스트 IP를 입력하세요"); return
+        try:
+            port = int(self._np_join_port.text().strip())
+        except:
+            port = NetplayManager.DEFAULT_PORT
+        self.log(f"🌐 {ip}:{port} 에 접속 중...")
+        if self._netplay_status_lbl:
+            self._netplay_status_lbl.setText(f"◌ 접속 중  [{ip}:{port}]")
+            self._netplay_status_lbl.setStyleSheet("color:#ffdd00;font-weight:bold;")
+        self._np_btn_host.setEnabled(False)
+        self._np_btn_join.setEnabled(False)
+        netplay.client_connect(ip, port)
+
+    def _netplay_disconnect(self):
+        netplay.stop()
+        self.log("🌐 넷플레이 연결 해제")
+        if self._netplay_status_lbl:
+            self._netplay_status_lbl.setText("● 오프라인")
+            self._netplay_status_lbl.setStyleSheet("color:#ff4444;")
+        self._refresh_netplay_ui()
+
     def launch_game(self):
         if not self.core or not self.selected_game: return
         if state.is_paused:
@@ -4007,6 +4356,21 @@ class NeoRageXApp(QMainWindow):
                 state.keys[idx] = 1 if (tick % (half * 2)) < half else 0
                 state._turbo_ticks[idx] = tick + 1
 
+            # ── 넷플레이: 입력 교환 ────────────────────────────
+            if netplay.active:
+                local_bits = sum(state.keys[i] << i for i in range(16))
+                local_bits, remote_bits = netplay.exchange(local_bits)
+                if netplay.is_host:
+                    # 호스트 = P1(로컬), P2(원격)
+                    for i in range(16):
+                        state.keys[i]    = (local_bits  >> i) & 1
+                        state.p2_keys[i] = (remote_bits >> i) & 1
+                else:
+                    # 클라이언트 = P2(로컬), P1(원격)
+                    for i in range(16):
+                        state.p2_keys[i] = (local_bits  >> i) & 1
+                        state.keys[i]    = (remote_bits >> i) & 1
+
             runs = 3 if state.fast_forward else 1
             _pre_audio = len(state.audio_pending)   # DRC: retro_run 전 버퍼 크기
             for _ in range(runs): self.core.retro_run()
@@ -4073,6 +4437,53 @@ class NeoRageXApp(QMainWindow):
         except Exception as e:
             self.timer.stop(); self.log(f"⚠ Loop: {e}")
 
+    # ── 전체화면 토글 (Alt+Enter) ────────────────────────────
+    def _toggle_fullscreen(self):
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+            self.showNormal()
+            self.resize(self._windowed_size)
+            self.log("🖥  창 모드")
+        else:
+            self._is_fullscreen = True
+            self._windowed_size = self.size()
+            self.showFullScreen()
+            self.log("🖥  전체화면")
+
+    # ── 넷플레이 시그널 핸들러 (메인 스레드) ────────────────
+    def _on_net_connected(self, is_host: bool):
+        role = "HOST (P1)" if is_host else "CLIENT (P2)"
+        self.log(f"🌐 넷플레이 연결됨 — {role}")
+        if self._netplay_status_lbl:
+            self._netplay_status_lbl.setText(f"● 연결됨  [{role}]")
+            self._netplay_status_lbl.setStyleSheet("color:#00ff88;font-weight:bold;")
+        self._refresh_netplay_ui()
+
+    def _on_net_disconnected(self):
+        self.log("🌐 넷플레이 연결 끊김")
+        netplay.stop()
+        for i in range(16): state.p2_keys[i] = 0
+        if self._netplay_status_lbl:
+            self._netplay_status_lbl.setText("● 오프라인")
+            self._netplay_status_lbl.setStyleSheet("color:#ff4444;")
+        self._refresh_netplay_ui()
+
+    def _on_net_error(self, msg: str):
+        self.log(f"🌐 넷플레이 오류: {msg}")
+        netplay.stop()
+        if self._netplay_status_lbl:
+            self._netplay_status_lbl.setText(f"● 오류: {msg}")
+            self._netplay_status_lbl.setStyleSheet("color:#ff8800;")
+        self._refresh_netplay_ui()
+
+    def _refresh_netplay_ui(self):
+        """넷플레이 탭 UI 버튼 상태 갱신."""
+        if not hasattr(self, '_np_btn_host'): return
+        connected = netplay.active
+        self._np_btn_host.setEnabled(not connected)
+        self._np_btn_join.setEnabled(not connected)
+        self._np_btn_disc.setEnabled(connected)
+
     def keyPressEvent(self, e):
         # 게임 입력은 eventFilter에서 전량 처리 (이중처리 방지)
         super().keyPressEvent(e)
@@ -4094,6 +4505,7 @@ class NeoRageXApp(QMainWindow):
     def closeEvent(self, e):
         save_config(); self.timer.stop()
         self._stop_preview()
+        netplay.stop()
         if self.core:
             try:
                 if state.game_loaded: self.core.retro_unload_game()
