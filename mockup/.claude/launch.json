@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mockup",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "7788", "--directory", "C:\\Users\\만수\\Documents\\ai\\FBNeoragex1.5v\\mockup"],
+      "port": 7788
+    }
+  ]
+}

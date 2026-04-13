@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FBNeoRageX v1.8 — GUI 시안</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background-color: #00001a;
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    color: #ffffff;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 20px;
+  }
+
+  /* ── Checkerboard background ─────────────────────────── */
+  .checker-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background-image:
+      repeating-conic-gradient(
+        #262634 0% 25%,
+        #303044 0% 50%
+      );
+    background-size: 16px 16px;
+  }
+
+  /* ── Main window ─────────────────────────────────────── */
+  .window {
+    position: relative;
+    z-index: 1;
+    width: 900px;
+    background: #00001480;
+    border: 4px solid #4466FF;
+    box-shadow:
+      inset 0 0 0 1px #1e3cb4,
+      inset 0 0 0 2px #7890ff,
+      0 0 24px #4466ff88,
+      0 0 60px #4466ff22;
+  }
+
+  /* ── Title bar ───────────────────────────────────────── */
+  .titlebar {
+    background: linear-gradient(90deg, #0a0a30, #1a1a60, #0a0a30);
+    border-bottom: 4px solid #4466FF;
+    box-shadow: inset 0 -1px 0 #7890ff;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .titlebar-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .title-logo {
+    font-size: 11px;
+    color: #4466FF;
+    text-shadow: 0 0 8px #4466ff, 2px 2px 0 #000;
+    letter-spacing: 2px;
+  }
+
+  .title-ver {
+    font-size: 7px;
+    color: #7890ff;
+    margin-top: 3px;
+  }
+
+  .titlebar-btns {
+    display: flex;
+    gap: 6px;
+  }
+
+  .tbtn {
+    width: 18px; height: 18px;
+    border: 2px solid #4466FF;
+    background: #00001a;
+    color: #4466ff;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tbtn:hover { background: #4466FF; color: #fff; }
+
+  /* ── Toolbar ─────────────────────────────────────────── */
+  .toolbar {
+    background: #00001a;
+    border-bottom: 2px solid #2233aa;
+    padding: 6px 10px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .tool-btn {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px;
+    color: #aabbff;
+    background: #00001a;
+    border: 2px solid #2233aa;
+    padding: 5px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .tool-btn:hover {
+    border-color: #4466FF;
+    color: #ffffff;
+    background: #0a0a40;
+    box-shadow: 0 0 6px #4466ff88;
+  }
+  .tool-btn.active {
+    border-color: #4466FF;
+    color: #ffffff;
+    background: #1a1a50;
+  }
+
+  .tool-sep {
+    width: 2px; height: 22px;
+    background: #2233aa;
+    margin: 0 3px;
+  }
+
+  .tool-search {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px;
+    background: #000010;
+    border: 2px solid #2233aa;
+    color: #aabbff;
+    padding: 5px 8px;
+    width: 160px;
+    outline: none;
+  }
+  .tool-search:focus { border-color: #4466FF; }
+  .tool-search::placeholder { color: #334488; }
+
+  /* ── Main content ────────────────────────────────────── */
+  .content {
+    display: grid;
+    grid-template-columns: 220px 1fr 200px;
+    grid-template-rows: auto;
+    gap: 0;
+    min-height: 480px;
+  }
+
+  /* ── Panel shared styles ─────────────────────────────── */
+  .panel {
+    border-right: 2px solid #2233aa;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-header {
+    font-size: 8px;
+    color: #ffffff;
+    background: linear-gradient(90deg, #0a0a40, #1a1a60);
+    border-bottom: 3px solid #4466FF;
+    box-shadow: inset 0 -1px 0 #7890ff;
+    padding: 7px 10px;
+    letter-spacing: 1px;
+    text-shadow: 0 0 6px #4466ff;
+  }
+
+  /* ── Game list panel ─────────────────────────────────── */
+  .gamelist-panel { }
+
+  .gamelist {
+    flex: 1;
+    overflow: hidden;
+    padding: 4px 0;
+    background: #000010;
+  }
+
+  .game-item {
+    font-size: 6px;
+    padding: 5px 10px;
+    color: #8899cc;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-left: 3px solid transparent;
+  }
+  .game-item:hover {
+    background: #0a0a30;
+    color: #aabbff;
+    border-left-color: #2233aa;
+  }
+  .game-item.selected {
+    background: #1a1a50;
+    color: #ffffff;
+    border-left: 3px solid #4466FF;
+    text-shadow: 0 0 4px #4466ff88;
+  }
+  .game-item.favorite { color: #ffcc44; }
+  .game-item.favorite.selected { color: #ffdd88; }
+
+  .game-count {
+    font-size: 6px;
+    color: #334488;
+    padding: 5px 10px;
+    border-top: 1px solid #1a1a40;
+    background: #000010;
+  }
+
+  /* ── Center panel (game info) ────────────────────────── */
+  .center-panel {
+    border-right: 2px solid #2233aa;
+    display: flex;
+    flex-direction: column;
+    background: #00000a;
+  }
+
+  /* ── Preview screen ──────────────────────────────────── */
+  .preview-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: #000005;
+    border-bottom: 2px solid #2233aa;
+    position: relative;
+    min-height: 280px;
+  }
+
+  .preview-frame {
+    border: 4px solid #4466FF;
+    box-shadow:
+      inset 0 0 0 1px #1e3cb4,
+      0 0 16px #4466ff44;
+    width: 280px;
+    height: 210px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000000;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .preview-neo {
+    font-size: 14px;
+    color: #4466FF;
+    text-shadow: 0 0 12px #4466ff;
+    letter-spacing: 4px;
+  }
+  .preview-sub {
+    font-size: 7px;
+    color: #334488;
+    margin-top: 8px;
+    text-align: center;
+  }
+
+  /* CRT scanlines effect */
+  .preview-frame::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.15) 2px,
+      rgba(0,0,0,0.15) 4px
+    );
+    pointer-events: none;
+  }
+
+  /* ── Game info section ───────────────────────────────── */
+  .game-info {
+    padding: 12px 14px;
+    background: #000010;
+    border-top: 2px solid #2233aa;
+  }
+
+  .info-title {
+    font-size: 9px;
+    color: #ffffff;
+    text-shadow: 0 0 6px #4466ff88;
+    margin-bottom: 8px;
+  }
+
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+  }
+
+  .info-row {
+    font-size: 6px;
+    display: flex;
+    gap: 6px;
+  }
+
+  .info-label { color: #4466FF; min-width: 52px; }
+  .info-value { color: #aabbff; }
+
+  /* ── Right panel ─────────────────────────────────────── */
+  .right-panel {
+    border-right: none;
+    background: #000010;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .events-list {
+    flex: 1;
+    padding: 4px 0;
+    overflow: hidden;
+  }
+
+  .event-item {
+    font-size: 5px;
+    padding: 4px 10px;
+    color: #334477;
+    border-bottom: 1px solid #0a0a20;
+  }
+
+  .event-item.info  { color: #5577aa; }
+  .event-item.warn  { color: #aa8833; }
+  .event-item.ok    { color: #33aa55; }
+  .event-item.error { color: #aa3333; }
+
+  .event-time { color: #2233aa; margin-right: 4px; }
+
+  /* ── Options panel ───────────────────────────────────── */
+  .options-section {
+    padding: 10px;
+    border-top: 2px solid #2233aa;
+  }
+
+  .opt-group-title {
+    font-size: 6px;
+    color: #4466ff;
+    margin-bottom: 6px;
+    border-bottom: 1px solid #2233aa;
+    padding-bottom: 3px;
+  }
+
+  .opt-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 5px;
+  }
+
+  .opt-label {
+    font-size: 5px;
+    color: #8899cc;
+  }
+
+  .opt-toggle {
+    width: 28px; height: 12px;
+    border: 2px solid #4466FF;
+    background: #000010;
+    position: relative;
+    cursor: pointer;
+  }
+
+  .opt-toggle.on {
+    background: #1a1a50;
+  }
+
+  .opt-toggle::after {
+    content: '';
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 6px; height: 6px;
+    background: #334488;
+  }
+
+  .opt-toggle.on::after {
+    left: auto; right: 1px;
+    background: #4466FF;
+    box-shadow: 0 0 4px #4466ff;
+  }
+
+  .opt-val {
+    font-size: 5px;
+    color: #4466FF;
+    border: 1px solid #2233aa;
+    padding: 1px 4px;
+  }
+
+  /* ── Status bar ──────────────────────────────────────── */
+  .statusbar {
+    background: #000015;
+    border-top: 3px solid #4466FF;
+    box-shadow: inset 0 1px 0 #7890ff;
+    padding: 5px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .status-left {
+    font-size: 6px;
+    color: #4466FF;
+    text-shadow: 0 0 4px #4466ff88;
+  }
+
+  .status-right {
+    display: flex;
+    gap: 14px;
+  }
+
+  .status-item {
+    font-size: 5px;
+    color: #334477;
+  }
+
+  .status-item span { color: #4466ff; }
+
+  /* ── Action buttons row ──────────────────────────────── */
+  .action-bar {
+    background: #00001a;
+    border-top: 2px solid #2233aa;
+    padding: 8px 12px;
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  .act-btn {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px;
+    padding: 8px 14px;
+    background: #000020;
+    border: 3px solid #4466FF;
+    color: #4466FF;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    box-shadow: inset 0 0 0 1px #1e3cb4;
+    transition: all 0.1s;
+  }
+
+  .act-btn:hover {
+    background: #4466FF;
+    color: #ffffff;
+    box-shadow:
+      inset 0 0 0 1px #7890ff,
+      0 0 10px #4466ffaa;
+    text-shadow: 0 0 6px #fff;
+  }
+
+  .act-btn.primary {
+    border-color: #4488ff;
+    color: #88aaff;
+    background: #0a0a40;
+  }
+  .act-btn.primary:hover {
+    background: #4488ff;
+    color: #fff;
+  }
+
+  .act-btn.danger {
+    border-color: #ff4444;
+    color: #ff4444;
+  }
+  .act-btn.danger:hover {
+    background: #ff4444;
+    color: #fff;
+    box-shadow: 0 0 10px #ff444488;
+  }
+
+  /* ── Notes ───────────────────────────────────────────── */
+  .note-bar {
+    position: relative;
+    z-index: 1;
+    margin-top: 16px;
+    width: 900px;
+    font-size: 6px;
+    color: #334477;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .note-bar span { color: #4466ff; }
+</style>
+</head>
+<body>
+
+<div class="checker-bg"></div>
+
+<!-- ── Main Window ── -->
+<div class="window">
+
+  <!-- Title Bar -->
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <div>
+        <div class="title-logo">★ FBNeoRageX</div>
+        <div class="title-ver">v1.8.0 — FinalBurn Neo Frontend</div>
+      </div>
+    </div>
+    <div class="titlebar-btns">
+      <div class="tbtn">_</div>
+      <div class="tbtn">□</div>
+      <div class="tbtn">✕</div>
+    </div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <button class="tool-btn active">▶ 실행</button>
+    <button class="tool-btn">⚙ 설정</button>
+    <button class="tool-btn">🕹 코어</button>
+    <div class="tool-sep"></div>
+    <button class="tool-btn">★ 즐겨찾기</button>
+    <button class="tool-btn">♻ 새로고침</button>
+    <div class="tool-sep"></div>
+    <input class="tool-search" type="text" placeholder="🔍  SEARCH ROMS...">
+    <div style="flex:1"></div>
+    <button class="tool-btn">? 도움말</button>
+  </div>
+
+  <!-- Main Content -->
+  <div class="content">
+
+    <!-- Left: Game List -->
+    <div class="panel gamelist-panel">
+      <div class="panel-header">▌ GAME LIST</div>
+      <div class="gamelist">
+        <div class="game-item favorite selected">★ Metal Slug 3</div>
+        <div class="game-item favorite">★ KOF 2002</div>
+        <div class="game-item favorite">★ Garou: MOTW</div>
+        <div class="game-item">Blazing Star</div>
+        <div class="game-item">Last Blade 2</div>
+        <div class="game-item">Shock Troopers</div>
+        <div class="game-item">Samurai Spirits 5</div>
+        <div class="game-item">Neo Turf Masters</div>
+        <div class="game-item">Pulstar</div>
+        <div class="game-item">Real Bout FF 2</div>
+        <div class="game-item">Twinkle Star Sprites</div>
+        <div class="game-item">Nightmare in the Dark</div>
+        <div class="game-item">Magical Drop 3</div>
+        <div class="game-item">Neo Drift Out</div>
+        <div class="game-item">Viewpoint</div>
+        <div class="game-item">Sengoku 3</div>
+        <div class="game-item">Spinmaster</div>
+        <div class="game-item">Cyber-Lip</div>
+        <div class="game-item">Puzzled</div>
+        <div class="game-item">Alpha Mission II</div>
+      </div>
+      <div class="game-count">총 20 / 847 롬</div>
+    </div>
+
+    <!-- Center: Preview + Info -->
+    <div class="center-panel">
+      <div class="panel-header">▌ PREVIEW</div>
+      <div class="preview-area">
+        <div class="preview-frame">
+          <div style="text-align:center">
+            <div class="preview-neo">METAL<br>SLUG 3</div>
+            <div class="preview-sub">SNK PLAYMORE / 2000</div>
+          </div>
+        </div>
+      </div>
+      <div class="game-info">
+        <div class="info-title">METAL SLUG 3 (MSLUG3)</div>
+        <div class="info-grid">
+          <div class="info-row"><span class="info-label">제조사</span><span class="info-value">SNK</span></div>
+          <div class="info-row"><span class="info-label">연도</span><span class="info-value">2000</span></div>
+          <div class="info-row"><span class="info-label">기판</span><span class="info-value">Neo Geo MVS</span></div>
+          <div class="info-row"><span class="info-label">FPS</span><span class="info-value">59.18 Hz</span></div>
+          <div class="info-row"><span class="info-label">해상도</span><span class="info-value">320 × 224</span></div>
+          <div class="info-row"><span class="info-label">사운드</span><span class="info-value">44100 Hz</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Events + Options -->
+    <div class="right-panel">
+      <div class="panel-header">▌ EVENTS</div>
+      <div class="events-list">
+        <div class="event-item ok"><span class="event-time">12:03</span>코어 로드 완료</div>
+        <div class="event-item info"><span class="event-time">12:03</span>ROM 검증 OK</div>
+        <div class="event-item info"><span class="event-time">12:03</span>오디오 초기화</div>
+        <div class="event-item ok"><span class="event-time">12:03</span>DRC 활성화</div>
+        <div class="event-item info"><span class="event-time">12:02</span>847 롬 스캔 완료</div>
+        <div class="event-item warn"><span class="event-time">11:58</span>mslug2.zip 누락</div>
+        <div class="event-item info"><span class="event-time">11:58</span>ROM 폴더 스캔중</div>
+        <div class="event-item ok"><span class="event-time">11:57</span>FBNeo 코어 감지</div>
+        <div class="event-item info"><span class="event-time">11:57</span>앱 시작됨</div>
+      </div>
+
+      <div class="options-section">
+        <div class="opt-group-title">▌ 빠른 설정</div>
+        <div class="opt-row">
+          <span class="opt-label">사운드 DRC</span>
+          <div class="opt-toggle on"></div>
+        </div>
+        <div class="opt-row">
+          <span class="opt-label">스캔라인</span>
+          <div class="opt-toggle"></div>
+        </div>
+        <div class="opt-row">
+          <span class="opt-label">스케일링</span>
+          <div class="opt-toggle on"></div>
+        </div>
+        <div class="opt-row">
+          <span class="opt-label">볼륨</span>
+          <span class="opt-val">80%</span>
+        </div>
+        <div class="opt-row">
+          <span class="opt-label">버퍼</span>
+          <span class="opt-val">64ms</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+
+  <!-- Action Bar -->
+  <div class="action-bar">
+    <button class="act-btn primary">▶ 게임 실행</button>
+    <button class="act-btn">⚙ 게임 설정</button>
+    <button class="act-btn">★ 즐겨찾기</button>
+    <button class="act-btn">🖼 스크린샷</button>
+    <button class="act-btn danger">■ 종료</button>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="statusbar">
+    <div class="status-left">▌ FBNeoRageX v1.8 — READY</div>
+    <div class="status-right">
+      <div class="status-item">코어: <span>fbneo.dll</span></div>
+      <div class="status-item">ROM: <span>C:\Roms\FBNeo</span></div>
+      <div class="status-item">FPS: <span>59.18</span></div>
+      <div class="status-item">오디오: <span>QAudioSink ✓</span></div>
+    </div>
+  </div>
+
+</div><!-- /window -->
+
+<!-- Notes -->
+<div class="note-bar">
+  <div>* <span>체커보드 배경</span>: 16px 격자, #262634 / #303044</div>
+  <div>* <span>테두리</span>: 4px solid #4466FF + inner glow (3-layer)</div>
+  <div>* <span>폰트</span>: Press Start 2P (8px) — 카툰/픽셀 레트로 스타일</div>
+  <div>* <span>색상</span>: 메인 #4466FF / 다크 #1e3cb4 / 하이라이트 #7890ff</div>
+</div>
+
+</body>
+</html>
