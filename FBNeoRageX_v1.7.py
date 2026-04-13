@@ -149,7 +149,10 @@ BOARD_PREFIXES = {
 #  ※ 직접 편집: game_names_db.json  (UTF-8, {"rom이름": "표시이름"})
 #  ※ 한글패치 롬(kr/k 접미사)은 get_display_name()에서 자동 처리
 # ════════════════════════════════════════════════════════════
-GAME_NAMES_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_names_db.json")
+# frozen exe: _internal/ 안에 번들된 버전 우선, 없으면 exe 옆 파일 사용
+_gn_bundle  = os.path.join(BUNDLE_PATH,  "game_names_db.json")
+_gn_current = os.path.join(CURRENT_PATH, "game_names_db.json")
+GAME_NAMES_DB_FILE = _gn_bundle if os.path.exists(_gn_bundle) else _gn_current
 
 def _load_game_names_db() -> dict:
     """game_names_db.json 로드. 파일 없으면 빈 dict 반환."""
@@ -2025,7 +2028,7 @@ class NeoRageXApp(QMainWindow):
     #  UI 레이아웃
     # ════════════════════════════════════════════════════════════
     def _build_ui(self):
-        bg_file = os.path.join(CURRENT_PATH,"assets","background.png").replace('\\','/')
+        bg_file = os.path.join(BUNDLE_PATH,"assets","background.png").replace('\\','/')
         bg_css  = (f"background-image:url('{bg_file}');" if os.path.exists(bg_file)
                    else "background-color:#000005;")
         self.gui_widget.setObjectName("gui_main")
