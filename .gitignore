@@ -13,7 +13,7 @@ dist_steamdeck_direct/
 build/
 *.zip
 *.exe
-*.spec
+# *.spec 은 PyInstaller 빌드 설정 파일이므로 추적 대상에 포함
 
 # ── Python 캐시 ───────────────────────────────────────────
 __pycache__/
