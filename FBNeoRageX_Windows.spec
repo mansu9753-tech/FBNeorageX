@@ -1,12 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for FBNeoRageX (Windows, onedir)
+# PyInstaller spec for FBNeoRageX (Windows, onefile)
 # 빌드: pyinstaller FBNeoRageX_Windows.spec --noconfirm
 #
 # 배포 구조:
-#   dist\FBNeoRageX\
-#     FBNeoRageX.exe          ← 실행 파일
-#     fbneo_libretro.dll      ← 사용자가 여기에 놓기
-#     _internal\              ← Python/Qt/OpenGL 등 번들 (건드리지 않음)
+#   FBNeoRageX.exe          <- 이것 하나만 배포
+#   fbneo_libretro.dll      <- 사용자가 exe 옆에 놓기
 #
 # fbneo_libretro.dll 은 번들에 포함하지 않음 — exe 옆에 별도 배치
 
@@ -83,18 +81,19 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# ── onedir 모드: EXE + _internal 폴더 ────────────────────
-# onefile 대비 장점: 시작 속도 빠름(압축해제 불필요), OpenGL 안정적
+# ── onefile 모드: 모든 파일을 exe 하나로 번들 ─────────────
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     name='FBNeoRageX',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=['Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'],
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -102,15 +101,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets\\Neo.ico' if os.path.exists('assets\\Neo.ico') else None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=['Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'],
-    name='FBNeoRageX',
 )
