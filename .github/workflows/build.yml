@@ -98,19 +98,20 @@ jobs:
 
           export LD_LIBRARY_PATH="$SCRIPT_DIR:$SCRIPT_DIR/_internal:$LD_LIBRARY_PATH"
 
-          # Steam Deck: Wayland+EGL uses EGL which supports CompatibilityProfile on Mesa/AMD
-          # XWayland GLX does NOT expose CompatibilityProfile - causes immediate crash
+          # Steam Deck은 항상 Wayland(gamescope) 환경이지만
+          # Steam에서 실행 시 WAYLAND_DISPLAY가 설정 안 될 수 있음 → wayland-1 강제
+          if [ -z "$WAYLAND_DISPLAY" ]; then
+              export WAYLAND_DISPLAY=wayland-1
+              echo "INFO: WAYLAND_DISPLAY not set, forcing wayland-1"
+          fi
+
           if [ -n "$WAYLAND_DISPLAY" ]; then
               export QT_QPA_PLATFORM=wayland
               export QT_OPENGL=desktop
-              echo "INFO: Using Wayland+EGL (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
-          elif [ -n "$DISPLAY" ]; then
-              export QT_QPA_PLATFORM=xcb
-              echo "INFO: Using X11 (DISPLAY=$DISPLAY)"
+              echo "INFO: Using Wayland (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
           else
-              export DISPLAY=:1
               export QT_QPA_PLATFORM=xcb
-              echo "INFO: No display found, forcing DISPLAY=:1"
+              echo "INFO: Falling back to X11 (DISPLAY=$DISPLAY)"
           fi
 
           export QT_XCB_NO_MITSHM=1
