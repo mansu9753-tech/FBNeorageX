@@ -4110,73 +4110,82 @@ class NeoRageXApp(QMainWindow):
 
     # ── ⑧ MULTIPLAYER ────────────────────────────────────────
     def _tab_multiplayer(self) -> QWidget:
-        """LAN P2P 넷플레이 탭"""
+        """LAN P2P 넷플레이 탭 — 스크롤 가능"""
         STYLE_BTN = (
             "QPushButton{background:#000055;color:#88aaff;border:1px solid #0000cc;"
-            "font-family:'Courier New';font-size:15px;font-weight:bold;"
-            "padding:6px 14px;border-radius:3px;}"
+            "font-family:'Courier New';font-size:13px;font-weight:bold;"
+            "padding:4px 10px;border-radius:3px;}"
             "QPushButton:hover{background:#0000aa;color:#ffffff;}"
             "QPushButton:disabled{color:#445566;border-color:#223355;}")
         STYLE_INPUT = (
             "QLineEdit{background:#000022;color:#88ccff;border:1px solid #003388;"
-            "font-family:'Courier New';font-size:15px;padding:4px 8px;}"
+            "font-family:'Courier New';font-size:13px;padding:3px 6px;}"
             "QLineEdit:focus{border-color:#0077ff;}")
-        STYLE_LBL_H = "color:#ffdd88;font-family:'Courier New';font-size:15px;font-weight:bold;"
-        STYLE_LBL   = "color:#aabbcc;font-family:'Courier New';font-size:14px;"
+        STYLE_LBL = "color:#aabbcc;font-family:'Courier New';font-size:13px;"
 
+        # 외부 wrapper — 스크롤 영역을 담는 컨테이너
+        outer = QWidget(); outer.setStyleSheet("background:transparent;")
+        outer_v = QVBoxLayout(outer); outer_v.setContentsMargins(0,0,0,0); outer_v.setSpacing(0)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}"
+                             "QScrollBar:vertical{background:#000033;width:8px;}"
+                             "QScrollBar::handle:vertical{background:#0044aa;border-radius:4px;}")
+
+        # 실제 내용 위젯
         w = QWidget(); w.setStyleSheet("background:transparent;")
-        v = QVBoxLayout(w); v.setContentsMargins(10,8,10,8); v.setSpacing(10)
+        v = QVBoxLayout(w); v.setContentsMargins(8,6,8,6); v.setSpacing(6)
 
         # ── 상태 표시 ────────────────────────────────────
         self._netplay_status_lbl = QLabel("● 오프라인")
-        self._netplay_status_lbl.setStyleSheet("color:#ff4444;font-size:16px;font-weight:bold;")
+        self._netplay_status_lbl.setStyleSheet("color:#ff4444;font-size:14px;font-weight:bold;")
         v.addWidget(self._netplay_status_lbl)
 
-        _sep1 = QFrame(); _sep1.setFrameShape(QFrame.HLine); _sep1.setStyleSheet("background:#223355;min-height:1px;max-height:1px;")
-        v.addWidget(_sep1)
-
         # ── 호스트 섹션 ──────────────────────────────────
-        grp_host = QGroupBox("🖥  HOST  —  게임 방 만들기")
-        gh = QVBoxLayout(grp_host); gh.setSpacing(6)
+        grp_host = QGroupBox("HOST — 방 만들기")
+        grp_host.setStyleSheet("QGroupBox{font-family:'Courier New';font-size:12px;"
+                               "color:#ffdd88;border:1px solid #334477;margin-top:6px;padding-top:4px;}"
+                               "QGroupBox::title{subcontrol-origin:margin;left:8px;}")
+        gh = QVBoxLayout(grp_host); gh.setSpacing(4); gh.setContentsMargins(6,4,6,4)
 
-        ip_row = QHBoxLayout()
-        ip_lbl = QLabel(f"내 IP 주소:"); ip_lbl.setStyleSheet(STYLE_LBL)
+        ip_row = QHBoxLayout(); ip_row.setSpacing(4)
+        ip_lbl = QLabel("내 IP:"); ip_lbl.setStyleSheet(STYLE_LBL)
         my_ip  = NetplayManager.local_ip()
-        ip_val = QLabel(f"  {my_ip}"); ip_val.setStyleSheet("color:#00ff88;font-size:15px;font-weight:bold;")
-        port_lbl = QLabel("  포트:"); port_lbl.setStyleSheet(STYLE_LBL)
+        ip_val = QLabel(my_ip); ip_val.setStyleSheet("color:#00ff88;font-family:'Courier New';font-size:13px;font-weight:bold;")
+        port_lbl = QLabel("포트:"); port_lbl.setStyleSheet(STYLE_LBL)
         self._np_host_port = QLineEdit(str(NetplayManager.DEFAULT_PORT))
-        self._np_host_port.setFixedWidth(80); self._np_host_port.setStyleSheet(STYLE_INPUT)
+        self._np_host_port.setFixedWidth(70); self._np_host_port.setStyleSheet(STYLE_INPUT)
         ip_row.addWidget(ip_lbl); ip_row.addWidget(ip_val)
         ip_row.addStretch(); ip_row.addWidget(port_lbl); ip_row.addWidget(self._np_host_port)
         gh.addLayout(ip_row)
 
-        hint = QLabel("친구에게 위 IP와 포트를 알려주면 접속할 수 있습니다.")
-        hint.setStyleSheet(STYLE_LBL); gh.addWidget(hint)
-
-        self._np_btn_host = QPushButton("▶  HOST 시작  (방 만들기)")
+        self._np_btn_host = QPushButton("▶  HOST 시작")
         self._np_btn_host.setStyleSheet(STYLE_BTN)
         self._np_btn_host.clicked.connect(self._netplay_host)
         gh.addWidget(self._np_btn_host)
         v.addWidget(grp_host)
 
         # ── 클라이언트 섹션 ──────────────────────────────
-        grp_join = QGroupBox("🔗  JOIN  —  방에 참가하기")
-        gj = QVBoxLayout(grp_join); gj.setSpacing(6)
+        grp_join = QGroupBox("JOIN — 방 참가")
+        grp_join.setStyleSheet("QGroupBox{font-family:'Courier New';font-size:12px;"
+                               "color:#ffdd88;border:1px solid #334477;margin-top:6px;padding-top:4px;}"
+                               "QGroupBox::title{subcontrol-origin:margin;left:8px;}")
+        gj = QVBoxLayout(grp_join); gj.setSpacing(4); gj.setContentsMargins(6,4,6,4)
 
-        self._np_host_ip = QLineEdit("192.168.0."); self._np_host_ip.setFixedWidth(160)
+        self._np_host_ip = QLineEdit("192.168.0.")
         self._np_host_ip.setStyleSheet(STYLE_INPUT)
         self._np_join_port = QLineEdit(str(NetplayManager.DEFAULT_PORT))
-        self._np_join_port.setFixedWidth(80); self._np_join_port.setStyleSheet(STYLE_INPUT)
+        self._np_join_port.setFixedWidth(70); self._np_join_port.setStyleSheet(STYLE_INPUT)
 
-        join_row = QHBoxLayout(); join_row.setSpacing(8)
+        join_row = QHBoxLayout(); join_row.setSpacing(4)
         lbl_ip = QLabel("호스트 IP:"); lbl_ip.setStyleSheet(STYLE_LBL)
         lbl_pt = QLabel("포트:");     lbl_pt.setStyleSheet(STYLE_LBL)
         join_row.addWidget(lbl_ip); join_row.addWidget(self._np_host_ip)
         join_row.addWidget(lbl_pt); join_row.addWidget(self._np_join_port)
-        join_row.addStretch()
         gj.addLayout(join_row)
 
-        self._np_btn_join = QPushButton("🔗  JOIN  (방에 참가)")
+        self._np_btn_join = QPushButton("🔗  JOIN")
         self._np_btn_join.setStyleSheet(STYLE_BTN)
         self._np_btn_join.clicked.connect(self._netplay_join)
         gj.addWidget(self._np_btn_join)
@@ -4191,30 +4200,31 @@ class NeoRageXApp(QMainWindow):
         self._np_btn_disc.clicked.connect(self._netplay_disconnect)
         v.addWidget(self._np_btn_disc)
 
-        _sep2 = QFrame(); _sep2.setFrameShape(QFrame.HLine); _sep2.setStyleSheet("background:#223355;min-height:1px;max-height:1px;")
-        v.addWidget(_sep2)
-
         # ── 안내 ─────────────────────────────────────────
+        _sep2 = QFrame(); _sep2.setFrameShape(QFrame.HLine)
+        _sep2.setStyleSheet("background:#223355;min-height:1px;max-height:1px;")
+        v.addWidget(_sep2)
         guide = QLabel(
-            "사용 방법\n"
-            "1. HOST가 먼저 [HOST 시작] → 대기 상태\n"
-            "2. CLIENT가 IP/포트 입력 후 [JOIN]\n"
-            "3. 둘 다 같은 ROM을 LAUNCH\n"
-            "4. HOST = P1 조작,  CLIENT = P2 조작\n"
-            "5. 게임 종료(ESC) 시 연결 유지 (재시작 가능)\n\n"
-            "⚠  같은 ROM 파일이 양쪽에 있어야 합니다.\n"
-            "⚠  공유기 사용 시 포트포워딩이 필요할 수 있습니다."
+            "① HOST 먼저 [HOST 시작] 클릭\n"
+            "② CLIENT가 IP 입력 후 [JOIN]\n"
+            "③ 양쪽 같은 ROM LAUNCH\n"
+            "   HOST=P1 / CLIENT=P2\n"
+            "⚠ 같은 ROM이 양쪽에 있어야 함\n"
+            "⚠ 외부망: 포트포워딩 필요"
         )
         guide.setStyleSheet(STYLE_LBL); guide.setWordWrap(True)
         v.addWidget(guide)
         v.addStretch()
 
-        # 초기 버튼 상태 설정
+        scroll.setWidget(w)
+        outer_v.addWidget(scroll)
+
+        # 초기 버튼 상태
         self._np_btn_host.setEnabled(True)
         self._np_btn_join.setEnabled(True)
         self._np_btn_disc.setEnabled(False)
 
-        return w
+        return outer
 
     def _netplay_host(self):
         if netplay.active:
