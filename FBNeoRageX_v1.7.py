@@ -996,9 +996,7 @@ class GameCanvas(QOpenGLWidget):
     # GL 진단 메시지 → 메인 윈도우 이벤트 패널로 전달
     gl_log_signal = Signal(str)
 
-    # ── 기본 쉐이더 (쉐이더 파일 없을 때 사용) ──────────────
-    # RetroArch gl2 표준 패스스루 vertex 쉐이더
-    # VertexCoord 는 [0,1] 공간, MVPMatrix 는 ortho(0,1,0,1,-1,1)
+    # ── 기본 쉐이더 — Windows (CompatibilityProfile, GLSL 1.20) ──
     _DEFAULT_VERT = """
 #version 120
 attribute vec4 VertexCoord;
@@ -1027,6 +1025,29 @@ uniform   mat4 MVPMatrix;
 void main() {
     vTexCoord   = TexCoord.xy;
     gl_Position = MVPMatrix * VertexCoord;
+}
+"""
+    # ── 기본 쉐이더 — Linux/SteamDeck (Core Profile, GLSL 3.30) ──
+    # Core Profile 에서는 attribute/varying/gl_FragColor 사용 불가
+    # in/out + texture() 로 대체
+    _DEFAULT_VERT_CORE = """
+#version 330 core
+in  vec4 VertexCoord;
+in  vec4 TexCoord;
+out vec2 vTexCoord;
+uniform mat4 MVPMatrix;
+void main() {
+    vTexCoord   = TexCoord.xy;
+    gl_Position = MVPMatrix * VertexCoord;
+}
+"""
+    _DEFAULT_FRAG_CORE = """
+#version 330 core
+uniform sampler2D Texture;
+in  vec2 vTexCoord;
+out vec4 fragColor;
+void main() {
+    fragColor = texture(Texture, vTexCoord);
 }
 """
 
@@ -1111,8 +1132,14 @@ void main() {
     def _compile_shader(self, path: str):
         """쉐이더 프로그램 컴파일. path가 비어 있으면 기본 패스스루 사용."""
         self._shader_error = ""
-        vert_src = self._DEFAULT_VERT
-        frag_src = self._DEFAULT_FRAG
+        # Linux/SteamDeck: Core Profile → GLSL 3.30 core 기본 셰이더 사용
+        # Windows: CompatibilityProfile → GLSL 1.20 기본 셰이더 사용
+        if IS_LINUX:
+            vert_src = self._DEFAULT_VERT_CORE
+            frag_src = self._DEFAULT_FRAG_CORE
+        else:
+            vert_src = self._DEFAULT_VERT
+            frag_src = self._DEFAULT_FRAG
 
         if path and os.path.isfile(path):
             try:
@@ -1666,7 +1693,7 @@ class BorderPanel(QWidget):
     _BDR2 = QColor(30,  60, 180)   # 내부 어두운 파란선
     _BDR3 = QColor(120, 160, 255)  # 하이라이트 (테두리 안쪽 밝은선)
     _TTL  = QColor(255, 255, 255)  # 타이틀: 흰색
-    _BW   = 12                     # 테두리 두께 (기존 4 × 3)
+    _BW   = 20                     # 테두리 두께
 
     def __init__(self, title='', parent=None):
         super().__init__(parent)
@@ -1676,7 +1703,7 @@ class BorderPanel(QWidget):
         self._tmr.setInterval(12)    # 12ms 간격 → 더 부드럽고 느린 애니메이션
         self._tmr.timeout.connect(self._tick)
         lay = QVBoxLayout(self)
-        top_m = 30 if title else self._BW + 2   # 타이틀 폰트 커진 만큼 여백 증가
+        top_m = 36 if title else self._BW + 2   # 타이틀 폰트 커진 만큼 여백 증가
         lay.setContentsMargins(self._BW+4, top_m, self._BW+4, self._BW+4)
         lay.setSpacing(3)
 
