@@ -1666,7 +1666,7 @@ class BorderPanel(QWidget):
     _BDR2 = QColor(30,  60, 180)   # 내부 어두운 파란선
     _BDR3 = QColor(120, 160, 255)  # 하이라이트 (테두리 안쪽 밝은선)
     _TTL  = QColor(255, 255, 255)  # 타이틀: 흰색
-    _BW   = 4                      # 테두리 두께
+    _BW   = 12                     # 테두리 두께 (기존 4 × 3)
 
     def __init__(self, title='', parent=None):
         super().__init__(parent)
@@ -1676,7 +1676,7 @@ class BorderPanel(QWidget):
         self._tmr.setInterval(12)    # 12ms 간격 → 더 부드럽고 느린 애니메이션
         self._tmr.timeout.connect(self._tick)
         lay = QVBoxLayout(self)
-        top_m = 24 if title else self._BW + 2   # 타이틀 폰트 커진 만큼 여백 증가
+        top_m = 30 if title else self._BW + 2   # 타이틀 폰트 커진 만큼 여백 증가
         lay.setContentsMargins(self._BW+4, top_m, self._BW+4, self._BW+4)
         lay.setSpacing(3)
 
@@ -1739,13 +1739,13 @@ class BorderPanel(QWidget):
             d = min(H - 1, rem); qp.drawLine(0, H-1, 0, int(H-1-d))
 
         if self._prog >= 1.0:
-            # 내부 어두운 선 (입체감)
-            pen2 = QPen(self._BDR2, 1); qp.setPen(pen2)
-            ofs = bw + 1
+            # 내부 어두운 선 (입체감) — 두께 2로 키워 굵은 테두리에 맞춤
+            pen2 = QPen(self._BDR2, 2); qp.setPen(pen2)
+            ofs = bw + 2
             qp.drawRect(ofs, ofs, W - ofs*2 - 1, H - ofs*2 - 1)
             # 맨 안쪽 밝은 하이라이트 선 (NeoRAGE 3중 테두리 느낌)
-            pen3 = QPen(self._BDR3, 1); qp.setPen(pen3)
-            ofs2 = bw + 2
+            pen3 = QPen(self._BDR3, 2); qp.setPen(pen3)
+            ofs2 = bw + 4
             qp.drawRect(ofs2, ofs2, W - ofs2*2 - 1, H - ofs2*2 - 1)
 
         # ── 타이틀 텍스트 ──────────────────────────────────────
