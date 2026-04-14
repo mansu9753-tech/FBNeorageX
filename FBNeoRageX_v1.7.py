@@ -509,70 +509,77 @@ audio_sink = None   # QAudioSink
 audio_io   = None   # QAudioSink.start() 반환 QIODevice (push 모드)
 
 # ════════════════════════════════════════════════════════════
-#  넷플레이 (LAN P2P, Delay-Based)
+#  넷플레이 (LAN P2P, 저지연 예측 방식)
 #  Host = P1 로컬 + P2 원격  /  Client = P2 로컬 + P1 원격
+#
+#  메시지 프로토콜 (1바이트 타입 + 페이로드):
+#    0x00 INPUT  : 2바이트 입력 상태 (uint16 LE)
+#    0x01 LAUNCH : 1바이트 이름길이 + N바이트 ROM 이름 (UTF-8)
 # ════════════════════════════════════════════════════════════
 import socket as _socket
 import threading as _threading
+from queue import Queue as _Queue, Empty as _Empty
 
 class NetplayManager:
-    """지연 기반 P2P 넷플레이 (TCP, INPUT_DELAY 프레임 딜레이)"""
-    INPUT_DELAY    = 3       # 입력 딜레이 프레임 수
-    DEFAULT_PORT   = 7845
-    CONNECT_TIMEOUT = 10.0  # 접속 대기 타임아웃(초)
-    RECV_TIMEOUT   = 0.12   # 프레임당 원격 입력 수신 최대 대기(초) ≒ 2프레임
+    """저지연 P2P 넷플레이
+    - INPUT_DELAY=1 (최소 딜레이)
+    - 예측: 원격 입력 미도착 시 이전 프레임 입력 재사용 (블로킹 없음)
+    - 메시지 프로토콜로 ROM 동기 시작 지원
+    """
+    # 메시지 타입
+    MSG_INPUT  = 0x00
+    MSG_LAUNCH = 0x01
+
+    INPUT_DELAY     = 1      # 프레임 딜레이 (1 = 약 16ms, LAN에 적합)
+    DEFAULT_PORT    = 7845
+    CONNECT_TIMEOUT = 10.0
+    FRAME_TIMEOUT   = 0.020  # 1프레임(16.7ms) + 여유 — 초과 시 예측값 사용
 
     def __init__(self):
         self.active      = False
         self.is_host     = False
-        self._sock       = None    # 연결된 소켓 (양방향)
-        self._srv_sock   = None    # 호스트만 사용: 대기 소켓
+        self._sock       = None
+        self._srv_sock   = None
         self._lock       = _threading.Lock()
-        self._remote_q   = []      # 수신된 원격 입력 큐
-        self._local_q    = []      # 딜레이 큐 (INPUT_DELAY 프레임 buffering)
+        self._input_q    = _Queue()   # 수신된 입력 전용 큐 (Queue.get 으로 blocking 없이 사용)
+        self._local_q    = []         # 딜레이 큐
+        self._last_remote = 0         # 예측용: 마지막으로 수신한 원격 입력
         self._recv_th    = None
 
-    # ── 공개 IP 조회 ──────────────────────────────────────
     @staticmethod
     def local_ip() -> str:
         try:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]; s.close(); return ip
-        except:
-            return "127.0.0.1"
+            s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close(); return ip
+        except: return "127.0.0.1"
 
-    # ── 호스트: 포트 바인드 & 비동기 클라이언트 대기 ────
+    # ── 호스트 ───────────────────────────────────────────
     def host_listen(self, port: int = DEFAULT_PORT):
-        """소켓을 바인드하고 accept()를 백그라운드에서 대기."""
         self._srv_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         self._srv_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         self._srv_sock.bind(('', port))
         self._srv_sock.listen(1)
-        self._srv_sock.settimeout(120.0)   # 2분 내 연결 없으면 포기
-        th = _threading.Thread(target=self._accept_loop, daemon=True)
-        th.start()
+        self._srv_sock.settimeout(120.0)
+        _threading.Thread(target=self._accept_loop, daemon=True).start()
 
     def _accept_loop(self):
         try:
             conn, _ = self._srv_sock.accept()
             conn.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
-            with self._lock:
-                self._sock = conn
-                self._local_q.clear(); self._remote_q.clear()
-            self.is_host = True
-            self.active  = True
+            conn.setsockopt(_socket.SOL_SOCKET,  _socket.SO_SNDBUF, 4096)
+            conn.setsockopt(_socket.SOL_SOCKET,  _socket.SO_RCVBUF, 4096)
+            with self._lock: self._sock = conn
+            self._reset_queues()
+            self.is_host = True; self.active = True
             self._start_recv()
-            if self._on_connected:
-                self._on_connected(True)   # 메인 스레드 콜백
+            if self._on_connected: self._on_connected(True)
         except Exception as e:
-            if self._on_error:
-                self._on_error(str(e))
+            if self._on_error: self._on_error(str(e))
         finally:
             try: self._srv_sock.close()
             except: pass
 
-    # ── 클라이언트: 호스트에 접속 ────────────────────────
+    # ── 클라이언트 ───────────────────────────────────────
     def client_connect(self, ip: str, port: int = DEFAULT_PORT):
         def _conn():
             try:
@@ -580,18 +587,23 @@ class NetplayManager:
                 s.settimeout(self.CONNECT_TIMEOUT)
                 s.connect((ip, port))
                 s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
-                with self._lock:
-                    self._sock = s
-                    self._local_q.clear(); self._remote_q.clear()
-                self.is_host = False
-                self.active  = True
+                s.setsockopt(_socket.SOL_SOCKET,  _socket.SO_SNDBUF, 4096)
+                s.setsockopt(_socket.SOL_SOCKET,  _socket.SO_RCVBUF, 4096)
+                with self._lock: self._sock = s
+                self._reset_queues()
+                self.is_host = False; self.active = True
                 self._start_recv()
-                if self._on_connected:
-                    self._on_connected(False)
+                if self._on_connected: self._on_connected(False)
             except Exception as e:
-                if self._on_error:
-                    self._on_error(str(e))
+                if self._on_error: self._on_error(str(e))
         _threading.Thread(target=_conn, daemon=True).start()
+
+    def _reset_queues(self):
+        self._local_q.clear()
+        self._last_remote = 0
+        while not self._input_q.empty():
+            try: self._input_q.get_nowait()
+            except _Empty: break
 
     # ── 수신 스레드 ───────────────────────────────────────
     def _start_recv(self):
@@ -599,15 +611,30 @@ class NetplayManager:
         self._recv_th.start()
 
     def _recv_loop(self):
+        """타입 기반 메시지 수신 루프"""
         while self.active:
-            data = self._recv_exact(2)
-            if data is None: break
-            bits = struct.unpack('<H', data)[0]
-            with self._lock:
-                self._remote_q.append(bits)
+            hdr = self._recv_exact(1)
+            if hdr is None: break
+            msg_type = hdr[0]
+
+            if msg_type == self.MSG_INPUT:
+                data = self._recv_exact(2)
+                if data is None: break
+                bits = struct.unpack('<H', data)[0]
+                self._input_q.put(bits)
+
+            elif msg_type == self.MSG_LAUNCH:
+                data = self._recv_exact(1)
+                if data is None: break
+                name_len = data[0]
+                name_data = self._recv_exact(name_len)
+                if name_data is None: break
+                rom_name = name_data.decode('utf-8', errors='replace')
+                if self._on_launch:
+                    self._on_launch(rom_name)   # 메인 스레드 Signal emit
+
         self.active = False
-        if self._on_disconnected:
-            self._on_disconnected()
+        if self._on_disconnected: self._on_disconnected()
 
     def _recv_exact(self, n: int):
         data = b''
@@ -616,42 +643,48 @@ class NetplayManager:
                 chunk = self._sock.recv(n - len(data))
                 if not chunk: return None
                 data += chunk
-        except:
-            return None
+        except: return None
         return data
 
-    # ── 프레임 입력 교환 (에뮬루프에서 호출) ─────────────
+    # ── ROM 시작 명령 전송 ────────────────────────────────
+    def send_launch(self, rom_name: str):
+        """호스트 → 클라이언트: ROM 동기 시작 명령"""
+        try:
+            name_b = rom_name.encode('utf-8')[:255]
+            msg = bytes([self.MSG_LAUNCH, len(name_b)]) + name_b
+            with self._lock:
+                if self._sock: self._sock.sendall(msg)
+        except: self.active = False
+
+    # ── 프레임 입력 교환 ─────────────────────────────────
     def exchange(self, local_bits: int):
         """
-        로컬 입력을 보내고 원격 입력을 받는다.
-        Returns (my_bits, remote_bits) — 딜레이 적용 후 실제 사용할 값.
+        로컬 입력 전송 + 원격 입력 수신 (비블로킹 예측 방식).
+        Returns (my_bits, remote_bits)
+        - 원격 입력이 FRAME_TIMEOUT 내 미도착 시 이전 프레임 값으로 예측
+          → 프레임 드롭 없이 부드럽게 진행
         """
-        # 딜레이 큐에 현재 입력 넣기
+        # 딜레이 큐
         self._local_q.append(local_bits)
-
-        # INPUT_DELAY 프레임이 쌓이기 전에는 0 전송
         delayed = self._local_q.pop(0) if len(self._local_q) > self.INPUT_DELAY else 0
 
-        # 지연된 로컬 입력 전송
+        # 입력 전송 (1바이트 타입 + 2바이트 입력)
         try:
+            msg = bytes([self.MSG_INPUT]) + struct.pack('<H', delayed)
             with self._lock:
-                sock = self._sock
-            if sock:
-                sock.sendall(struct.pack('<H', delayed))
+                if self._sock: self._sock.sendall(msg)
         except:
             self.active = False
-            return delayed, 0
+            return delayed, self._last_remote
 
-        # 원격 입력 수신 대기 (타임아웃 100ms)
-        deadline = time.perf_counter() + self.RECV_TIMEOUT
-        while self.active:
-            with self._lock:
-                if self._remote_q:
-                    return delayed, self._remote_q.pop(0)
-            if time.perf_counter() > deadline:
-                return delayed, 0
-            time.sleep(0.001)
-        return delayed, 0
+        # 원격 입력 수신 — FRAME_TIMEOUT 초과 시 예측값(이전 입력) 사용
+        try:
+            remote = self._input_q.get(timeout=self.FRAME_TIMEOUT)
+            self._last_remote = remote
+            return delayed, remote
+        except _Empty:
+            # 네트워크 지연 → 이전 프레임 입력 재사용 (예측)
+            return delayed, self._last_remote
 
     # ── 종료 ─────────────────────────────────────────────
     def stop(self):
@@ -661,13 +694,14 @@ class NetplayManager:
                 try: s.close()
                 except: pass
         self._sock = self._srv_sock = None
-        self._local_q.clear(); self._remote_q.clear()
+        self._reset_queues()
         for i in range(16): state.p2_keys[i] = 0
 
-    # 콜백 (메인 스레드로 Signal emit 용도 — NeoRageXApp에서 연결)
+    # ── 콜백 ─────────────────────────────────────────────
     _on_connected    = None   # callable(is_host: bool)
     _on_disconnected = None   # callable()
     _on_error        = None   # callable(msg: str)
+    _on_launch       = None   # callable(rom_name: str)  ← 신규
 
 netplay = NetplayManager()
 _dip_value_bufs: dict = {}
@@ -1865,6 +1899,7 @@ class NeoRageXApp(QMainWindow):
     _sig_net_connected    = Signal(bool)      # is_host
     _sig_net_disconnected = Signal()
     _sig_net_error        = Signal(str)
+    _sig_net_launch       = Signal(str)       # rom_name: 클라이언트 자동 시작
 
     # NeoRAGE 클래식 체커보드 배경 (paintEvent)
     _CHECKER_A = QColor(38,  38,  52)   # 어두운 칸
@@ -1964,9 +1999,11 @@ class NeoRageXApp(QMainWindow):
         self._sig_net_connected.connect(self._on_net_connected)
         self._sig_net_disconnected.connect(self._on_net_disconnected)
         self._sig_net_error.connect(self._on_net_error)
+        self._sig_net_launch.connect(self._on_net_launch)
         netplay._on_connected    = lambda h: self._sig_net_connected.emit(h)
         netplay._on_disconnected = lambda: self._sig_net_disconnected.emit()
         netplay._on_error        = lambda m: self._sig_net_error.emit(m)
+        netplay._on_launch       = lambda n: self._sig_net_launch.emit(n)
         self._netplay_status_lbl = None   # 넷플레이 상태 표시 레이블 (탭에서 생성)
 
     # ── 전역 이벤트 필터 ─────────────────────────────────────
@@ -4333,6 +4370,9 @@ class NeoRageXApp(QMainWindow):
             self.timer.start(1)   # 1ms: AFL이 내부에서 timing 제어
             # DIP 스위치는 첫 retro_run() 후에 확정되므로 200ms 지연 후 탭 재빌드
             QTimer.singleShot(200, self._rebuild_machine_tab)
+            # 넷플레이 HOST면 클라이언트에게 ROM 시작 명령 전송
+            if netplay.active and netplay.is_host:
+                netplay.send_launch(self.selected_game)
         else:
             self.log("❌ ROM 로드 실패 (neogeo.zip 및 ROM 파일 확인)")
 
@@ -4516,6 +4556,21 @@ class NeoRageXApp(QMainWindow):
             self._netplay_status_lbl.setText(f"● 오류: {msg}")
             self._netplay_status_lbl.setStyleSheet("color:#ff8800;")
         self._refresh_netplay_ui()
+
+    def _on_net_launch(self, rom_name: str):
+        """클라이언트: 호스트가 시작한 ROM을 자동 실행 (메인 스레드)"""
+        self.log(f"🌐 HOST가 {rom_name} 시작 → 자동 실행")
+        # ROM이 목록에 있는지 확인 후 선택·실행
+        for i in range(self.game_list.count()):
+            item = self.game_list.item(i)
+            if item and item.data(Qt.UserRole) == rom_name:
+                self.game_list.setCurrentItem(item)
+                self.select_game(item)
+                break
+        else:
+            # 목록에 없어도 selected_game 직접 설정하고 시도
+            self.selected_game = rom_name
+        self.launch_game()
 
     def _refresh_netplay_ui(self):
         """넷플레이 탭 UI 버튼 상태 갱신."""
