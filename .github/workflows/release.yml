@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package Windows Build
+        run: |
+          cd release
+          zip -j ../FBNeoRageX_Windows.zip FBNeoRageX.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: FBNeoRageX_Windows.zip
+          body: |
+            ## FBNeoRageX ${{ github.ref_name }}
+
+            ### 변경사항
+            - 3D 베벨 UI 테두리 (BorderPanel — QLinearGradient 멀티 페이스)
+            - 모서리 라운드 처리 (r=9, QPainterPath Antialiasing)
+            - 게임리스트 즐겨찾기 필터 탭 (ALL / ★FAV / ☆)
+            - 치트 게임 실행 시 로드 (선택 시 버벅임 제거)
+            - 넷플레이 READY→START 경쟁조건 수정 (m_npPeerReady 플래그)
+            - 넷플레이 READY 300ms 재전송 타이머
+            - 롤백 넷코드 (프레임 스냅샷 + 입력 히스토리)
+
+            ### Windows 설치
+            1. `FBNeoRageX_Windows.zip` 다운로드 후 압축 해제
+            2. `fbneo_libretro.dll` 을 `FBNeoRageX.exe` 옆에 배치
+            3. `FBNeoRageX.exe` 실행 — 설치 불필요 (Qt6 정적 단일 실행파일)
+
+            > 코어는 RetroArch 코어 다운로더에서 **FinalBurn Neo** 검색 후 다운로드
