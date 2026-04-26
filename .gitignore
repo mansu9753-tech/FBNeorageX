@@ -1,0 +1,44 @@
+# Build output directories
+build_win/
+build_static/
+build_linux/
+build_arm/
+
+# Logs
+*.log
+build_result.log
+
+# Qt generated
+*.user
+*.autosave
+.qmake.stash
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.ninja
+*.ninja_deps
+*.ninja_log
+
+# Object / archive files
+*.o
+*.obj
+*.a
+*.lib
+
+# User data (not for repo)
+roms/
+saves/
+screenshots/
+recordings/
+config.json
+
+# Preview media (large files)
+previews/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini

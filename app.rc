@@ -1,0 +1,5 @@
+// app.rc — Windows 실행파일 아이콘 리소스
+// windres(MinGW) 또는 rc.exe(MSVC)에 의해 컴파일됨
+// 탐색기 아이콘: 16/24/32/48/64/128/256px 모두 포함된 ICO
+
+IDI_ICON1 ICON "assets/icon.ico"

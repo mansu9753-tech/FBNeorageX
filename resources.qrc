@@ -1,0 +1,8 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/assets">
+    <file alias="background.png">assets/background.png</file>
+    <file alias="mousepoint.png">assets/mousepoint.png</file>
+    <file alias="loading.png">assets/loading.png</file>
+    <file alias="icon.png">assets/icon.png</file>
+</qresource>
+</RCC>
