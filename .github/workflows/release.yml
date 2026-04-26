@@ -32,50 +32,66 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(nproc)
 
-      - name: Create AppImage
-        env:
-          ARCH: x86_64
+      - name: Bundle Qt libs and package tar.gz
         run: |
-          # linuxdeploy + Qt plugin 다운로드
+          # linuxdeploy + Qt plugin 다운로드 (AppDir 구성 전용, AppImage 출력 안 함)
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
 
-          # AppDir 구성
+          # AppDir 구성 (lib 번들링용)
           mkdir -p AppDir/usr/bin \
                    AppDir/usr/share/applications \
                    AppDir/usr/share/icons/hicolor/256x256/apps
 
           cp build/FBNeoRageX AppDir/usr/bin/FBNeoRageX
-          cp -r assets AppDir/usr/bin/assets
-
-          # 아이콘
           cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/fbneoragex.png
 
-          # .desktop 파일
           cat > AppDir/usr/share/applications/fbneoragex.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=FBNeoRageX
-          Exec=FBNeoRageX
-          Icon=fbneoragex
-          Type=Application
-          Categories=Game;Emulator;
-          Comment=FinalBurn Neo frontend (NeoRageX style)
-          DESKTOP
+[Desktop Entry]
+Name=FBNeoRageX
+Exec=FBNeoRageX
+Icon=fbneoragex
+Type=Application
+Categories=Game;Emulator;
+Comment=FinalBurn Neo frontend (NeoRageX style)
+DESKTOP
 
-          # AppImage 생성 (FUSE 없이 실행)
+          # linuxdeploy로 Qt6 shared lib 수집 (AppImage 생성 없이 AppDir만 채움)
           QMAKE=qmake6 ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
-            --plugin qt \
-            --output appimage
+            --plugin qt || true  # 플러그인 경고는 무시
 
-          mv FBNeoRageX-*.AppImage FBNeoRageX_SteamDeck.AppImage
+          # tar 배포 구조 생성
+          DIST=FBNeoRageX_SteamDeck
+          mkdir -p $DIST/lib
 
-      - name: Upload AppImage artifact
+          cp AppDir/usr/bin/FBNeoRageX $DIST/FBNeoRageX
+          cp -r assets $DIST/assets
+
+          # Qt6 + 플러그인 라이브러리 복사
+          cp -r AppDir/usr/lib/*.so* $DIST/lib/ 2>/dev/null || true
+          if [ -d AppDir/usr/plugins ]; then
+            cp -r AppDir/usr/plugins $DIST/plugins
+          fi
+
+          # 런처 스크립트 (LD_LIBRARY_PATH 설정)
+          cat > $DIST/run.sh << 'SCRIPT'
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+export QT_PLUGIN_PATH="$DIR/plugins"
+exec "$DIR/FBNeoRageX" "$@"
+SCRIPT
+          chmod +x $DIST/run.sh $DIST/FBNeoRageX
+
+          tar -czf FBNeoRageX_SteamDeck.tar.gz $DIST
+
+      - name: Upload tar artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-appimage
-          path: FBNeoRageX_SteamDeck.AppImage
+          name: linux-tar
+          path: FBNeoRageX_SteamDeck.tar.gz
 
   # ── GitHub Release 생성 ────────────────────────────────────
   release:
@@ -87,10 +103,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux AppImage
+      - name: Download Linux tar
         uses: actions/download-artifact@v4
         with:
-          name: linux-appimage
+          name: linux-tar
 
       - name: Package Windows Build
         run: |
@@ -103,7 +119,7 @@ jobs:
           name: ${{ github.ref_name }}
           files: |
             FBNeoRageX_Windows.zip
-            FBNeoRageX_SteamDeck.AppImage
+            FBNeoRageX_SteamDeck.tar.gz
           body: |
             ## FBNeoRageX ${{ github.ref_name }}
 
@@ -122,9 +138,8 @@ jobs:
             3. `FBNeoRageX.exe` 실행 — 설치 불필요 (Qt6 정적 단일 실행파일)
 
             ### Steam Deck / Linux 설치
-            1. `FBNeoRageX_SteamDeck.AppImage` 다운로드
-            2. 실행 권한 부여: `chmod +x FBNeoRageX_SteamDeck.AppImage`
-            3. `fbneo_libretro.so` 를 AppImage 와 같은 폴더에 배치
-            4. AppImage 실행 (더블클릭 또는 터미널에서 `./FBNeoRageX_SteamDeck.AppImage`)
+            1. `FBNeoRageX_SteamDeck.tar.gz` 다운로드 후 압축 해제
+            2. `fbneo_libretro.so` 를 압축 해제된 폴더에 배치
+            3. `./run.sh` 실행 (Qt6 라이브러리 내장, 별도 설치 불필요)
 
             > 코어는 RetroArch 코어 다운로더에서 **FinalBurn Neo** 검색 후 다운로드
