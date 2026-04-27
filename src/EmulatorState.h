@@ -48,6 +48,9 @@ struct EmulatorState {
     std::array<int, 16> keys     = {};
     std::array<int, 16> p2Keys   = {};
 
+    // 연습용 1P↔2P 포트 스왑 (싱글 플레이 연습 모드)
+    bool swapPlayers = false;
+
     // 현재 눌린 키보드 인덱스 집합
     QSet<int>   kbHeld;
 

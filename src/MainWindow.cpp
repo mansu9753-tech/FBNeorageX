@@ -824,6 +824,21 @@ void MainWindow::buildMainTab() {
         log("■ 게임 종료");
     });
     makeBarBtn("⏮  RESET",     false, [this]{ if (m_core) m_core->reset(); });
+
+    // 1P↔2P 스왑 버튼 (토글, F10)
+    m_swapBtn = new QPushButton("⇄  1P");
+    m_swapBtn->setCheckable(true);
+    m_swapBtn->setFixedHeight(36);
+    m_swapBtn->setToolTip("1P / 2P 포트 전환 (F10)  — 싱글 연습용");
+    m_swapBtn->setStyleSheet(
+        "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
+        "font-family:'Courier New';font-size:10px;font-weight:bold;}"
+        "QPushButton:checked{background:#003300;color:#44ff88;border-color:#00cc44;}"
+        "QPushButton:hover{background:#00004d;color:#99ccff;}"
+        "QPushButton:pressed{background:#001166;}");
+    connect(m_swapBtn, &QPushButton::clicked, this, [this]{ toggleSwapPlayers(); });
+    btnBar->addWidget(m_swapBtn);
+
     makeBarBtn("⛶  FULLSCREEN",false, [this]{ toggleFullscreen(); });
     makeBarBtn("✖  EXIT",       false, [this]{ close(); });
     vRoot->addLayout(btnBar);
@@ -2307,6 +2322,17 @@ void MainWindow::launchGame() {
     }
 }
 
+void MainWindow::toggleSwapPlayers() {
+    gState.swapPlayers = !gState.swapPlayers;
+    if (m_swapBtn) {
+        m_swapBtn->setChecked(gState.swapPlayers);
+        m_swapBtn->setText(gState.swapPlayers ? "⇄  2P" : "⇄  1P");
+    }
+    log(gState.swapPlayers
+        ? "⇄ 2P 포트로 전환 (F10 — 1P 복귀)"
+        : "⇄ 1P 포트로 복귀");
+}
+
 void MainWindow::togglePause() {
     if (!gState.gameLoaded) return;
     gState.isPaused = !gState.isPaused;
@@ -2818,6 +2844,12 @@ void MainWindow::leaveGameScreen() {
         m_cursorHidden = false;
     }
 
+    // 게임 종료 시 스왑 상태 리셋
+    if (gState.swapPlayers) {
+        gState.swapPlayers = false;
+        if (m_swapBtn) { m_swapBtn->setChecked(false); m_swapBtn->setText("⇄  1P"); }
+    }
+
     m_stack->setCurrentIndex(0);
     filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
     // 선택된 게임이 있으면 프리뷰 재로드
@@ -2920,6 +2952,9 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
 
     // F9: 녹화 토글
     if (k == Qt::Key_F9)  { toggleRecording(); return; }
+
+    // F10: 1P↔2P 스왑 토글 (싱글 연습 모드)
+    if (k == Qt::Key_F10) { toggleSwapPlayers(); return; }
 
     // F12: 스크린샷
     if (k == Qt::Key_F12) { takeScreenshot(); return; }

@@ -108,6 +108,7 @@ private:
     void togglePause();
     void toggleFullscreen();
     void toggleFastForward(bool on);
+    void toggleSwapPlayers();
 
     // 게임 캔버스 전환 헬퍼 (프리뷰 정지 + 스택 전환 통합)
     void enterGameScreen();   // GUI → 게임 화면 (프리뷰 정지)
@@ -234,7 +235,8 @@ private:
     // ════════════════════════════════════════════════════
     QString          m_selectedGame;
     QString          m_loadedGame;   // 현재 코어에 실제 로드된 롬 이름 (isPaused 재개 판별용)
-    bool             m_isFullscreen = false;
+    bool             m_isFullscreen  = false;
+    QPushButton*     m_swapBtn       = nullptr;  // 1P↔2P 스왑 버튼
     int              m_glFilter     = 0;  // 0=ALL, 1=FAV(즐겨찾기만), 2=☆(미즐겨찾기만)
     QSize            m_windowedSize;
     int              m_stateSlot    = 1;

@@ -366,7 +366,12 @@ void LibretroCore::inputPollCb() {
 int16_t LibretroCore::inputStateCb(unsigned port, unsigned device,
                                     unsigned /*index*/, unsigned id) {
     if (device != RETRO_DEVICE_JOYPAD || id >= 16) return 0;
-    // port 0: 터보/네플레이 처리된 keys 사용 (rawKeys는 터보 미적용)
+    // 1P↔2P 스왑 모드: port 0↔1 교환 (싱글 플레이 연습용)
+    if (gState.swapPlayers) {
+        if (port == 0) return gState.p2Keys[id];
+        if (port == 1) return gState.keys[id];
+    }
+    // port 0: 터보/넷플레이 처리된 keys 사용 (rawKeys는 터보 미적용)
     if (port == 0) return gState.keys[id];
     if (port == 1) return gState.p2Keys[id];
     return 0;
