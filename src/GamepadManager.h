@@ -44,6 +44,11 @@ public:
     // Linux : m_jsBits 누적값, 없으면 -1
     int pollRawForCapture(bool winmm = false);
 
+    // Linux D-패드 전용 비트 (UI 네비게이션용 — 아날로그 드리프트 무관)
+    // Windows에서는 사용 안 함 (항상 0 반환)
+    uint16_t dpadBits() const;
+
+
 signals:
     void connected(int index);
     void disconnected();
@@ -82,7 +87,8 @@ private:
     bool     openJoystick();
     uint16_t readJoystick();
 
-    int      m_jsFd   = -1;
-    uint16_t m_jsBits = 0;
+    int      m_jsFd      = -1;
+    uint16_t m_jsBits    = 0;  // 전체 입력 (아날로그 스틱 + D-패드)
+    uint16_t m_dpadBits  = 0;  // D-패드 전용 (axis 6/7 — UI 네비용)
 #endif
 };

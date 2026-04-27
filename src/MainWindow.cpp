@@ -245,8 +245,16 @@ MainWindow::MainWindow(QWidget* parent)
         static constexpr int REPEAT_RATE =  90; // 반복 간격 (ms)
         static constexpr int TICK        =  16; // 타이머 주기
 
-        int up     = gState.rawKeys[4]; // libretro UP
-        int down   = gState.rawKeys[5]; // libretro DOWN
+        // Linux(스팀덱): D-패드 전용 비트 사용 — 아날로그 스틱 드리프트로 인한 오작동 방지
+        // Windows: rawKeys 사용 (D-패드 + 아날로그 스틱 모두 포함)
+#ifdef Q_OS_LINUX
+        uint16_t dp = m_gamepad ? m_gamepad->dpadBits() : 0;
+        int up   = (dp >> 4) & 1;  // LR_UP = bit 4
+        int down = (dp >> 5) & 1;  // LR_DN = bit 5
+#else
+        int up   = gState.rawKeys[4]; // libretro UP
+        int down = gState.rawKeys[5]; // libretro DOWN
+#endif
         int newDir = (up && !down) ? -1 : (down && !up) ? 1 : 0;
 
         bool moved = false;
@@ -284,8 +292,13 @@ MainWindow::MainWindow(QWidget* parent)
         m_navAWasDown = aDown;
 
         // ── LEFT / RIGHT D-패드 → 페이지 업/다운 ─────────────────
+#ifdef Q_OS_LINUX
+        bool lDown = (dp >> 6) & 1;  // LR_LT = bit 6
+        bool rDown = (dp >> 7) & 1;  // LR_RT = bit 7
+#else
         bool lDown = (gState.rawKeys[6] != 0);  // libretro LEFT
         bool rDown = (gState.rawKeys[7] != 0);  // libretro RIGHT
+#endif
         int  cnt   = m_gameList->count();
 
         auto pageMove = [&](int dir) {

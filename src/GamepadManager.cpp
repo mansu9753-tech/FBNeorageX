@@ -479,16 +479,28 @@ uint16_t GamepadManager::readJoystick() {
             // axis 6: D-패드 X    axis 7: D-패드 Y
             const short DEAD = 8192;  // ~25% 데드존
 
-            if (axis == 0 || axis == 6) {
-                // 왼쪽 스틱 X / D-패드 X → LEFT / RIGHT
+            if (axis == 0) {
+                // 왼쪽 스틱 X → LEFT / RIGHT (게임 입력용)
                 m_jsBits &= ~((1 << LR_LT) | (1 << LR_RT));
-                if (val < -DEAD) m_jsBits |= (1 << LR_LT);   // LEFT
-                if (val >  DEAD) m_jsBits |= (1 << LR_RT);   // RIGHT
-            } else if (axis == 1 || axis == 7) {
-                // 왼쪽 스틱 Y / D-패드 Y → UP / DOWN  (음수=위)
+                if (val < -DEAD) m_jsBits |= (1 << LR_LT);
+                if (val >  DEAD) m_jsBits |= (1 << LR_RT);
+            } else if (axis == 1) {
+                // 왼쪽 스틱 Y → UP / DOWN (게임 입력용, 아날로그 드리프트 가능)
                 m_jsBits &= ~((1 << LR_UP) | (1 << LR_DN));
-                if (val < -DEAD) m_jsBits |= (1 << LR_UP);   // UP
-                if (val >  DEAD) m_jsBits |= (1 << LR_DN);   // DOWN
+                if (val < -DEAD) m_jsBits |= (1 << LR_UP);
+                if (val >  DEAD) m_jsBits |= (1 << LR_DN);
+            } else if (axis == 6) {
+                // D-패드 X → LEFT / RIGHT (게임 + UI 네비용)
+                m_jsBits   &= ~((1 << LR_LT) | (1 << LR_RT));
+                m_dpadBits &= ~((1 << LR_LT) | (1 << LR_RT));
+                if (val < -DEAD) { m_jsBits |= (1 << LR_LT); m_dpadBits |= (1 << LR_LT); }
+                if (val >  DEAD) { m_jsBits |= (1 << LR_RT); m_dpadBits |= (1 << LR_RT); }
+            } else if (axis == 7) {
+                // D-패드 Y → UP / DOWN (게임 + UI 네비용 — 디지털값만, 드리프트 없음)
+                m_jsBits   &= ~((1 << LR_UP) | (1 << LR_DN));
+                m_dpadBits &= ~((1 << LR_UP) | (1 << LR_DN));
+                if (val < -DEAD) { m_jsBits |= (1 << LR_UP); m_dpadBits |= (1 << LR_UP); }
+                if (val >  DEAD) { m_jsBits |= (1 << LR_DN); m_dpadBits |= (1 << LR_DN); }
             } else if (axis == 2) {
                 // LT 트리거 → L2  (쉬는 상태=-32767, 완전 누름=+32767)
                 if (val > 0) m_jsBits |=  (1 << LR_L2);
@@ -501,10 +513,19 @@ uint16_t GamepadManager::readJoystick() {
         }
     }
     if (errno == ENODEV) {
-        ::close(m_jsFd); m_jsFd = -1; m_jsBits = 0;
+        ::close(m_jsFd); m_jsFd = -1; m_jsBits = 0; m_dpadBits = 0;
         if (m_connected) { m_connected = false; emit disconnected(); }
         return 0;
     }
     return m_jsBits;
 }
+
+uint16_t GamepadManager::dpadBits() const {
+#ifdef _WIN32
+    return 0;  // Windows는 UI 네비가 rawKeys 기반이므로 미사용
+#else
+    return m_dpadBits;
+#endif
+}
+
 #endif
