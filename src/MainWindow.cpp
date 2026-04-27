@@ -506,6 +506,32 @@ void MainWindow::buildUi() {
     m_canvas->setMouseTracking(true);   // 버튼 안 눌러도 마우스 이동 감지
     connect(m_canvas, &GameCanvas::glLogMessage, this, &MainWindow::log);
     m_stack->addWidget(m_canvas);
+
+    // ── 1P↔2P 게임 화면 오버레이 ─────────────────────────────
+    m_playerOverlay = new QLabel(m_canvas);
+    m_playerOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_playerOverlay->setStyleSheet(
+        "QLabel{"
+        "  background:rgba(0,60,0,200);"
+        "  color:#44ff88;"
+        "  font-family:'Courier New';"
+        "  font-size:13px;"
+        "  font-weight:bold;"
+        "  padding:5px 12px;"
+        "  border:1px solid #00cc44;"
+        "  border-radius:5px;"
+        "}");
+    m_playerOverlay->hide();
+    m_playerOverlay->raise();
+
+    m_overlayTimer = new QTimer(this);
+    m_overlayTimer->setSingleShot(true);
+    m_overlayTimer->setInterval(1500);
+    connect(m_overlayTimer, &QTimer::timeout, this, [this]{
+        m_playerOverlay->hide();
+    });
+
+    m_canvas->installEventFilter(this);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2324,10 +2350,47 @@ void MainWindow::launchGame() {
 
 void MainWindow::toggleSwapPlayers() {
     gState.swapPlayers = !gState.swapPlayers;
+
     if (m_swapBtn) {
         m_swapBtn->setChecked(gState.swapPlayers);
         m_swapBtn->setText(gState.swapPlayers ? "⇄  2P" : "⇄  1P");
     }
+
+    // ── 게임 화면 오버레이 업데이트 ──────────────────────────
+    if (m_playerOverlay && m_canvas) {
+        m_overlayTimer->stop();
+
+        if (gState.swapPlayers) {
+            // 2P 모드: 초록 배지 — 계속 표시
+            m_playerOverlay->setStyleSheet(
+                "QLabel{"
+                "  background:rgba(0,60,0,200);"
+                "  color:#44ff88;"
+                "  font-family:'Courier New';font-size:13px;font-weight:bold;"
+                "  padding:5px 12px;border:1px solid #00cc44;border-radius:5px;"
+                "}");
+            m_playerOverlay->setText("◉  2P MODE");
+        } else {
+            // 1P 복귀: 파란 배지 — 1.5초 후 자동 숨김
+            m_playerOverlay->setStyleSheet(
+                "QLabel{"
+                "  background:rgba(0,20,80,200);"
+                "  color:#66aaff;"
+                "  font-family:'Courier New';font-size:13px;font-weight:bold;"
+                "  padding:5px 12px;border:1px solid #4477cc;border-radius:5px;"
+                "}");
+            m_playerOverlay->setText("◎  1P MODE");
+            m_overlayTimer->start();
+        }
+
+        m_playerOverlay->adjustSize();
+        m_playerOverlay->move(
+            m_canvas->width()  - m_playerOverlay->width()  - 12,
+            12);
+        m_playerOverlay->show();
+        m_playerOverlay->raise();
+    }
+
     log(gState.swapPlayers
         ? "⇄ 2P 포트로 전환 (F10 — 1P 복귀)"
         : "⇄ 1P 포트로 복귀");
@@ -2849,6 +2912,8 @@ void MainWindow::leaveGameScreen() {
         gState.swapPlayers = false;
         if (m_swapBtn) { m_swapBtn->setChecked(false); m_swapBtn->setText("⇄  1P"); }
     }
+    if (m_overlayTimer) m_overlayTimer->stop();
+    if (m_playerOverlay) m_playerOverlay->hide();
 
     m_stack->setCurrentIndex(0);
     filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
@@ -2885,6 +2950,18 @@ void MainWindow::hideCursor() {
 //  앱 전역 이벤트 필터 — 탭키 GUI↔게임 전환
 // ════════════════════════════════════════════════════════════
 bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
+    // ── 캔버스 리사이즈 → 오버레이 재배치 ────────────────────
+    if (obj == m_canvas && ev->type() == QEvent::Resize && m_playerOverlay) {
+        auto reposition = [this]{
+            if (!m_playerOverlay->isVisible()) return;
+            m_playerOverlay->adjustSize();
+            m_playerOverlay->move(
+                m_canvas->width()  - m_playerOverlay->width()  - 12,
+                12);
+        };
+        reposition();
+    }
+
     // ── 마우스 이동 / 클릭 → 커서 타이머 리셋 ─────────────────
     switch (ev->type()) {
     case QEvent::MouseMove:

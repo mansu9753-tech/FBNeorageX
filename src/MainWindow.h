@@ -237,6 +237,8 @@ private:
     QString          m_loadedGame;   // 현재 코어에 실제 로드된 롬 이름 (isPaused 재개 판별용)
     bool             m_isFullscreen  = false;
     QPushButton*     m_swapBtn       = nullptr;  // 1P↔2P 스왑 버튼
+    QLabel*          m_playerOverlay = nullptr;  // 게임 화면 내 플레이어 표시 오버레이
+    QTimer*          m_overlayTimer  = nullptr;  // 1P 복귀 시 오버레이 자동 숨김 타이머
     int              m_glFilter     = 0;  // 0=ALL, 1=FAV(즐겨찾기만), 2=☆(미즐겨찾기만)
     QSize            m_windowedSize;
     int              m_stateSlot    = 1;
