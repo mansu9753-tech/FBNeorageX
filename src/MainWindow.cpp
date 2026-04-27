@@ -291,7 +291,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
         m_navAWasDown = aDown;
 
-        // ── LEFT / RIGHT D-패드 → 페이지 업/다운 ─────────────────
+        // ── LEFT / RIGHT D-패드 → 페이지 업/다운 (길게 누르면 반복) ──
 #ifdef Q_OS_LINUX
         bool lDown = (dp >> 6) & 1;  // LR_LT = bit 6
         bool rDown = (dp >> 7) & 1;  // LR_RT = bit 7
@@ -307,17 +307,28 @@ MainWindow::MainWindow(QWidget* parent)
             int pageSize = (rowH > 0)
                 ? std::max(1, m_gameList->viewport()->height() / rowH)
                 : 10;
-            int cur2    = std::max(0, m_gameList->currentRow());
-            int newRow  = std::clamp(cur2 + dir * pageSize, 0, cnt - 1);
+            int cur2   = std::max(0, m_gameList->currentRow());
+            int newRow = std::clamp(cur2 + dir * pageSize, 0, cnt - 1);
             m_gameList->setCurrentRow(newRow);
             m_gameList->scrollToItem(m_gameList->item(newRow),
                                      QAbstractItemView::PositionAtTop);
         };
 
-        if (lDown && !m_navLWasDown) pageMove(-1);  // Page Up
-        if (rDown && !m_navRWasDown) pageMove( 1);  // Page Down
-        m_navLWasDown = lDown;
-        m_navRWasDown = rDown;
+        // 상/하와 동일한 반복 타이밍: 첫 입력 즉시 → 380ms 후 90ms 간격 반복
+        int newHDir = (lDown && !rDown) ? -1 : (rDown && !lDown) ? 1 : 0;
+        bool hMoved = false;
+        if (newHDir != m_navHDir) {
+            m_navHDir      = newHDir;
+            m_navHRepeatMs = 0;
+            hMoved = (newHDir != 0);
+        } else if (m_navHDir != 0) {
+            m_navHRepeatMs += TICK;
+            if (m_navHRepeatMs >= REPEAT_INIT) {
+                int phase = (m_navHRepeatMs - REPEAT_INIT) % REPEAT_RATE;
+                hMoved = (phase < TICK);
+            }
+        }
+        if (hMoved) pageMove(m_navHDir);
     });
     m_uiNavTimer->start();
 

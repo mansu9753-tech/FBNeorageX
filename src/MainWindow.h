@@ -254,11 +254,11 @@ private:
 
     // ── UI 게임패드 네비게이션 (D-패드로 게임목록 탐색) ──────────
     QTimer*          m_uiNavTimer   = nullptr;
-    int              m_navDir       = 0;    // -1=UP, 0=없음, 1=DOWN
-    int              m_navRepeatMs  = 0;    // 방향 유지 누적 시간(ms)
-    bool             m_navAWasDown  = false; // A버튼 이전 상태 (엣지 감지)
-    bool             m_navLWasDown  = false; // LEFT 버튼 이전 상태 (페이지 업)
-    bool             m_navRWasDown  = false; // RIGHT 버튼 이전 상태 (페이지 다운)
+    int              m_navDir       = 0;    // 수직: -1=UP, 0=없음, 1=DOWN
+    int              m_navRepeatMs  = 0;    // 수직 방향 유지 누적 시간(ms)
+    int              m_navHDir      = 0;    // 수평: -1=LEFT, 0=없음, 1=RIGHT
+    int              m_navHRepeatMs = 0;    // 수평 방향 유지 누적 시간(ms)
+    bool             m_navAWasDown  = false;  // A버튼 이전 상태 (엣지 감지)
 
     // ── 코어 / 오디오 / 치트 / 게임패드 ─────────────────
     LibretroCore*    m_core    = nullptr;
