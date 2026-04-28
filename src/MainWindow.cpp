@@ -2799,15 +2799,21 @@ void MainWindow::togglePreviewRecord() {
         stopRecording();
         // 녹화 파일을 previews/{rom}.mp4 로 복사/이동
         // (startRecording에서 저장한 경로를 gState에 보관)
-        if (!gState.lastRecordPath.isEmpty() && !m_selectedGame.isEmpty()) {
-            QDir().mkpath(gSettings.previewPath);
-            QString dest = gSettings.previewPath + "/" + m_selectedGame + ".mp4";
-            QFile::remove(dest);   // 기존 파일 덮어씌움
-            if (QFile::copy(gState.lastRecordPath, dest))
-                log("🎬 프리뷰 영상 저장: " + dest);
-            else
-                log("🎬 프리뷰 영상 복사 실패 (원본: " + gState.lastRecordPath + ")");
-            gState.lastRecordPath.clear();
+        QString src = gState.lastRecordPath;
+        gState.lastRecordPath.clear();
+
+        if (!src.isEmpty() && !m_selectedGame.isEmpty()) {
+            if (!QFile::exists(src)) {
+                log("🎬 프리뷰 녹화 실패 — 저장된 파일 없음");
+            } else {
+                QDir().mkpath(gSettings.previewPath);
+                QString dest = gSettings.previewPath + "/" + m_selectedGame + ".mp4";
+                QFile::remove(dest);
+                if (QFile::copy(src, dest))
+                    log("🎬 프리뷰 영상 저장: " + dest);
+                else
+                    log("🎬 프리뷰 영상 복사 실패 — 원본: " + src);
+            }
         }
     } else {
         // 녹화 시작
@@ -2857,15 +2863,43 @@ void MainWindow::startRecording() {
     m_recorder->setOutputLocation(QUrl::fromLocalFile(outPath));
     m_recorder->setVideoFrameRate(gState.coreFps > 0 ? gState.coreFps : 60.0);
 
-    connect(m_recorder, &QMediaRecorder::errorOccurred, this,
-        [this](QMediaRecorder::Error, const QString& msg){
+    // Windows Media Foundation: record() 전에 해상도 필수 세팅
+    if (gState.videoWidth > 0 && gState.videoHeight > 0)
+        m_recorder->setVideoResolution(
+            static_cast<int>(gState.videoWidth),
+            static_cast<int>(gState.videoHeight));
+
+    // ── 즉시 에러 감지용 임시 커넥션 ─────────────────────────
+    // record() 내부에서 동기적으로 errorOccurred 가 발생할 수 있으므로
+    // 먼저 플래그를 세우고, 성공 확인 후 영구 핸들러로 교체
+    bool startFailed = false;
+    auto tmpConn = connect(m_recorder, &QMediaRecorder::errorOccurred, this,
+        [this, &startFailed](QMediaRecorder::Error, const QString& msg){
+            startFailed = true;
             log("🔴 녹화 오류: " + msg);
-            stopRecording();
         });
 
     m_recorder->record();
+    disconnect(tmpConn);
+
+    if (startFailed) {
+        // 즉시 실패 — 리소스 정리 후 복귀 (isRecording 은 false 유지)
+        m_recorder->deleteLater();      m_recorder      = nullptr;
+        m_captureSession->deleteLater();m_captureSession = nullptr;
+        m_videoInput = nullptr;
+        m_audioInput = nullptr;
+        return;
+    }
+
+    // 영구 에러 핸들러 (녹화 중 발생하는 런타임 오류용)
+    connect(m_recorder, &QMediaRecorder::errorOccurred, this,
+        [this](QMediaRecorder::Error, const QString& msg){
+            log("🔴 녹화 런타임 오류: " + msg);
+            stopRecording();
+        });
+
     gState.isRecording    = true;
-    gState.lastRecordPath = outPath;   // togglePreviewRecord 에서 복사용
+    gState.lastRecordPath = outPath;
     gState.audioRecBuf.clear();
 
     if (m_canvas) m_canvas->setRecording(true);
