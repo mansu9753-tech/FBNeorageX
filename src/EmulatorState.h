@@ -89,7 +89,8 @@ struct EmulatorState {
 
     // ── 녹화 ──────────────────────────────────────────────
     std::atomic<bool> isRecording{false};
-    QByteArray        audioRecBuf;   // 녹화용 오디오 복사본 (main thread만 접근)
+    QByteArray        audioRecBuf;      // 녹화용 오디오 복사본 (main thread만 접근)
+    QString           lastRecordPath;   // 마지막 녹화 파일 경로 (프리뷰 복사용)
 
     // 싱글톤 접근
     static EmulatorState& instance() {

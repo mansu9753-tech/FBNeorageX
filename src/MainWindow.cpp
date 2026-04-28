@@ -1710,36 +1710,55 @@ void MainWindow::buildShotsPage(QWidget* page) {
     auto* line = new QFrame; line->setFrameShape(QFrame::HLine);
     line->setStyleSheet("color:#223366;"); v->addWidget(line);
 
-    // 스크린샷
+    auto groupStyle = []{
+        return QString(
+            "QGroupBox{color:#4488cc;border:1px solid #223366;"
+            "border-radius:2px;margin-top:14px;padding:6px;"
+            "font-family:'Courier New';font-size:10px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}");
+    };
+    auto hintStyle = []{ return QString("color:#446688;font-family:'Courier New';font-size:9px;"); };
+
+    // ── 스크린샷 ──────────────────────────────────────────
     QGroupBox* shotGroup = new QGroupBox("SCREENSHOT");
-    shotGroup->setStyleSheet("QGroupBox{color:#4488cc;border:1px solid #223366;"
-        "border-radius:2px;margin-top:14px;padding:6px;"
-        "font-family:'Courier New';font-size:10px;}"
-        "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}");
+    shotGroup->setStyleSheet(groupStyle());
     QVBoxLayout* sgV = new QVBoxLayout(shotGroup); sgV->setSpacing(6);
-    QLabel* shotHint = new QLabel("게임 중 F8 또는 아래 버튼으로 스크린샷 촬영");
-    shotHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-    shotHint->setWordWrap(true);
+    QLabel* shotHint = new QLabel("게임 중 F12 또는 아래 버튼 — screenshots/{rom}_{timestamp}.png");
+    shotHint->setStyleSheet(hintStyle()); shotHint->setWordWrap(true);
     sgV->addWidget(shotHint);
-    QPushButton* shotBtn = new QPushButton("📷  TAKE SCREENSHOT");
-    shotBtn->setStyleSheet(btnStyle(true)); shotBtn->setFixedHeight(34);
+    QPushButton* shotBtn = new QPushButton("📷  TAKE SCREENSHOT  (F12)");
+    shotBtn->setStyleSheet(btnStyle(false)); shotBtn->setFixedHeight(34);
     connect(shotBtn, &QPushButton::clicked, this, &MainWindow::takeScreenshot);
     sgV->addWidget(shotBtn);
+
+    QLabel* prevShotHint = new QLabel("아래 버튼: 현재 프레임을 previews/{rom}.png 로 저장 (기존 덮어씌움)");
+    prevShotHint->setStyleSheet(hintStyle()); prevShotHint->setWordWrap(true);
+    sgV->addWidget(prevShotHint);
+    QPushButton* prevShotBtn = new QPushButton("🖼  SAVE AS PREVIEW IMAGE");
+    prevShotBtn->setStyleSheet(btnStyle(true)); prevShotBtn->setFixedHeight(34);
+    connect(prevShotBtn, &QPushButton::clicked, this, &MainWindow::savePreviewShot);
+    sgV->addWidget(prevShotBtn);
     v->addWidget(shotGroup);
 
-    // 녹화
+    // ── 녹화 ─────────────────────────────────────────────
     QGroupBox* recGroup = new QGroupBox("VIDEO RECORD");
-    recGroup->setStyleSheet(shotGroup->styleSheet());
+    recGroup->setStyleSheet(groupStyle());
     QVBoxLayout* rgV = new QVBoxLayout(recGroup); rgV->setSpacing(6);
-    QLabel* recHint = new QLabel("게임 중 F9 또는 아래 버튼으로 MP4 녹화 시작/정지\n"
-                                 "파일: Record Path/{romname}_{timestamp}.mp4");
-    recHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-    recHint->setWordWrap(true);
+    QLabel* recHint = new QLabel("게임 중 F9 또는 아래 버튼 — recordings/{rom}_{timestamp}.mp4");
+    recHint->setStyleSheet(hintStyle()); recHint->setWordWrap(true);
     rgV->addWidget(recHint);
-    QPushButton* recBtn = new QPushButton("⏺  START / STOP RECORDING");
+    QPushButton* recBtn = new QPushButton("⏺  START / STOP RECORDING  (F9)");
     recBtn->setStyleSheet(btnStyle(false)); recBtn->setFixedHeight(34);
     connect(recBtn, &QPushButton::clicked, this, &MainWindow::toggleRecording);
     rgV->addWidget(recBtn);
+
+    QLabel* prevRecHint = new QLabel("아래 버튼: 녹화 시작 → 다시 누르면 previews/{rom}.mp4 로 저장 (기존 덮어씌움)");
+    prevRecHint->setStyleSheet(hintStyle()); prevRecHint->setWordWrap(true);
+    rgV->addWidget(prevRecHint);
+    QPushButton* prevRecBtn = new QPushButton("🎬  RECORD PREVIEW VIDEO");
+    prevRecBtn->setStyleSheet(btnStyle(true)); prevRecBtn->setFixedHeight(34);
+    connect(prevRecBtn, &QPushButton::clicked, this, &MainWindow::togglePreviewRecord);
+    rgV->addWidget(prevRecBtn);
     v->addWidget(recGroup);
 
     v->addStretch();
@@ -2740,6 +2759,63 @@ void MainWindow::takeScreenshot() {
     else                log("📷 스크린샷 저장 실패");
 }
 
+// ── 프리뷰 이미지 저장 ───────────────────────────────────────
+void MainWindow::savePreviewShot() {
+    if (!gState.gameLoaded || gState.videoWidth == 0) {
+        log("프리뷰 저장: 프레임 없음 (게임 실행 중이 아님)"); return;
+    }
+    if (m_selectedGame.isEmpty()) {
+        log("프리뷰 저장: 선택된 게임 없음"); return;
+    }
+
+    int w = static_cast<int>(gState.videoWidth);
+    int h = static_cast<int>(gState.videoHeight);
+    QImage img;
+    if (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
+        img = QImage(
+            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
+            w, h, static_cast<int>(gState.videoPitch),
+            QImage::Format_RGB32).copy();
+    } else {
+        img = QImage(
+            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
+            w, h, static_cast<int>(gState.videoPitch),
+            QImage::Format_RGB16).copy();
+        img = img.convertToFormat(QImage::Format_RGB32);
+    }
+
+    QDir().mkpath(gSettings.previewPath);
+    QString path = gSettings.previewPath + "/" + m_selectedGame + ".png";
+    if (img.save(path))
+        log("🖼 프리뷰 저장: " + path);
+    else
+        log("🖼 프리뷰 저장 실패: " + path);
+}
+
+// ── 프리뷰 영상 녹화 토글 ────────────────────────────────────
+void MainWindow::togglePreviewRecord() {
+    if (gState.isRecording) {
+        // 녹화 중이면 정지
+        stopRecording();
+        // 녹화 파일을 previews/{rom}.mp4 로 복사/이동
+        // (startRecording에서 저장한 경로를 gState에 보관)
+        if (!gState.lastRecordPath.isEmpty() && !m_selectedGame.isEmpty()) {
+            QDir().mkpath(gSettings.previewPath);
+            QString dest = gSettings.previewPath + "/" + m_selectedGame + ".mp4";
+            QFile::remove(dest);   // 기존 파일 덮어씌움
+            if (QFile::copy(gState.lastRecordPath, dest))
+                log("🎬 프리뷰 영상 저장: " + dest);
+            else
+                log("🎬 프리뷰 영상 복사 실패 (원본: " + gState.lastRecordPath + ")");
+            gState.lastRecordPath.clear();
+        }
+    } else {
+        // 녹화 시작
+        startRecording();
+        log("🎬 프리뷰 녹화 시작 — 완료 후 다시 버튼을 누르면 previews/ 에 저장됩니다");
+    }
+}
+
 // ════════════════════════════════════════════════════════════
 //  녹화 (Phase 8)
 // ════════════════════════════════════════════════════════════
@@ -2788,7 +2864,8 @@ void MainWindow::startRecording() {
         });
 
     m_recorder->record();
-    gState.isRecording = true;
+    gState.isRecording    = true;
+    gState.lastRecordPath = outPath;   // togglePreviewRecord 에서 복사용
     gState.audioRecBuf.clear();
 
     if (m_canvas) m_canvas->setRecording(true);

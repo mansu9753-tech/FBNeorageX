@@ -118,6 +118,8 @@ private:
     void saveState(int slot);
     void loadState(int slot);
     void takeScreenshot();
+    void savePreviewShot();        // 현재 프레임을 previews/{rom}.png 로 저장
+    void togglePreviewRecord();    // previews/{rom}.mp4 녹화 시작/정지
 
     // ── 설정 적용 ────────────────────────────────────────
     void applySettings();
