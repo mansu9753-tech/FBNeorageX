@@ -25,19 +25,10 @@
 #include <QKeyEvent>
 #include <QMediaPlayer>
 #include <QVideoWidget>
-#include <QMediaRecorder>
-#include <QMediaCaptureSession>
-#include <QMediaFormat>
-#include <QAudioFormat>
-#include <QAudioBuffer>
-#include <QVideoFrame>
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-#  include <QVideoFrameInput>
-#  include <QAudioBufferInput>
-#endif
 
 #include "BorderPanel.h"
 #include "GameCanvas.h"
+#include "VideoRecorder.h"
 #include "LibretroCore.h"
 #include "AudioManager.h"
 #include "NetplayManager.h"
@@ -268,13 +259,8 @@ private:
     CheatManager*    m_cheat   = nullptr;
     GamepadManager*  m_gamepad = nullptr;
 
-    // ── 녹화 ────────────────────────────────────────────
-    QMediaCaptureSession* m_captureSession = nullptr;
-    QMediaRecorder*       m_recorder       = nullptr;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-    QVideoFrameInput*     m_videoInput     = nullptr;
-    QAudioBufferInput*    m_audioInput     = nullptr;
-#endif
+    // ── 녹화 (libav* 기반 VideoRecorder) ────────────────────
+    VideoRecorder*        m_videoRecorder  = nullptr;
 
     // ── Rollback Netcode ─────────────────────────────────
     QHash<int, QByteArray> m_npStates;   // frame → run() 직전 스냅샷

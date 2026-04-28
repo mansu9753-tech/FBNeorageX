@@ -2640,38 +2640,23 @@ void MainWindow::onEmuTimer() {
     if (m_audio && m_audio->isReady())
         m_audio->processDrc(0);
 
-    // ── 녹화: 프레임 + 오디오 전송 ────────────────────────
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-    if (gState.isRecording && m_videoInput && gState.videoWidth > 0) {
-        int w = static_cast<int>(gState.videoWidth);
-        int h = static_cast<int>(gState.videoHeight);
-        QImage img;
-        if (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
-            img = QImage(
-                reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-                w, h, static_cast<int>(gState.videoPitch),
-                QImage::Format_RGB32).copy();
-        } else {
-            img = QImage(
-                reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-                w, h, static_cast<int>(gState.videoPitch),
-                QImage::Format_RGB16)
-                .convertedTo(QImage::Format_RGBX8888);
-        }
-        if (!img.isNull())
-            m_videoInput->sendVideoFrame(QVideoFrame(img));
+    // ── 녹화: 프레임 + 오디오 전송 (VideoRecorder — libav*) ─
+    if (gState.isRecording && m_videoRecorder && m_videoRecorder->isOpen()
+        && gState.videoWidth > 0) {
+        // 비디오 프레임 (VideoRecorder 는 open() 시 width/height/pixFmt 를 기억함)
+        m_videoRecorder->addVideoFrame(
+            gState.videoBuffer.constData(),
+            static_cast<int>(gState.videoPitch));
 
         // 오디오
-        if (m_audioInput && !gState.audioRecBuf.isEmpty()) {
-            QAudioFormat afmt;
-            afmt.setSampleRate(gSettings.audioSampleRate);
-            afmt.setChannelCount(2);
-            afmt.setSampleFormat(QAudioFormat::Int16);
-            m_audioInput->sendAudioBuffer(QAudioBuffer(gState.audioRecBuf, afmt));
+        if (!gState.audioRecBuf.isEmpty()) {
+            int samples = gState.audioRecBuf.size() / (2 * sizeof(int16_t));
+            m_videoRecorder->addAudioSamples(
+                reinterpret_cast<const int16_t*>(gState.audioRecBuf.constData()),
+                samples);
             gState.audioRecBuf.clear();
         }
     }
-#endif
 
     // ── 렌더링 ─────────────────────────────────────────────
     if (m_stack->currentIndex() == 1 && m_canvas)
@@ -2796,29 +2781,21 @@ void MainWindow::savePreviewShot() {
 // ── 프리뷰 영상 녹화 토글 ────────────────────────────────────
 void MainWindow::togglePreviewRecord() {
     if (gState.isRecording) {
-        // 녹화 중이면 정지
-        stopRecording();
-        // 녹화 파일을 previews/{rom}.mp4 로 복사/이동
-        // (startRecording에서 저장한 경로를 gState에 보관)
-        // stopRecording()이 500ms 후 파일을 이동하므로 그 뒤에 previews 복사
-        QString finalPath = gState.lastRecordPath;
-        QString romName   = m_selectedGame;
-        gState.lastRecordPath.clear();
+        // stopRecording() 호출 전에 경로 저장 (stop 내부에서 clear 됨)
+        QString finalPath   = gState.lastRecordPath;
+        QString romName     = m_selectedGame;
+
+        stopRecording();  // VideoRecorder::close() → 파일 즉시 완료
 
         if (!finalPath.isEmpty() && !romName.isEmpty()) {
             QString previewDest = gSettings.previewPath + "/" + romName + ".mp4";
-            QTimer::singleShot(800, this, [finalPath, previewDest, this]{
-                if (!QFile::exists(finalPath)) {
-                    log("🎬 프리뷰 녹화 실패 — 최종 파일 없음: " + finalPath);
-                    return;
-                }
-                QDir().mkpath(QFileInfo(previewDest).absolutePath());
-                QFile::remove(previewDest);
-                if (QFile::copy(finalPath, previewDest))
-                    log("🎬 프리뷰 영상 저장: " + previewDest);
-                else
-                    log("🎬 프리뷰 영상 복사 실패 — 원본: " + finalPath);
-            });
+            // VideoRecorder 는 동기 flush 이므로 딜레이 없이 바로 복사 가능
+            QDir().mkpath(QFileInfo(previewDest).absolutePath());
+            QFile::remove(previewDest);
+            if (QFile::copy(finalPath, previewDest))
+                log("🎬 프리뷰 영상 저장: " + previewDest);
+            else
+                log("🎬 프리뷰 영상 복사 실패 — 원본: " + finalPath);
         }
     } else {
         // 녹화 시작
@@ -2836,82 +2813,48 @@ void MainWindow::toggleRecording() {
 }
 
 void MainWindow::startRecording() {
-#if QT_VERSION < QT_VERSION_CHECK(6, 8, 0)
-    log("녹화는 Qt 6.8 이상에서 지원됩니다");
-    return;
-#else
     if (!gState.gameLoaded) { log("녹화: 게임 실행 중이 아닙니다"); return; }
     if (gState.isRecording)  return;
+
+#if HAVE_FFMPEG
+    if (gState.videoWidth == 0 || gState.videoHeight == 0) {
+        log("녹화: 비디오 해상도를 알 수 없습니다 (프레임 없음)");
+        return;
+    }
 
     QDir().mkpath(gSettings.recordPath);
     QString ts      = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     QString outPath = gSettings.recordPath + "/" + m_selectedGame + "_" + ts + ".mp4";
 
-    // ── Windows WMF 유니코드 경로 우회 ────────────────────────
-    // WMF 내부가 유니코드(한글·특수문자) 경로를 처리 못 하는 버그가 있음.
-    // Qt는 정상이나 WMF 레이어에서 실패 → ASCII 임시 경로에 먼저 쓰고 완료 후 이동.
-    // Linux(GStreamer)는 우회 불필요하나 동일 방식 적용해도 문제없음.
-    QString tempDir  = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    QString tempPath = tempDir + "/fbnrx_rec_" + ts + ".mp4";
+    // libav* 는 UTF-8 경로를 직접 처리하므로 임시경로 우회 불필요
+    // (Windows avio_open 은 UTF-8 지원)
+    double fps = gState.coreFps > 0.0 ? gState.coreFps : 60.0;
+    VideoPixelFormat vpf = (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888)
+                           ? VPF_XRGB8888 : VPF_RGB565;
 
-    // ── 입력 소스 생성 ─────────────────────────────────────
-    m_videoInput = new QVideoFrameInput(this);
-    m_audioInput = new QAudioBufferInput(this);
-
-    // ── 캡처 세션 ──────────────────────────────────────────
-    m_captureSession = new QMediaCaptureSession(this);
-    m_captureSession->setVideoFrameInput(m_videoInput);
-    m_captureSession->setAudioBufferInput(m_audioInput);
-
-    // ── 레코더 ─────────────────────────────────────────────
-    m_recorder = new QMediaRecorder(this);
-    m_captureSession->setRecorder(m_recorder);
-
-    QMediaFormat fmt;
-    fmt.setFileFormat(QMediaFormat::MPEG4);
-    fmt.setVideoCodec(QMediaFormat::VideoCodec::H264);
-    fmt.setAudioCodec(QMediaFormat::AudioCodec::AAC);
-    m_recorder->setMediaFormat(fmt);
-    m_recorder->setOutputLocation(QUrl::fromLocalFile(tempPath));  // ← 임시경로
-    m_recorder->setVideoFrameRate(gState.coreFps > 0 ? gState.coreFps : 60.0);
-    if (gState.videoWidth > 0 && gState.videoHeight > 0)
-        m_recorder->setVideoResolution(
-            static_cast<int>(gState.videoWidth),
-            static_cast<int>(gState.videoHeight));
-
-    // ── 즉시 에러 감지 ────────────────────────────────────
-    bool startFailed = false;
-    auto tmpConn = connect(m_recorder, &QMediaRecorder::errorOccurred, this,
-        [this, &startFailed](QMediaRecorder::Error err, const QString& msg){
-            startFailed = true;
-            log(QString("🔴 녹화 오류 [%1]: %2").arg(int(err)).arg(msg));
-        });
-
-    m_recorder->record();
-    disconnect(tmpConn);
-
-    if (startFailed) {
-        m_recorder->deleteLater();       m_recorder       = nullptr;
-        m_captureSession->deleteLater(); m_captureSession = nullptr;
-        m_videoInput = nullptr;
-        m_audioInput = nullptr;
+    m_videoRecorder = new VideoRecorder();
+    if (!m_videoRecorder->open(outPath,
+                               static_cast<int>(gState.videoWidth),
+                               static_cast<int>(gState.videoHeight),
+                               fps,
+                               gSettings.audioSampleRate,
+                               2,   // stereo
+                               vpf))
+    {
+        log("🔴 녹화 시작 실패: " + m_videoRecorder->lastError());
+        delete m_videoRecorder;
+        m_videoRecorder = nullptr;
         return;
     }
 
-    // 영구 런타임 에러 핸들러
-    connect(m_recorder, &QMediaRecorder::errorOccurred, this,
-        [this](QMediaRecorder::Error err, const QString& msg){
-            log(QString("🔴 녹화 런타임 오류 [%1]: %2").arg(int(err)).arg(msg));
-            stopRecording();
-        });
-
     gState.isRecording    = true;
-    gState.lastRecordPath = outPath;   // 최종 이동 경로
-    gState.lastRecordTemp = tempPath;  // 실제 녹화 중인 임시 경로
+    gState.lastRecordPath = outPath;
     gState.audioRecBuf.clear();
 
     if (m_canvas) m_canvas->setRecording(true);
     log("🔴 녹화 시작 → " + outPath);
+#else
+    log("🔴 녹화: FFmpeg 라이브러리가 빌드에 포함되지 않았습니다");
 #endif
 }
 
@@ -2921,46 +2864,18 @@ void MainWindow::stopRecording() {
 
     if (m_canvas) m_canvas->setRecording(false);
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-    if (m_recorder) {
-        m_recorder->stop();
-        m_recorder->deleteLater();
-        m_recorder = nullptr;
-    }
-    if (m_captureSession) {
-        m_captureSession->deleteLater();
-        m_captureSession = nullptr;
-    }
-    m_videoInput = nullptr;  // captureSession이 소유 → deleteLater로 정리됨
-    m_audioInput = nullptr;
-#endif
-
-    // ── 임시경로 → 최종경로 이동 ──────────────────────────────
-    QString src  = gState.lastRecordTemp;
     QString dest = gState.lastRecordPath;
-    gState.lastRecordTemp.clear();
-    // lastRecordPath 는 togglePreviewRecord 에서도 사용하므로 여기서 지우지 않음
+    gState.lastRecordPath.clear();
 
-    if (!src.isEmpty() && !dest.isEmpty()) {
-        // recorder->stop()은 비동기 → 파일이 닫힐 때까지 잠깐 대기 후 이동
-        QTimer::singleShot(500, this, [src, dest, this]{
-            QDir().mkpath(QFileInfo(dest).absolutePath());
-            QFile::remove(dest);
-            if (QFile::rename(src, dest))
-                log("■ 녹화 완료: " + dest);
-            else {
-                // rename 실패(파티션 다름 등) 시 copy 후 삭제
-                if (QFile::copy(src, dest)) {
-                    QFile::remove(src);
-                    log("■ 녹화 완료: " + dest);
-                } else {
-                    log("■ 녹화 완료 (임시파일): " + src);
-                }
-            }
-        });
-    } else {
-        log("■ 녹화 완료");
+#if HAVE_FFMPEG
+    if (m_videoRecorder) {
+        // close() 는 동기(즉시 파일 닫기) — libav* 는 flush 후 즉시 완료됨
+        m_videoRecorder->close();
+        delete m_videoRecorder;
+        m_videoRecorder = nullptr;
+        log("■ 녹화 완료: " + dest);
     }
+#endif
 }
 
 // ════════════════════════════════════════════════════════════

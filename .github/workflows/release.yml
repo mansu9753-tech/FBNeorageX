@@ -25,6 +25,8 @@ jobs:
             libxcb-render-util0-dev libxcb-shape0-dev \
             libxcb-xkb-dev libxkbcommon-x11-dev \
             libpulse-dev libasound2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev \
             libfuse2 patchelf
 
       - name: Build
@@ -110,8 +112,9 @@ SCRIPT
 
       - name: Package Windows Build
         run: |
+          # release/ 폴더의 모든 파일 압축 (EXE + FFmpeg DLL 포함)
           cd release
-          zip -j ../FBNeoRageX_Windows.zip FBNeoRageX.exe
+          zip -j ../FBNeoRageX_Windows.zip *
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -135,7 +138,7 @@ SCRIPT
             ### Windows 설치
             1. `FBNeoRageX_Windows.zip` 다운로드 후 압축 해제
             2. `fbneo_libretro.dll` 을 `FBNeoRageX.exe` 옆에 배치
-            3. `FBNeoRageX.exe` 실행 — 설치 불필요 (Qt6 정적 단일 실행파일)
+            3. `FBNeoRageX.exe` 실행 — 설치 불필요 (Qt6 정적 빌드, FFmpeg DLL 내장)
 
             ### Steam Deck / Linux 설치
             1. `FBNeoRageX_SteamDeck.tar.gz` 다운로드 후 압축 해제

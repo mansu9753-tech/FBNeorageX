@@ -32,6 +32,7 @@ set(SOURCES
     src/NetplayManager.cpp
     src/CheatManager.cpp
     src/GamepadManager.cpp
+    src/VideoRecorder.cpp
     src/MainWindow.cpp
 )
 
@@ -48,6 +49,7 @@ set(HEADERS
     src/CheatManager.h
     src/GamepadManager.h
     src/GameNamesDb.h
+    src/VideoRecorder.h
     src/MainWindow.h
 )
 
@@ -88,13 +90,37 @@ target_link_libraries(FBNeoRageX PRIVATE
 
 if(WIN32)
     # winmm — WinMM 조이스틱 API (아케이드 스틱 / DirectInput 폴백)
-    # xinput — XInput (동적 로딩이므로 사실 불필요하나 안전을 위해 주석 유지)
     target_link_libraries(FBNeoRageX PRIVATE winmm)
-    # target_link_libraries(FBNeoRageX PRIVATE xinput)
 endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(FBNeoRageX PRIVATE dl pthread)
+endif()
+
+# ── FFmpeg 연동 (VideoRecorder) ────────────────────────────
+# 시스템 pkg-config 혹은 MSYS2 기본 경로에서 libav* 를 찾음.
+# Windows 정적 Qt 빌드: DLL 임포트 라이브러리를 링크, 런타임에 avXxx-N.dll 필요.
+# Linux: 시스템 패키지 (apt install libavcodec-dev ...) 또는 번들 so.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(AVCODEC   IMPORTED_TARGET libavcodec)
+    pkg_check_modules(AVFORMAT  IMPORTED_TARGET libavformat)
+    pkg_check_modules(AVUTIL    IMPORTED_TARGET libavutil)
+    pkg_check_modules(SWSCALE   IMPORTED_TARGET libswscale)
+    pkg_check_modules(SWRESAMPLE IMPORTED_TARGET libswresample)
+    if(AVCODEC_FOUND AND AVFORMAT_FOUND AND AVUTIL_FOUND AND SWSCALE_FOUND AND SWRESAMPLE_FOUND)
+        message(STATUS "FFmpeg found via pkg-config")
+        target_link_libraries(FBNeoRageX PRIVATE
+            PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL
+            PkgConfig::SWSCALE PkgConfig::SWRESAMPLE)
+        target_compile_definitions(FBNeoRageX PRIVATE HAVE_FFMPEG=1)
+    else()
+        message(WARNING "FFmpeg pkg-config modules not found — VideoRecorder disabled")
+        target_compile_definitions(FBNeoRageX PRIVATE HAVE_FFMPEG=0)
+    endif()
+else()
+    message(WARNING "pkg-config not found — FFmpeg not configured")
+    target_compile_definitions(FBNeoRageX PRIVATE HAVE_FFMPEG=0)
 endif()
 
 # ── 인클루드 경로 ─────────────────────────────────────────
@@ -193,6 +219,27 @@ add_custom_command(TARGET FBNeoRageX POST_BUILD
         "$<TARGET_FILE_DIR:FBNeoRageX>/assets"
     COMMENT "Copying assets..."
 )
+
+# ── Windows: FFmpeg DLL 자동 복사 ────────────────────────
+# QFFmpegMediaPlugin 은 런타임에 avcodec/avformat 등 DLL을 필요로 함.
+# MSYS2 ucrt64 bin 에서 빌드 출력 디렉터리로 자동 복사.
+if(WIN32)
+    set(FFMPEG_BIN_DIR "C:/msys64/ucrt64/bin")
+    foreach(_dll
+        avcodec-62.dll
+        avformat-62.dll
+        avutil-60.dll
+        swresample-6.dll
+        swscale-9.dll
+    )
+        add_custom_command(TARGET FBNeoRageX POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFMPEG_BIN_DIR}/${_dll}"
+                "$<TARGET_FILE_DIR:FBNeoRageX>/${_dll}"
+            COMMENT "Copying ${_dll}..."
+        )
+    endforeach()
+endif()
 
 # ── 설치 ─────────────────────────────────────────────────
 install(TARGETS FBNeoRageX DESTINATION .)
