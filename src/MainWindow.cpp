@@ -1723,7 +1723,7 @@ void MainWindow::buildShotsPage(QWidget* page) {
     QGroupBox* shotGroup = new QGroupBox("SCREENSHOT");
     shotGroup->setStyleSheet(groupStyle());
     QVBoxLayout* sgV = new QVBoxLayout(shotGroup); sgV->setSpacing(6);
-    QLabel* shotHint = new QLabel("게임 중 F12 또는 아래 버튼 — screenshots/{rom}_{timestamp}.png");
+    QLabel* shotHint = new QLabel("F12 — screenshots/{rom}_{timestamp}.png 저장");
     shotHint->setStyleSheet(hintStyle()); shotHint->setWordWrap(true);
     sgV->addWidget(shotHint);
     QPushButton* shotBtn = new QPushButton("📷  TAKE SCREENSHOT  (F12)");
@@ -1731,10 +1731,10 @@ void MainWindow::buildShotsPage(QWidget* page) {
     connect(shotBtn, &QPushButton::clicked, this, &MainWindow::takeScreenshot);
     sgV->addWidget(shotBtn);
 
-    QLabel* prevShotHint = new QLabel("아래 버튼: 현재 프레임을 previews/{rom}.png 로 저장 (기존 덮어씌움)");
+    QLabel* prevShotHint = new QLabel("Ctrl+F12 — 현재 프레임을 previews/{rom}.png 로 저장 (기존 덮어씌움)");
     prevShotHint->setStyleSheet(hintStyle()); prevShotHint->setWordWrap(true);
     sgV->addWidget(prevShotHint);
-    QPushButton* prevShotBtn = new QPushButton("🖼  SAVE AS PREVIEW IMAGE");
+    QPushButton* prevShotBtn = new QPushButton("🖼  SAVE AS PREVIEW IMAGE  (Ctrl+F12)");
     prevShotBtn->setStyleSheet(btnStyle(true)); prevShotBtn->setFixedHeight(34);
     connect(prevShotBtn, &QPushButton::clicked, this, &MainWindow::savePreviewShot);
     sgV->addWidget(prevShotBtn);
@@ -1744,7 +1744,7 @@ void MainWindow::buildShotsPage(QWidget* page) {
     QGroupBox* recGroup = new QGroupBox("VIDEO RECORD");
     recGroup->setStyleSheet(groupStyle());
     QVBoxLayout* rgV = new QVBoxLayout(recGroup); rgV->setSpacing(6);
-    QLabel* recHint = new QLabel("게임 중 F9 또는 아래 버튼 — recordings/{rom}_{timestamp}.mp4");
+    QLabel* recHint = new QLabel("F9 — recordings/{rom}_{timestamp}.mp4 저장");
     recHint->setStyleSheet(hintStyle()); recHint->setWordWrap(true);
     rgV->addWidget(recHint);
     QPushButton* recBtn = new QPushButton("⏺  START / STOP RECORDING  (F9)");
@@ -1752,10 +1752,10 @@ void MainWindow::buildShotsPage(QWidget* page) {
     connect(recBtn, &QPushButton::clicked, this, &MainWindow::toggleRecording);
     rgV->addWidget(recBtn);
 
-    QLabel* prevRecHint = new QLabel("아래 버튼: 녹화 시작 → 다시 누르면 previews/{rom}.mp4 로 저장 (기존 덮어씌움)");
+    QLabel* prevRecHint = new QLabel("Ctrl+F9 — 녹화 시작 → 다시 누르면 previews/{rom}.mp4 로 저장 (기존 덮어씌움)");
     prevRecHint->setStyleSheet(hintStyle()); prevRecHint->setWordWrap(true);
     rgV->addWidget(prevRecHint);
-    QPushButton* prevRecBtn = new QPushButton("🎬  RECORD PREVIEW VIDEO");
+    QPushButton* prevRecBtn = new QPushButton("🎬  RECORD PREVIEW VIDEO  (Ctrl+F9)");
     prevRecBtn->setStyleSheet(btnStyle(true)); prevRecBtn->setFixedHeight(34);
     connect(prevRecBtn, &QPushButton::clicked, this, &MainWindow::togglePreviewRecord);
     rgV->addWidget(prevRecBtn);
@@ -3128,17 +3128,19 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         }
     }
 
-    // F9: 녹화 토글
-    if (k == Qt::Key_F9)  { toggleRecording(); return; }
+    bool ctrl = (e->modifiers() & Qt::ControlModifier);
+
+    // F9: 일반 녹화 토글 / Ctrl+F9: 프리뷰 영상 녹화 토글
+    if (k == Qt::Key_F9)  { ctrl ? togglePreviewRecord() : toggleRecording(); return; }
 
     // F10: 1P↔2P 스왑 토글 (싱글 연습 모드)
     if (k == Qt::Key_F10) { toggleSwapPlayers(); return; }
 
-    // F12: 스크린샷
-    if (k == Qt::Key_F12) { takeScreenshot(); return; }
-
     // F11: 패스트포워드 토글
     if (k == Qt::Key_F11) { toggleFastForward(!gState.fastForward); return; }
+
+    // F12: 일반 스크린샷 / Ctrl+F12: 프리뷰 이미지 저장
+    if (k == Qt::Key_F12) { ctrl ? savePreviewShot() : takeScreenshot(); return; }
 
     applyKeyPress(k);
     QMainWindow::keyPressEvent(e);
