@@ -20,6 +20,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QIcon>
 #include <algorithm>
 #include <QDir>
@@ -2799,21 +2800,25 @@ void MainWindow::togglePreviewRecord() {
         stopRecording();
         // 녹화 파일을 previews/{rom}.mp4 로 복사/이동
         // (startRecording에서 저장한 경로를 gState에 보관)
-        QString src = gState.lastRecordPath;
+        // stopRecording()이 500ms 후 파일을 이동하므로 그 뒤에 previews 복사
+        QString finalPath = gState.lastRecordPath;
+        QString romName   = m_selectedGame;
         gState.lastRecordPath.clear();
 
-        if (!src.isEmpty() && !m_selectedGame.isEmpty()) {
-            if (!QFile::exists(src)) {
-                log("🎬 프리뷰 녹화 실패 — 저장된 파일 없음");
-            } else {
-                QDir().mkpath(gSettings.previewPath);
-                QString dest = gSettings.previewPath + "/" + m_selectedGame + ".mp4";
-                QFile::remove(dest);
-                if (QFile::copy(src, dest))
-                    log("🎬 프리뷰 영상 저장: " + dest);
+        if (!finalPath.isEmpty() && !romName.isEmpty()) {
+            QString previewDest = gSettings.previewPath + "/" + romName + ".mp4";
+            QTimer::singleShot(800, this, [finalPath, previewDest, this]{
+                if (!QFile::exists(finalPath)) {
+                    log("🎬 프리뷰 녹화 실패 — 최종 파일 없음: " + finalPath);
+                    return;
+                }
+                QDir().mkpath(QFileInfo(previewDest).absolutePath());
+                QFile::remove(previewDest);
+                if (QFile::copy(finalPath, previewDest))
+                    log("🎬 프리뷰 영상 저장: " + previewDest);
                 else
-                    log("🎬 프리뷰 영상 복사 실패 — 원본: " + src);
-            }
+                    log("🎬 프리뷰 영상 복사 실패 — 원본: " + finalPath);
+            });
         }
     } else {
         // 녹화 시작
@@ -2842,6 +2847,13 @@ void MainWindow::startRecording() {
     QString ts      = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     QString outPath = gSettings.recordPath + "/" + m_selectedGame + "_" + ts + ".mp4";
 
+    // ── Windows WMF 유니코드 경로 우회 ────────────────────────
+    // WMF 내부가 유니코드(한글·특수문자) 경로를 처리 못 하는 버그가 있음.
+    // Qt는 정상이나 WMF 레이어에서 실패 → ASCII 임시 경로에 먼저 쓰고 완료 후 이동.
+    // Linux(GStreamer)는 우회 불필요하나 동일 방식 적용해도 문제없음.
+    QString tempDir  = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QString tempPath = tempDir + "/fbnrx_rec_" + ts + ".mp4";
+
     // ── 입력 소스 생성 ─────────────────────────────────────
     m_videoInput = new QVideoFrameInput(this);
     m_audioInput = new QAudioBufferInput(this);
@@ -2860,50 +2872,46 @@ void MainWindow::startRecording() {
     fmt.setVideoCodec(QMediaFormat::VideoCodec::H264);
     fmt.setAudioCodec(QMediaFormat::AudioCodec::AAC);
     m_recorder->setMediaFormat(fmt);
-    m_recorder->setOutputLocation(QUrl::fromLocalFile(outPath));
+    m_recorder->setOutputLocation(QUrl::fromLocalFile(tempPath));  // ← 임시경로
     m_recorder->setVideoFrameRate(gState.coreFps > 0 ? gState.coreFps : 60.0);
-
-    // Windows Media Foundation: record() 전에 해상도 필수 세팅
     if (gState.videoWidth > 0 && gState.videoHeight > 0)
         m_recorder->setVideoResolution(
             static_cast<int>(gState.videoWidth),
             static_cast<int>(gState.videoHeight));
 
-    // ── 즉시 에러 감지용 임시 커넥션 ─────────────────────────
-    // record() 내부에서 동기적으로 errorOccurred 가 발생할 수 있으므로
-    // 먼저 플래그를 세우고, 성공 확인 후 영구 핸들러로 교체
+    // ── 즉시 에러 감지 ────────────────────────────────────
     bool startFailed = false;
     auto tmpConn = connect(m_recorder, &QMediaRecorder::errorOccurred, this,
-        [this, &startFailed](QMediaRecorder::Error, const QString& msg){
+        [this, &startFailed](QMediaRecorder::Error err, const QString& msg){
             startFailed = true;
-            log("🔴 녹화 오류: " + msg);
+            log(QString("🔴 녹화 오류 [%1]: %2").arg(int(err)).arg(msg));
         });
 
     m_recorder->record();
     disconnect(tmpConn);
 
     if (startFailed) {
-        // 즉시 실패 — 리소스 정리 후 복귀 (isRecording 은 false 유지)
-        m_recorder->deleteLater();      m_recorder      = nullptr;
-        m_captureSession->deleteLater();m_captureSession = nullptr;
+        m_recorder->deleteLater();       m_recorder       = nullptr;
+        m_captureSession->deleteLater(); m_captureSession = nullptr;
         m_videoInput = nullptr;
         m_audioInput = nullptr;
         return;
     }
 
-    // 영구 에러 핸들러 (녹화 중 발생하는 런타임 오류용)
+    // 영구 런타임 에러 핸들러
     connect(m_recorder, &QMediaRecorder::errorOccurred, this,
-        [this](QMediaRecorder::Error, const QString& msg){
-            log("🔴 녹화 런타임 오류: " + msg);
+        [this](QMediaRecorder::Error err, const QString& msg){
+            log(QString("🔴 녹화 런타임 오류 [%1]: %2").arg(int(err)).arg(msg));
             stopRecording();
         });
 
     gState.isRecording    = true;
-    gState.lastRecordPath = outPath;
+    gState.lastRecordPath = outPath;   // 최종 이동 경로
+    gState.lastRecordTemp = tempPath;  // 실제 녹화 중인 임시 경로
     gState.audioRecBuf.clear();
 
     if (m_canvas) m_canvas->setRecording(true);
-    log("🔴 녹화 시작: " + outPath);
+    log("🔴 녹화 시작 → " + outPath);
 #endif
 }
 
@@ -2927,7 +2935,32 @@ void MainWindow::stopRecording() {
     m_audioInput = nullptr;
 #endif
 
-    log("■ 녹화 완료");
+    // ── 임시경로 → 최종경로 이동 ──────────────────────────────
+    QString src  = gState.lastRecordTemp;
+    QString dest = gState.lastRecordPath;
+    gState.lastRecordTemp.clear();
+    // lastRecordPath 는 togglePreviewRecord 에서도 사용하므로 여기서 지우지 않음
+
+    if (!src.isEmpty() && !dest.isEmpty()) {
+        // recorder->stop()은 비동기 → 파일이 닫힐 때까지 잠깐 대기 후 이동
+        QTimer::singleShot(500, this, [src, dest, this]{
+            QDir().mkpath(QFileInfo(dest).absolutePath());
+            QFile::remove(dest);
+            if (QFile::rename(src, dest))
+                log("■ 녹화 완료: " + dest);
+            else {
+                // rename 실패(파티션 다름 등) 시 copy 후 삭제
+                if (QFile::copy(src, dest)) {
+                    QFile::remove(src);
+                    log("■ 녹화 완료: " + dest);
+                } else {
+                    log("■ 녹화 완료 (임시파일): " + src);
+                }
+            }
+        });
+    } else {
+        log("■ 녹화 완료");
+    }
 }
 
 // ════════════════════════════════════════════════════════════
