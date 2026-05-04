@@ -48,6 +48,9 @@ public:
     // Windows에서는 사용 안 함 (항상 0 반환)
     uint16_t dpadBits() const;
 
+    // 게임 전환 시 입력 누산기 초기화 (잔류 상태 제거 + 보류 이벤트 드레인)
+    void clearState();
+
 
 signals:
     void connected(int index);
@@ -87,8 +90,11 @@ private:
     bool     openJoystick();
     uint16_t readJoystick();
 
-    int      m_jsFd      = -1;
-    uint16_t m_jsBits    = 0;  // 전체 입력 (아날로그 스틱 + D-패드)
-    uint16_t m_dpadBits  = 0;  // D-패드 전용 (axis 6/7 — UI 네비용)
+    int      m_jsFd       = -1;
+    // ── 입력 누산기 (비트 간섭 방지를 위해 소스별 분리) ──────
+    // readJoystick() 반환 = m_buttonBits | m_stickBits | m_dpadBits
+    uint16_t m_buttonBits = 0;  // JS_EVENT_BUTTON → libretro 비트
+    uint16_t m_stickBits  = 0;  // axis 0/1 (왼쪽 스틱) → 방향 비트
+    uint16_t m_dpadBits   = 0;  // axis 6/7 (D-패드 hat) → 방향 비트 (UI 네비용)
 #endif
 };

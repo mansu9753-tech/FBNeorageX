@@ -253,6 +253,14 @@ private:
     int              m_navHRepeatMs = 0;    // 수평 방향 유지 누적 시간(ms)
     bool             m_navAWasDown  = false;  // A버튼 이전 상태 (엣지 감지)
 
+    // ── 게임패드 메뉴 진입 홀드 카운터 ─────────────────────────
+    // SELECT+START 동시 홀드 120프레임(~2초) → togglePause (메인 GUI)
+    // Start 단독은 게임으로 그대로 전달 (KOF 보스선택 커맨드 정상 작동)
+    int  m_menuHoldCount   = 0;
+    // START 연속 홀드 프레임 카운터 (서비스 메뉴 우발 진입 방지)
+    // serviceMode=false 상태에서 90프레임 초과 → keys[3]=0 강제
+    int  m_startHoldFrames = 0;
+
     // ── 코어 / 오디오 / 치트 / 게임패드 ─────────────────
     LibretroCore*    m_core    = nullptr;
     AudioManager*    m_audio   = nullptr;
@@ -272,6 +280,12 @@ private:
     // ── No-Wait 프레임 페이싱 ───────────────────────────
     // 프레임 스톨(return) 대신 targetMs 를 ±1ms씩 조절해 부드럽게 동기화
     double m_frameDelay = 0.0;  // ms 오프셋, 양수=슬로우다운
+
+    // ── 청크 재시뮬레이션 (대형 롤백 분산 처리) ─────────────
+    // stateReceived 에서 MAX_RESIM_PER_TICK 프레임씩 나눠 처리
+    // → 이벤트 루프 블로킹 방지 + 클라이언트 스터터 감소
+    int  m_pendingResimTo  = -1;    // 목표 프레임(-1=없음)
+    static constexpr int MAX_RESIM_PER_TICK = 8;
 
     // ── Loading Barrier ──────────────────────────────────
     // 양쪽 준비 판단을 MainWindow에서 직접 관리 (NetplayManager 플래그 경쟁 회피)

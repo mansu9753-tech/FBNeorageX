@@ -21,6 +21,7 @@
 #include "NetplayManager.h"
 #include <QNetworkInterface>
 #include <QDebug>
+#include <algorithm>
 
 // ── 생성자/소멸자 ────────────────────────────────────────────
 NetplayManager::NetplayManager(QObject* parent)
@@ -84,6 +85,7 @@ void NetplayManager::clientConnect(const QString& ip, int port) {
     connect(m_socket, &QUdpSocket::readyRead, this, &NetplayManager::onReadyRead);
 
     m_helloRetry = 0;
+    m_helloSentAt.start();   // RTT 측정 시작
     m_helloTimer->start();
     onHelloTimer();
     qDebug() << "NetplayManager: HELLO 시작 →" << ip << ":" << port;
@@ -157,16 +159,33 @@ void NetplayManager::sendLoadGame(const QString& romName) {
 }
 
 // 로딩 완료 선언 → Loading→Ready 전이
+// 클라이언트는 페이로드에 RTT(ms)를 포함 → 호스트가 동시 시작 지연 계산에 사용
 void NetplayManager::sendReady() {
-    sendCtrl(QByteArray(1, static_cast<char>(MSG_READY)), 3);
+    QByteArray pkt(3, Qt::Uninitialized);
+    pkt[0] = static_cast<char>(MSG_READY);
+    pkt[1] = static_cast<char>( m_rttMs        & 0xFF);
+    pkt[2] = static_cast<char>((m_rttMs >>  8) & 0xFF);
+    sendCtrl(pkt, 3);
     setState(State::Ready);
 }
 
 // 호스트 전용: 양쪽 Ready 확인 후 동시 시작
+// ACK 기반 동시 시작: 클라이언트가 MSG_START 수신 후 즉시 Playing 진입 + MSG_START_ACK 전송
+// 호스트는 ACK 수신 시 Playing 진입 → 양쪽 시작 시점 차이 ≈ RTT/2
 void NetplayManager::sendStart() {
     if (!m_isHost) return;
     sendCtrl(QByteArray(1, static_cast<char>(MSG_START)), 5);
-    setState(State::Playing);
+    m_waitingStartAck = true;
+
+    // Fallback: ACK 수신 실패 시 max(300ms, RTT+100ms) 후 자동 시작
+    int delay = std::max(300, m_rttMs + 100);
+    QTimer::singleShot(delay, this, [this] {
+        if (m_waitingStartAck) {
+            m_waitingStartAck = false;
+            if (m_state == State::Ready)
+                setState(State::Playing);
+        }
+    });
 }
 
 // 게임 종료 → Playing→Lobby 전이 (소켓 유지)
@@ -280,12 +299,15 @@ void NetplayManager::onReadyRead() {
 
         } else if (type == MSG_ACK) {
             if (!m_isHost && m_state == State::Disconnected) {
+                // RTT = HELLO 첫 송신~ACK 수신 시간
+                if (m_helloSentAt.isValid())
+                    m_rttMs = static_cast<int>(std::min<qint64>(1000, m_helloSentAt.elapsed()));
                 m_helloTimer->stop();
                 setState(State::Lobby);
                 m_heartbeatTimer->start();
                 m_lastRecvClock.start();
                 emit connected(false);
-                qDebug() << "NetplayManager: 호스트 연결됨 (ACK)";
+                qDebug() << "NetplayManager: 호스트 연결됨 (ACK) RTT=" << m_rttMs << "ms";
             }
             continue;
         }
@@ -335,14 +357,37 @@ void NetplayManager::processPacket(const QByteArray& data) {
     }
 
     // ── 로딩 완료 선언 ─────────────────────────────────────
+    // 페이로드: [MSG_READY, rtt_lo, rtt_hi]  (클라이언트 RTT 포함)
     case MSG_READY:
+        // 호스트: 클라이언트의 RTT 수신 → 동시 시작 지연 계산에 사용
+        if (m_isHost && data.size() >= 3) {
+            int peerRtt = static_cast<uint8_t>(data[1]) |
+                          (static_cast<uint8_t>(data[2]) << 8);
+            if (peerRtt > 0 && peerRtt < 2000)
+                m_rttMs = peerRtt;
+        }
         emit readyReceived();
         break;
 
-    // ── 동시 시작 ──────────────────────────────────────────
+    // ── 시작 신호 (호스트→클라이언트) ─────────────────────
+    // 클라이언트: Playing 진입 + ACK 전송
+    // 호스트는 ACK 수신 후 Playing 진입 (sendStart 참조)
     case MSG_START:
         setState(State::Playing);
         emit startReceived();
+        if (!m_isHost) {
+            // 클라이언트: ACK 전송 (호스트가 Playing에 진입하는 트리거)
+            sendCtrl(QByteArray(1, static_cast<char>(MSG_START_ACK)), 3);
+        }
+        break;
+
+    // ── 시작 확인 (클라이언트→호스트) ─────────────────────
+    case MSG_START_ACK:
+        if (m_isHost && m_waitingStartAck) {
+            m_waitingStartAck = false;
+            if (m_state == State::Ready)
+                setState(State::Playing);
+        }
         break;
 
     // ── 게임 종료 ──────────────────────────────────────────
@@ -446,4 +491,5 @@ void NetplayManager::resetGameState() {
     m_chunkBuf.chunks.clear();
     m_chunkBuf.frame       = 0;
     m_chunkBuf.totalChunks = 0;
+    m_waitingStartAck      = false;
 }

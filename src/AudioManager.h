@@ -56,6 +56,10 @@ public:
     void shutdown();
     bool isReady() const { return m_sink != nullptr; }
 
+    // 링버퍼·PID·리샘플러 리셋 + 선채움 (QAudioSink 재시작 없음)
+    // 일시정지 재개 / 게임 전환 후 audio 이상 방지용
+    void flush();
+
     // ── 볼륨 ──────────────────────────────────────────────────
     void   setVolume(double v);   // 0.0 ~ 1.0
     double volume() const;
@@ -71,12 +75,17 @@ private:
     std::unique_ptr<QAudioSink>      m_sink;
     std::unique_ptr<AudioRingBuffer> m_ringBuf;
 
-    int    m_sampleRate  = 48000;
-    int    m_bufferMs    = 80;
-    int    m_targetBytes = 0;
+    int    m_coreSampleRate = 44100; // 코어(libretro)가 실제로 출력하는 샘플레이트
+    int    m_hwSampleRate   = 48000; // 하드웨어(PipeWire native) 샘플레이트
+    int    m_bufferMs       = 80;
+    int    m_targetBytes    = 0;
 
-    // DRC: 게임 FPS × 레이트 차이로 생기는 드리프트를 Catmull-Rom 리샘플로 보정
-    // maxAdj=0.004 (±0.4%) — 청각적으로 무감지 한계
-    DrcPid              m_pid  { 0.015, 0.00008, 0.003, 0.004 };
+    // SRC 기본비율: coreSampleRate / hwSampleRate
+    //   예) 44100 / 48000 = 0.91875 — resampler 에 전달하면 업샘플 발생
+    // DRC 미세조정이 이 위에 곱해짐
+    double m_baseRatio = 1.0;
+
+    // DRC: SRC 기본비율 위에 ±maxAdj(0.5%) 미세 보정
+    DrcPid              m_pid  { 0.015, 0.00008, 0.003, 0.005 };
     FractionalResampler m_resampler;
 };

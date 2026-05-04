@@ -52,7 +52,12 @@ struct AppSettings {
     QString        inputMode       = "auto";
     QHash<int,int> xinputMapping;   // XInput 버튼 비트 → libretro idx (empty=기본값)
     QHash<int,int> winmmMapping;    // WinMM 버튼 인덱스 → libretro idx (empty=기본값)
-    QHash<int,int> keyboardMapping; // Qt::Key → libretro idx (empty=기본값)
+    QHash<int,int> keyboardMapping; // Qt::Key
+
+    // ── 머신 세팅 (DIP/BIOS) ────────────────────────────────────
+    // romName → { variableKey → selectedValue }
+    // 게임 실행 시 자동 복원, 변경 즉시 저장
+    QHash<QString, QHash<QString,QString>> machineVars;
 
     // ── 싱글톤 ──────────────────────────────────────────
     static AppSettings& instance();

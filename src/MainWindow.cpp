@@ -345,11 +345,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&gNetplay(), &NetplayManager::startReceived,   this, &MainWindow::onNetStart);
     connect(&gNetplay(), &NetplayManager::gameOverReceived,this, &MainWindow::onNetGameOver);
 
-    // 하드 싱크 수신 (클라이언트 측): 호스트가 보낸 스냅샷을 대기열에 저장
-    // 클라이언트는 해당 프레임에 도달했을 때 onEmuTimer 안에서 적용
-    // ── 즉각 롤백 + Re-simulation Catch-up ─────────────────────
-    // stateReceived 가 발화되는 순간(Qt 이벤트 루프, 메인스레드) 즉시 실행
-    // → onEmuTimer 다음 틱까지 기다리지 않으므로 화면 갈림 0
+    // ── 하드 싱크 수신 (클라이언트 측) ────────────────────────
+    // 호스트 스냅샷 수신 → 즉각 복원 + 청크 재시뮬 (MAX_RESIM_PER_TICK 분산)
+    // 대형 catch-up을 onEmuTimer 여러 틱으로 분산 → 이벤트 루프 블로킹 방지
     connect(&gNetplay(), &NetplayManager::stateReceived,
             this, [this](quint32 frame, QByteArray data) {
         // 호스트는 수신 무시, 코어 미로드 상태도 무시
@@ -361,16 +359,15 @@ MainWindow::MainWindow(QWidget* parent)
         // 너무 오래된 싱크는 폐기 (이미 MAX_ROLLBACK 창 밖)
         if (sf < cur - NetplayManager::MAX_ROLLBACK) return;
 
-        // ── Time Drift: m_frameDelay ±1ms 방향 설정 ────────────
-        // 로컬이 호스트보다 앞서면 슬로우다운, 뒤처지면 스피드업
-        // (60프레임에 걸쳐 분산 흡수 → 속도 점프 없음)
+        // ── Time Drift: 드리프트 크기에 비례한 frameDelay 조정 ──
+        // 대형 드리프트는 빠르게 흡수, 소형 드리프트는 완만하게
         {
             double fps    = (gState.coreFps > 0) ? gState.coreFps : 60.0;
             double baseMs = 1000.0 / fps;
-            int    drift  = cur - sf;               // 양수=로컬 앞섬
-            m_frameDelay  = std::clamp(
-                m_frameDelay + (drift * baseMs) / 60.0,
-                -5.0, 8.0);
+            int    drift  = cur - sf;   // 양수=로컬 앞섬, 음수=로컬 뒤처짐
+            // 드리프트가 클수록 큰 폭으로 조정 (최대 ±3ms/frame)
+            double adj = std::clamp((drift * baseMs) / 30.0, -3.0 * baseMs, 3.0 * baseMs);
+            m_frameDelay = std::clamp(m_frameDelay + adj, -5.0, 8.0);
         }
 
         // ── Step 1: 호스트 스냅샷으로 sf 시점 복원 ─────────────
@@ -379,24 +376,20 @@ MainWindow::MainWindow(QWidget* parent)
         gState.frameCount = sf;
         gNetplay().confirmFramesUpTo(static_cast<uint32_t>(sf));
 
-        // ── Step 2: Re-simulation Catch-up (sf → savedCur) ─────
-        // m_npInputHistory 에 저장된 로컬 입력으로 즉시 현재 프레임까지 재시뮬
-        // → 화면이 뒤로 점프하지 않고 투명하게 복구
+        // ── Step 2: 첫 청크 즉시 재시뮬 (sf → sf+MAX_RESIM_PER_TICK) ─
+        // 나머지는 m_pendingResimTo 에 저장 → onEmuTimer 분산 처리
+        int chunkEnd = std::min(sf + MAX_RESIM_PER_TICK, savedCur);
         gState.netplayResim = true;
-        for (int rf = sf; rf < savedCur; ++rf) {
+        for (int rf = sf; rf < chunkEnd; ++rf) {
             NpInputState& is = m_npInputHistory[rf];
             uint16_t lb = is.local;
-            // 확정 원격 입력 우선, 없으면 hold-last 예측
             uint16_t rb = static_cast<uint16_t>(
                 gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
-            is.remote = rb;  // 히스토리 갱신
+            is.remote = rb;
             gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
-
             npApplyInput(lb, rb);
             m_core->run();
             gState.frameCount = rf + 1;
-
-            // 재시뮬된 프레임의 스냅샷 저장 → 이후 롤백 기준점 최신화
             size_t sz = m_core->serializeSize();
             if (sz > 0) {
                 QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
@@ -404,18 +397,22 @@ MainWindow::MainWindow(QWidget* parent)
                     m_npStates[rf + 1] = buf;
             }
         }
-        gState.netplayResim = false;
 
-        // ── Step 3: 오래된 히스토리 정리 ────────────────────────
-        int cutoff = sf - 2;
-        for (auto it = m_npStates.begin(); it != m_npStates.end(); )
-            it = (it.key() < cutoff) ? m_npStates.erase(it) : ++it;
-        while (!m_npInputHistory.empty() &&
-               m_npInputHistory.begin()->first < cutoff)
-            m_npInputHistory.erase(m_npInputHistory.begin());
-
-        // cur 은 savedCur 유지 → gState.frameCount 동기화
-        gState.frameCount = savedCur;
+        if (chunkEnd >= savedCur) {
+            // 모든 프레임 처리 완료 → 히스토리 정리
+            gState.netplayResim = false;
+            m_pendingResimTo = -1;
+            int cutoff = sf - 2;
+            for (auto it = m_npStates.begin(); it != m_npStates.end(); )
+                it = (it.key() < cutoff) ? m_npStates.erase(it) : ++it;
+            while (!m_npInputHistory.empty() &&
+                   m_npInputHistory.begin()->first < cutoff)
+                m_npInputHistory.erase(m_npInputHistory.begin());
+        } else {
+            // 미처리 프레임 → onEmuTimer 에서 분산 처리
+            m_pendingResimTo = savedCur;
+            // netplayResim 은 pending 완료 시 해제 (onEmuTimer에서)
+        }
     });
 
     // 에뮬 타이머 (1ms → AFL 로 조절)
@@ -453,6 +450,8 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     scanRoms();
+    // 앱 시작 시 게임리스트 포커스 (D패드/방향키 즉시 동작)
+    if (m_gameList) m_gameList->setFocus();
     m_audio->init(gSettings.audioSampleRate, gSettings.audioBufferMs);
 
     // 터보 설정 복원
@@ -571,7 +570,7 @@ void MainWindow::buildMainTab() {
     //  상단: GAMELIST(좌) + OPTIONS 패널(우)
     // ════════════════════════════════════════════════
     QHBoxLayout* hTop = new QHBoxLayout;
-    hTop->setSpacing(6);
+    hTop->setSpacing(0);
 
     // ── 좌: GAMELIST ─────────────────────────────────
     m_gamelistPanel = new BorderPanel("GAMELIST");
@@ -668,6 +667,8 @@ void MainWindow::buildMainTab() {
         if (item) { selectGame(item->data(Qt::UserRole).toString()); launchGame(); }
     });
     m_gamelistPanel->innerLayout()->addWidget(m_gameList, 1);
+    // 좌측 패널: 오른쪽 코너는 OPTIONS 와 맞닿으므로 직각
+    m_gamelistPanel->setRoundedCorners(BorderPanel::CornerTL | BorderPanel::CornerBL);
     hTop->addWidget(m_gamelistPanel, 3);
 
     // ── 우: OPTIONS (전체폭 스택, 클릭→상세→BACK 방식) ──────
@@ -695,11 +696,11 @@ void MainWindow::buildMainTab() {
         homePage->setStyleSheet(
             "QWidget{background:transparent;}"
             "QPushButton{background:rgba(0,4,20,180);color:#00aaff;"
-            "border:none;border-left:3px solid transparent;"
+            "border:none;border-top:1px solid transparent;border-bottom:1px solid transparent;"
             "font-family:'Courier New';font-size:13px;font-weight:bold;"
-            "text-align:left;padding:8px 20px;letter-spacing:2px;}"
+            "text-align:center;padding:8px 20px;letter-spacing:2px;}"
             "QPushButton:hover{color:#00eeff;background:rgba(0,60,180,160);"
-            "border-left:3px solid #0088ff;}"
+            "border-top:1px solid #0044aa;border-bottom:1px solid #0088ff;}"
             "QPushButton:pressed{color:#ffffff;background:rgba(0,40,140,200);}");
         homePage->setObjectName("optHome");
 
@@ -707,8 +708,9 @@ void MainWindow::buildMainTab() {
         homeV->setContentsMargins(0, 0, 0, 0);
         homeV->setSpacing(0);
 
-        // 상단 타이틀 레이블
+        // 상단 타이틀 레이블 (가운데 정렬)
         QLabel* titleLbl = new QLabel("OPTIONS");
+        titleLbl->setAlignment(Qt::AlignCenter);
         titleLbl->setStyleSheet(
             "QLabel{color:#0066cc;font-family:'Courier New';font-size:10px;"
             "font-weight:bold;letter-spacing:4px;background:rgba(0,0,10,160);"
@@ -852,6 +854,8 @@ void MainWindow::buildMainTab() {
 
     m_optionsStack->setCurrentIndex(0);
     m_optionsPanel->innerLayout()->addWidget(m_optionsStack);
+    // 우측 패널: 왼쪽 코너는 GAMELIST 와 맞닿으므로 직각
+    m_optionsPanel->setRoundedCorners(BorderPanel::CornerTR | BorderPanel::CornerBR);
     hTop->addWidget(m_optionsPanel, 5);
 
     vRoot->addLayout(hTop, 6);
@@ -897,7 +901,7 @@ void MainWindow::buildMainTab() {
     // ════════════════════════════════════════════════
     //  하단: PREVIEW(좌) + EVENTS(우)
     // ════════════════════════════════════════════════
-    QHBoxLayout* hBot = new QHBoxLayout; hBot->setSpacing(6);
+    QHBoxLayout* hBot = new QHBoxLayout; hBot->setSpacing(0);
 
     m_previewPanel = new BorderPanel("PREVIEW");
     m_previewLabel = new QLabel("NO PREVIEW");
@@ -919,6 +923,8 @@ void MainWindow::buildMainTab() {
     m_previewVidTimer->setSingleShot(true);
     m_previewVidTimer->setInterval(3000);
     connect(m_previewVidTimer, &QTimer::timeout, this, [this]{ loadPreviewVideo(m_selectedGame); });
+    // 좌측 패널: 오른쪽 코너는 EVENTS 와 맞닿으므로 직각
+    m_previewPanel->setRoundedCorners(BorderPanel::CornerTL | BorderPanel::CornerBL);
     hBot->addWidget(m_previewPanel, 3);
 
     m_eventsPanel = new BorderPanel("EVENTS");
@@ -931,6 +937,8 @@ void MainWindow::buildMainTab() {
         "QScrollBar::handle:vertical{background:#224466;}"
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
     m_eventsPanel->innerLayout()->addWidget(m_logEdit);
+    // 우측 패널: 왼쪽 코너는 PREVIEW 와 맞닿으므로 직각
+    m_eventsPanel->setRoundedCorners(BorderPanel::CornerTR | BorderPanel::CornerBR);
     hBot->addWidget(m_eventsPanel, 5);
 
     vRoot->addLayout(hBot, 3);
@@ -1991,10 +1999,13 @@ void MainWindow::rebuildMachineSettings() {
         if (idx >= 0) combo->setCurrentIndex(idx);
 
         connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [key, options](int i) {
+                [this, key, options](int i) {
             if (i >= 0 && i < options.size()) {
                 gState.variables[key] = options[i];
                 gState.variablesUpdated.store(true);
+                // 머신 세팅 즉시 저장 (게임 재실행 시 자동 복원)
+                gSettings.machineVars[m_loadedGame][key] = options[i];
+                gSettings.save();
             }
         });
 
@@ -2223,6 +2234,21 @@ void MainWindow::filterRoms(const QString& text) {
     // 로그: FAV/☆ 필터 적용 시 결과 확인용
     if (m_glFilter != 0)
         log(QString("[필터=%1] %2개 표시").arg(m_glFilter).arg(shown));
+
+    // 필터 후 선택 복원: 이전에 선택된 게임 항목 유지, 없으면 첫 번째 행 선택
+    bool selRestored = false;
+    if (!m_selectedGame.isEmpty()) {
+        for (int i = 0; i < m_gameList->count(); ++i) {
+            if (m_gameList->item(i)->data(Qt::UserRole).toString() == m_selectedGame) {
+                m_gameList->setCurrentRow(i);
+                m_gameList->scrollToItem(m_gameList->item(i), QAbstractItemView::EnsureVisible);
+                selRestored = true;
+                break;
+            }
+        }
+    }
+    if (!selRestored && m_gameList->count() > 0)
+        m_gameList->setCurrentRow(0);
 }
 
 void MainWindow::selectGame(const QString& romName) {
@@ -2304,6 +2330,16 @@ bool MainWindow::loadRomInternal() {
             if (QFile::exists(candidate)) { romPath = candidate; break; }
         }
     }
+
+    // 이전 게임 변수 초기화 후 저장된 머신 세팅 복원
+    // (코어가 SET_VARIABLES를 호출하기 전에 미리 세팅 → 기본값 덮어쓰기 방지)
+    gState.variables.clear();
+    gState.variableOptions.clear();
+    gState.variableDescriptions.clear();
+    const auto& saved = gSettings.machineVars.value(m_selectedGame);
+    for (auto it = saved.begin(); it != saved.end(); ++it)
+        gState.variables[it.key()] = it.value();
+
     bool ok = m_core->loadGame(romPath);
 
     // 치트 로드 (게임 실행 시점에만 — 선택 시 로드하면 목록 이동마다 파일I/O 발생)
@@ -2332,11 +2368,24 @@ bool MainWindow::loadRomInternal() {
 void MainWindow::startEmu() {
     m_npStates.clear();
     m_npInputHistory.clear();
-    m_frameDelay = 0.0;
+    m_frameDelay     = 0.0;
+    m_pendingResimTo = -1;
     gState.frameCount    = 0;
     gState.gameLoadFrame = 0;  // 치트 딜레이 기준점
     gState.fastForward   = false;
     gState.isPaused      = false;
+
+    // ── 입력 상태 완전 초기화 ────────────────────────────────
+    // 이전 게임 잔류 키 입력 방지:
+    //   1) GamepadManager 누산기 초기화 (Linux: m_buttonBits/stickBits/dpadBits 클리어
+    //      + fd 보류 이벤트 드레인) → m_jsBits 잔류로 rawKeys 재오염 차단
+    //   2) kbHeld 를 비워야 applyBits 가 해당 인덱스를 건너뛰지 않음
+    //   3) rawKeys/keys/p2Keys 도 0 으로 리셋 → 첫 프레임 오입력 차단
+    if (m_gamepad) m_gamepad->clearState();
+    gState.kbHeld.clear();
+    gState.rawKeys.fill(0);
+    gState.keys.fill(0);
+    gState.p2Keys.fill(0);
 
     // Canvas 옵션 적용
     if (m_canvas) {
@@ -2365,6 +2414,7 @@ void MainWindow::launchGame() {
     // 일시정지 상태 → 같은 게임이면 재개, 다른 게임이면 새로 로드
     if (gState.isPaused && m_loadedGame == m_selectedGame) {
         gState.isPaused = false;
+        if (m_audio && m_audio->isReady()) m_audio->flush();  // 링버퍼 재초기화
         m_aflClock.start();
         m_timer->start(1);
         enterGameScreen();
@@ -2448,6 +2498,9 @@ void MainWindow::togglePause() {
         leaveGameScreen();
         log("⏸ 일시정지");
     } else {
+        // 재개: 링버퍼·PID·리샘플러 초기화 (일시정지 중 링버퍼가 비어
+        //        DRC 재수렴에 ~25초 걸리는 문제 방지)
+        if (m_audio && m_audio->isReady()) m_audio->flush();
         m_frameAccum = 0.0;
         m_aflClock.start();
         m_timer->start(1);
@@ -2496,6 +2549,31 @@ void MainWindow::npApplyInput(uint16_t lb, uint16_t rb) {
 void MainWindow::onEmuTimer() {
     if (!gState.gameLoaded || !m_core || gState.isPaused) return;
 
+    // ── 게임패드 메뉴 진입: SELECT+START 2초 홀드 ─────────────────
+    // · Start 단독은 게임으로 그대로 전달 (KOF 보스선택 커맨드 정상 작동)
+    // · SELECT+START 동시 홀드 → 2초 후 메인 GUI 복귀
+    {
+        bool combo = (gState.rawKeys[2] != 0) && (gState.rawKeys[3] != 0);
+        if (combo) {
+            if (++m_menuHoldCount >= 120) {
+                m_menuHoldCount = 0;
+                togglePause();
+                return;
+            }
+        } else {
+            m_menuHoldCount = 0;
+        }
+    }
+
+    // ── 서비스 모드 자동 해제 (5초 = 300프레임) ───────────────────
+    if (gState.serviceMode) {
+        if (++gState.serviceModeFrames >= 300) {
+            gState.serviceMode       = false;
+            gState.serviceModeFrames = 0;
+            log("🔒 서비스 모드 해제 (타임아웃)");
+        }
+    }
+
     // ── AFL 타이밍 게이트 + No-Wait Frame Pacing ────────────────
     // m_frameDelay: 넷플레이 시 프레임 차이를 기반으로 ±1ms씩 자동 조절
     //   양수(슬로우다운) → 로컬이 리모트보다 앞설 때
@@ -2528,20 +2606,60 @@ void MainWindow::onEmuTimer() {
     if (gNetplay().playing()) {
         int cur = gState.frameCount;
 
-        // ── ① No-Wait 프레임 페이싱 ────────────────────────────
-        // 프레임 스톨(return) 대신 m_frameDelay 를 ±1ms 조절해 부드럽게 동기화
-        // diff > 0: 로컬이 앞섬 → 슬로우다운 / diff < 0: 뒤처짐 → 스피드업
+        // ── ① 청크 재시뮬 계속 처리 (stateReceived 미완료분) ────
+        // 재시뮬 중에는 일반 프레임 진행 없이 catch-up 우선
+        if (m_pendingResimTo >= 0 && cur < m_pendingResimTo) {
+            int chunkEnd = std::min(cur + MAX_RESIM_PER_TICK, m_pendingResimTo);
+            for (int rf = cur; rf < chunkEnd; ++rf) {
+                NpInputState& is = m_npInputHistory[rf];
+                uint16_t lb = is.local;
+                uint16_t rb = static_cast<uint16_t>(
+                    gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
+                is.remote = rb;
+                gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
+                npApplyInput(lb, rb);
+                m_core->run();
+                gState.frameCount = rf + 1;
+                size_t sz = m_core->serializeSize();
+                if (sz > 0) {
+                    QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
+                    if (m_core->serialize(buf.data(), sz))
+                        m_npStates[rf + 1] = buf;
+                }
+            }
+            if (gState.frameCount >= m_pendingResimTo) {
+                gState.netplayResim = false;
+                m_pendingResimTo = -1;
+                // 히스토리 정리 (pendingResimTo 완료 후)
+                int sf = cur;   // catch-up 완료 기준점
+                int cutoff = sf - 2;
+                for (auto it = m_npStates.begin(); it != m_npStates.end(); )
+                    it = (it.key() < cutoff) ? m_npStates.erase(it) : ++it;
+                while (!m_npInputHistory.empty() &&
+                       m_npInputHistory.begin()->first < cutoff)
+                    m_npInputHistory.erase(m_npInputHistory.begin());
+            }
+            return;  // 이번 틱은 catch-up 전용
+        }
+
+        // 재갱신 (cur 은 pending 완료 후 변경됐을 수 있음)
+        cur = gState.frameCount;
+
+        // ── ② No-Wait 프레임 페이싱 ────────────────────────────
+        // diff가 클수록 빠르게 보정: 소diff ±1ms, 중diff ±2ms, 대diff ±3ms
         {
             uint32_t remoteF = gNetplay().remoteMaxFrame();
             if (remoteF > 0) {
                 int diff = cur - static_cast<int>(remoteF);
-                if      (diff >  2) m_frameDelay = std::min(m_frameDelay + 1.0,  8.0);
+                if      (diff >  8) m_frameDelay = std::min(m_frameDelay + 3.0,  8.0);
+                else if (diff >  2) m_frameDelay = std::min(m_frameDelay + 1.0,  8.0);
+                else if (diff < -8) m_frameDelay = std::max(m_frameDelay - 3.0, -5.0);
                 else if (diff < -2) m_frameDelay = std::max(m_frameDelay - 1.0, -5.0);
                 else                m_frameDelay *= 0.90;  // 오차 범위: 자연 수렴
             }
         }
 
-        // ── ② 롤백 처리 (입력 예측 불일치 수정) ───────────────────
+        // ── ③ 롤백 처리 (입력 예측 불일치 수정) ───────────────────
         // 수신된 원격 입력과 예측값이 다른 가장 오래된 프레임으로 롤백
         int rollbackTo = gNetplay().getRollbackFrame(cur);
         if (rollbackTo >= 0 && rollbackTo < cur
@@ -2566,7 +2684,7 @@ void MainWindow::onEmuTimer() {
             gState.netplayResim = false;
         }
 
-        // ── ③ 현재 프레임 스냅샷 저장 (run() 직전) ──────────────
+        // ── ④ 현재 프레임 스냅샷 저장 (run() 직전) ──────────────
         // m_npStates[cur] = "cur 실행 직전" 상태 → 롤백 기준점
         {
             size_t sz = m_core->serializeSize();
@@ -2586,7 +2704,7 @@ void MainWindow::onEmuTimer() {
             }
         }
 
-        // ── ④ 입력 수집 · 전송 · 히스토리 저장 ──────────────────
+        // ── ⑤ 입력 수집 · 전송 · 히스토리 저장 ──────────────────
         uint16_t localBits = 0;
         for (int i = 0; i < 16; ++i)
             if (gState.rawKeys[i]) localBits |= (1 << i);
@@ -2601,12 +2719,12 @@ void MainWindow::onEmuTimer() {
         his.remote = remoteBits;
         gNetplay().recordPrediction(static_cast<uint32_t>(cur), remoteBits);
 
-        // ── ⑤ 프레임 실행 ──────────────────────────────────────
+        // ── ⑥ 프레임 실행 ──────────────────────────────────────
         npApplyInput(localBits, remoteBits);
         m_core->run();
         gState.frameCount++;
 
-        // ── ⑥ 오래된 버퍼 정리 ─────────────────────────────────
+        // ── ⑦ 오래된 버퍼 정리 ─────────────────────────────────
         gNetplay().confirmFramesUpTo(static_cast<uint32_t>(cur));
         int cutoff = cur - NetplayManager::MAX_ROLLBACK - 2;
         for (auto it = m_npStates.begin(); it != m_npStates.end(); )
@@ -2627,6 +2745,23 @@ void MainWindow::onEmuTimer() {
                 gState.keys[i] = (phase == 0) ? 1 : 0;
             }
         }
+
+        // ── L2(서비스 버튼) 차단 ─────────────────────────────────────
+        // FBNeo 기판 서비스 메뉴 진입 트리거: RETRO_DEVICE_ID_JOYPAD_L2 (index 12)
+        // Xbox LT 트리거 → 0x10000 → index 12 로 매핑됨
+        // serviceMode=false(기본) 상태에서는 코어에 0 전달 → 서비스 메뉴 차단
+        // serviceMode=true(` 키 토글 후 5초간)에서만 L2 허용 → 의도적 진입 가능
+        if (!gState.serviceMode)
+            gState.keys[12] = 0;
+
+        // ── START 홀드 캡 제거 ───────────────────────────────────────────
+        // NeoGeo 서비스 메뉴는 MVS BIOS 내부 로직으로 START 홀드를 감지함.
+        // 프론트엔드 키 캡으로는 "보스선택 커맨드(30초 START 홀드)"와
+        // "서비스 메뉴 진입(START 홀드)"을 구분할 수 없어 근본 해결 불가.
+        // → NeoGeo 게임은 Machine Settings에서 Mode를 MVS→AES로 변경하면
+        //   가정용 BIOS 사용으로 오퍼레이터 테스트 메뉴 자체가 사라짐.
+        // → CPS 등 다른 시스템은 위의 L2(index 12) 차단으로 처리됨.
+        m_startHoldFrames = 0;  // 사용 안 함 (변수 유지, 향후 확장용)
 
         int runs = gState.fastForward ? 3 : 1;
         for (int i = 0; i < runs; ++i) m_core->run();
@@ -2816,7 +2951,6 @@ void MainWindow::startRecording() {
     if (!gState.gameLoaded) { log("녹화: 게임 실행 중이 아닙니다"); return; }
     if (gState.isRecording)  return;
 
-#if HAVE_FFMPEG
     if (gState.videoWidth == 0 || gState.videoHeight == 0) {
         log("녹화: 비디오 해상도를 알 수 없습니다 (프레임 없음)");
         return;
@@ -2826,8 +2960,6 @@ void MainWindow::startRecording() {
     QString ts      = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     QString outPath = gSettings.recordPath + "/" + m_selectedGame + "_" + ts + ".mp4";
 
-    // libav* 는 UTF-8 경로를 직접 처리하므로 임시경로 우회 불필요
-    // (Windows avio_open 은 UTF-8 지원)
     double fps = gState.coreFps > 0.0 ? gState.coreFps : 60.0;
     VideoPixelFormat vpf = (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888)
                            ? VPF_XRGB8888 : VPF_RGB565;
@@ -2853,9 +2985,6 @@ void MainWindow::startRecording() {
 
     if (m_canvas) m_canvas->setRecording(true);
     log("🔴 녹화 시작 → " + outPath);
-#else
-    log("🔴 녹화: FFmpeg 라이브러리가 빌드에 포함되지 않았습니다");
-#endif
 }
 
 void MainWindow::stopRecording() {
@@ -2867,15 +2996,13 @@ void MainWindow::stopRecording() {
     QString dest = gState.lastRecordPath;
     gState.lastRecordPath.clear();
 
-#if HAVE_FFMPEG
     if (m_videoRecorder) {
-        // close() 는 동기(즉시 파일 닫기) — libav* 는 flush 후 즉시 완료됨
+        // close() 는 동기 완료 (WMF: Finalize(), FFmpeg: flush+trailer)
         m_videoRecorder->close();
         delete m_videoRecorder;
         m_videoRecorder = nullptr;
         log("■ 녹화 완료: " + dest);
     }
-#endif
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2990,6 +3117,15 @@ void MainWindow::leaveGameScreen() {
         m_cursorHidden = false;
     }
 
+    // ── 입력 상태 초기화 ────────────────────────────────────
+    // 게임 화면 → GUI 복귀 시 눌린 채로 남아있는 키/버튼 초기화
+    // GamepadManager 누산기도 함께 초기화해야 다음 폴링에서 rawKeys 재오염 방지
+    if (m_gamepad) m_gamepad->clearState();
+    gState.kbHeld.clear();
+    gState.rawKeys.fill(0);
+    gState.keys.fill(0);
+    gState.p2Keys.fill(0);
+
     // 게임 종료 시 스왑 상태 리셋
     if (gState.swapPlayers) {
         gState.swapPlayers = false;
@@ -3003,6 +3139,13 @@ void MainWindow::leaveGameScreen() {
     // 선택된 게임이 있으면 프리뷰 재로드
     if (!m_selectedGame.isEmpty())
         loadPreview(m_selectedGame);
+
+    // 게임리스트 포커스 복원: D패드/방향키 즉시 동작하도록
+    if (m_gameList) {
+        m_gameList->setFocus();
+        if (m_gameList->currentRow() < 0 && m_gameList->count() > 0)
+            m_gameList->setCurrentRow(0);
+    }
 }
 
 // ── 마우스 커서 자동 숨김 ─────────────────────────────────────
@@ -3075,11 +3218,60 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
 //  키 이벤트
 // ════════════════════════════════════════════════════════════
 void MainWindow::keyPressEvent(QKeyEvent* e) {
+    int k    = e->key();
+    bool alt = (e->modifiers() & Qt::AltModifier);
+
+    // ── GUI 모드 전용: 방향키/엔터 → 게임리스트 전용 처리 ──────────
+    // 게임 화면(스택 1)이 아닌 경우만 적용
+    // → 방향키가 다른 위젯(버튼, 스크롤바 등)으로 포커스 이동하는 것을 차단
+    if (m_stack && m_stack->currentIndex() == 0 && m_gameList) {
+
+        // 상하 방향키: 게임리스트 한 칸 이동 (auto-repeat 포함)
+        if (k == Qt::Key_Up || k == Qt::Key_Down) {
+            int cnt = m_gameList->count();
+            if (cnt > 0) {
+                int row = m_gameList->currentRow();
+                if (row < 0) row = (k == Qt::Key_Down) ? 0 : cnt - 1;
+                else         row = std::clamp(row + (k == Qt::Key_Down ? 1 : -1), 0, cnt - 1);
+                m_gameList->setCurrentRow(row);
+                m_gameList->scrollToItem(m_gameList->item(row),
+                                         QAbstractItemView::EnsureVisible);
+            }
+            return;  // 소비 — Qt 포커스 이동 차단
+        }
+
+        // 좌우 방향키: 페이지 이동 (auto-repeat 포함)
+        if (k == Qt::Key_Left || k == Qt::Key_Right) {
+            int cnt = m_gameList->count();
+            if (cnt > 0) {
+                int rowH     = m_gameList->sizeHintForRow(0);
+                int pageSize = (rowH > 0)
+                    ? std::max(1, m_gameList->viewport()->height() / rowH) : 10;
+                int dir = (k == Qt::Key_Left) ? -1 : 1;
+                int row = std::clamp(
+                    std::max(0, m_gameList->currentRow()) + dir * pageSize,
+                    0, cnt - 1);
+                m_gameList->setCurrentRow(row);
+                m_gameList->scrollToItem(m_gameList->item(row),
+                                         QAbstractItemView::PositionAtTop);
+            }
+            return;  // 소비
+        }
+
+        // Enter / Return → 선택 게임 실행 (Alt+Enter는 전체화면이므로 제외, auto-repeat 제외)
+        if (!e->isAutoRepeat() && !alt
+            && (k == Qt::Key_Return || k == Qt::Key_Enter)
+            && !m_selectedGame.isEmpty()) {
+            launchGame();
+            return;
+        }
+    }
+    // ────────────────────────────────────────────────────────────
+
     if (e->isAutoRepeat()) { QMainWindow::keyPressEvent(e); return; }
-    int k = e->key();
     bool shift = (e->modifiers() & Qt::ShiftModifier);
 
-    // Tab: 일시정지 토글
+    // Tab: 메인 GUI ↔ 게임 화면 전환 (원래 동작 유지)
     if (k == Qt::Key_Tab)  { togglePause(); return; }
 
     // ESC: 게임 종료 → GUI로 복귀
@@ -3096,6 +3288,18 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // Alt+Enter: 전체화면
     if ((k == Qt::Key_Return || k == Qt::Key_Enter)
         && (e->modifiers() & Qt::AltModifier)) { toggleFullscreen(); return; }
+
+    // ` (백틱): 서비스 모드 토글
+    // serviceMode=true 시 L2(Xbox LT) 차단 해제 → FBNeo 기판 서비스 메뉴 진입 가능
+    // 5초(300프레임) 후 자동 해제됨
+    if (k == Qt::Key_QuoteLeft) {
+        if (gState.gameLoaded && !gState.isPaused) {
+            gState.serviceMode       = !gState.serviceMode;
+            gState.serviceModeFrames = 0;
+            log(gState.serviceMode ? "🔓 서비스 모드 활성 (5초간)" : "🔒 서비스 모드 해제");
+        }
+        return;
+    }
 
     // F1~F8: 슬롯 로드 / Shift+F1~F8: 슬롯 저장
     static const int fKeys[] = {

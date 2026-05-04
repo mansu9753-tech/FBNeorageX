@@ -181,7 +181,7 @@ int GamepadManager::pollRawForCapture(bool winmm) {
     }
 #else
     Q_UNUSED(winmm)
-    return (m_jsFd >= 0) ? static_cast<int>(m_jsBits) : -1;
+    return (m_jsFd >= 0) ? static_cast<int>(m_buttonBits | m_stickBits | m_dpadBits) : -1;
 #endif
 }
 
@@ -248,7 +248,10 @@ void GamepadManager::onPoll() {
 
 void GamepadManager::applyBits(uint16_t bits) {
     for (int i = 0; i < 16; ++i) {
-        if (gState.kbHeld.contains(i)) continue;  // 키보드 우선
+        // 게임 실행 중에만 키보드 우선 (kbHeld 가 채워져 있을 때)
+        // 게임 미실행 시(메뉴 탐색)에는 gamepad 가 rawKeys 를 직접 갱신
+        // → kbHeld 잔류로 인해 rawKeys 가 stuck 되는 현상 방지
+        if (gState.gameLoaded && gState.kbHeld.contains(i)) continue;
         gState.rawKeys[i] = (bits >> i) & 1;
     }
 }
@@ -460,64 +463,81 @@ uint16_t GamepadManager::readJoystick() {
     if (m_jsFd < 0) {
         if (!openJoystick()) return 0;
     }
+
+    // ── xpad / Steam Deck 표준 축 레이아웃 ───────────────────
+    // axis 0: 왼쪽 스틱 X   axis 1: 왼쪽 스틱 Y
+    // axis 2: LT 트리거     axis 5: RT 트리거
+    // axis 6: D-패드 X      axis 7: D-패드 Y
+    // ── 소스별 비트 분리 ──────────────────────────────────────
+    // m_buttonBits: JS_EVENT_BUTTON 이벤트 전용
+    // m_stickBits : axis 0/1 (왼쪽 스틱) — 게임 입력
+    // m_dpadBits  : axis 6/7 (D-패드 hat) — 게임 + UI 네비
+    // → 스틱과 D-패드가 동일 방향 비트를 공유하지 않으므로 상호 간섭 없음
+    const short DEAD = 10000;  // ~30% 데드존 (스틱 드리프트 방지 강화)
+
     struct js_event ev;
     while (::read(m_jsFd, &ev, sizeof(ev)) == sizeof(ev)) {
         if (ev.type & JS_EVENT_INIT) continue;
+
         if (ev.type == JS_EVENT_BUTTON) {
+            // 버튼 이벤트 → m_buttonBits 만 수정 (방향 비트와 분리)
             auto it = m_xinputMapping.find(ev.number);
             if (it != m_xinputMapping.end() && it.value() < 16) {
-                if (ev.value) m_jsBits |=  (1 << it.value());
-                else          m_jsBits &= ~(1 << it.value());
+                if (ev.value) m_buttonBits |=  (1u << it.value());
+                else          m_buttonBits &= ~(1u << it.value());
             }
+
         } else if (ev.type == JS_EVENT_AXIS) {
             int   axis = ev.number;
             short val  = ev.value;
-            // ── xpad / Steam Deck 표준 축 레이아웃 ──────────────────
-            // axis 0: 왼쪽 스틱 X  axis 1: 왼쪽 스틱 Y
-            // axis 2: LT 트리거   axis 3: 오른쪽 스틱 X
-            // axis 4: 오른쪽 스틱 Y  axis 5: RT 트리거
-            // axis 6: D-패드 X    axis 7: D-패드 Y
-            const short DEAD = 8192;  // ~25% 데드존
 
             if (axis == 0) {
-                // 왼쪽 스틱 X → LEFT / RIGHT (게임 입력용)
-                m_jsBits &= ~((1 << LR_LT) | (1 << LR_RT));
-                if (val < -DEAD) m_jsBits |= (1 << LR_LT);
-                if (val >  DEAD) m_jsBits |= (1 << LR_RT);
+                // 왼쪽 스틱 X → m_stickBits (LEFT/RIGHT) — D-패드 비트 불간섭
+                m_stickBits &= ~((1u << LR_LT) | (1u << LR_RT));
+                if (val < -DEAD) m_stickBits |= (1u << LR_LT);
+                if (val >  DEAD) m_stickBits |= (1u << LR_RT);
+
             } else if (axis == 1) {
-                // 왼쪽 스틱 Y → UP / DOWN (게임 입력용, 아날로그 드리프트 가능)
-                m_jsBits &= ~((1 << LR_UP) | (1 << LR_DN));
-                if (val < -DEAD) m_jsBits |= (1 << LR_UP);
-                if (val >  DEAD) m_jsBits |= (1 << LR_DN);
+                // 왼쪽 스틱 Y → m_stickBits (UP/DOWN) — D-패드 비트 불간섭
+                m_stickBits &= ~((1u << LR_UP) | (1u << LR_DN));
+                if (val < -DEAD) m_stickBits |= (1u << LR_UP);
+                if (val >  DEAD) m_stickBits |= (1u << LR_DN);
+
             } else if (axis == 6) {
-                // D-패드 X → LEFT / RIGHT (게임 + UI 네비용)
-                m_jsBits   &= ~((1 << LR_LT) | (1 << LR_RT));
-                m_dpadBits &= ~((1 << LR_LT) | (1 << LR_RT));
-                if (val < -DEAD) { m_jsBits |= (1 << LR_LT); m_dpadBits |= (1 << LR_LT); }
-                if (val >  DEAD) { m_jsBits |= (1 << LR_RT); m_dpadBits |= (1 << LR_RT); }
+                // D-패드 X → m_dpadBits (LEFT/RIGHT) — 스틱 비트 불간섭
+                m_dpadBits &= ~((1u << LR_LT) | (1u << LR_RT));
+                if (val < -DEAD) m_dpadBits |= (1u << LR_LT);
+                if (val >  DEAD) m_dpadBits |= (1u << LR_RT);
+
             } else if (axis == 7) {
-                // D-패드 Y → UP / DOWN (게임 + UI 네비용 — 디지털값만, 드리프트 없음)
-                m_jsBits   &= ~((1 << LR_UP) | (1 << LR_DN));
-                m_dpadBits &= ~((1 << LR_UP) | (1 << LR_DN));
-                if (val < -DEAD) { m_jsBits |= (1 << LR_UP); m_dpadBits |= (1 << LR_UP); }
-                if (val >  DEAD) { m_jsBits |= (1 << LR_DN); m_dpadBits |= (1 << LR_DN); }
+                // D-패드 Y → m_dpadBits (UP/DOWN)
+                m_dpadBits &= ~((1u << LR_UP) | (1u << LR_DN));
+                if (val < -DEAD) m_dpadBits |= (1u << LR_UP);
+                if (val >  DEAD) m_dpadBits |= (1u << LR_DN);
+
             } else if (axis == 2) {
-                // LT 트리거 → L2  (쉬는 상태=-32767, 완전 누름=+32767)
-                if (val > 0) m_jsBits |=  (1 << LR_L2);
-                else         m_jsBits &= ~(1 << LR_L2);
+                // LT 트리거 → L2
+                if (val > 0) m_buttonBits |=  (1u << LR_L2);
+                else         m_buttonBits &= ~(1u << LR_L2);
+
             } else if (axis == 5) {
                 // RT 트리거 → R2
-                if (val > 0) m_jsBits |=  (1 << LR_R2);
-                else         m_jsBits &= ~(1 << LR_R2);
+                if (val > 0) m_buttonBits |=  (1u << LR_R2);
+                else         m_buttonBits &= ~(1u << LR_R2);
             }
         }
     }
+
     if (errno == ENODEV) {
-        ::close(m_jsFd); m_jsFd = -1; m_jsBits = 0; m_dpadBits = 0;
+        ::close(m_jsFd);
+        m_jsFd = -1;
+        m_buttonBits = 0; m_stickBits = 0; m_dpadBits = 0;
         if (m_connected) { m_connected = false; emit disconnected(); }
         return 0;
     }
-    return m_jsBits;
+
+    // 최종값: 버튼 + 스틱 + D-패드 OR 합산 (소스별 독립 → 간섭 없음)
+    return m_buttonBits | m_stickBits | m_dpadBits;
 }
 
 uint16_t GamepadManager::dpadBits() const {
@@ -528,4 +548,22 @@ uint16_t GamepadManager::dpadBits() const {
 #endif
 }
 
+#endif  // !_WIN32 (Linux section end)
+
+// ── 게임 전환 시 입력 누산기 초기화 (플랫폼 공통) ─────────────────
+// 이전 게임의 잔류 버튼/스틱 상태 제거 + Linux: fd 보류 이벤트 드레인
+void GamepadManager::clearState() {
+#ifndef _WIN32
+    m_buttonBits = 0;
+    m_stickBits  = 0;
+    m_dpadBits   = 0;
+    // 이전 게임 중 발생한 미처리 이벤트 드레인
+    if (m_jsFd >= 0) {
+        struct js_event ev;
+        while (::read(m_jsFd, &ev, sizeof(ev)) == sizeof(ev)) {}
+        // errno == EAGAIN/EWOULDBLOCK → 정상 (O_NONBLOCK)
+    }
+    // rawKeys 와 kbHeld 는 MainWindow 에서 직접 초기화
 #endif
+    // Windows: rawKeys/kbHeld 초기화는 MainWindow 에서 수행 (GamepadManager는 비트 없음)
+}

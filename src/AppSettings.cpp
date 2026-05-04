@@ -142,6 +142,17 @@ void AppSettings::load(const QString& path) {
     loadIntMap("winmm_mapping",    winmmMapping);
     loadIntMap("keyboard_mapping", keyboardMapping);
 
+    // 머신 세팅 (DIP/BIOS): { romName: { key: value } }
+    machineVars.clear();
+    QJsonObject mv = o["machine_vars"].toObject();
+    for (auto it = mv.begin(); it != mv.end(); ++it) {
+        QHash<QString,QString> vars;
+        QJsonObject rv = it.value().toObject();
+        for (auto jt = rv.begin(); jt != rv.end(); ++jt)
+            vars[jt.key()] = jt.value().toString();
+        machineVars[it.key()] = vars;
+    }
+
     // 경로 디렉터리 자동 생성
     for (const QString& dir : {romPath, previewPath, screenshotPath, savePath, cheatPath, recordPath})
         QDir().mkpath(dir);
@@ -201,6 +212,16 @@ void AppSettings::save(const QString& path) const {
     saveIntMap("xinput_mapping",   xinputMapping);
     saveIntMap("winmm_mapping",    winmmMapping);
     saveIntMap("keyboard_mapping", keyboardMapping);
+
+    // 머신 세팅 (DIP/BIOS)
+    QJsonObject mv;
+    for (auto it = machineVars.begin(); it != machineVars.end(); ++it) {
+        QJsonObject rv;
+        for (auto jt = it.value().begin(); jt != it.value().end(); ++jt)
+            rv[jt.key()] = jt.value();
+        mv[it.key()] = rv;
+    }
+    o["machine_vars"] = mv;
 
     QFile f(p);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

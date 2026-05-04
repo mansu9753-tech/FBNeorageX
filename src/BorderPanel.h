@@ -23,6 +23,18 @@ public:
     // 내부 레이아웃 접근 (자식 위젯 추가용)
     QVBoxLayout* innerLayout() const { return m_layout; }
 
+    // 라운드 코너 제어 — 인접 패널과 맞닿는 안쪽 코너는 직각(square)으로 설정
+    // CornerXxx 상수를 OR 조합해서 사용
+    // 예) 좌측 패널: CornerTL | CornerBL
+    //     우측 패널: CornerTR | CornerBR
+    static constexpr int CornerTL  = 0x1;   // Top-Left
+    static constexpr int CornerTR  = 0x2;   // Top-Right
+    static constexpr int CornerBL  = 0x4;   // Bottom-Left
+    static constexpr int CornerBR  = 0x8;   // Bottom-Right
+    static constexpr int CornerAll = 0xF;   // 모든 코너 (기본값)
+
+    void setRoundedCorners(int cornerFlags);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
 
@@ -34,6 +46,7 @@ private:
     double       m_prog   = 0.0;   // 0.0 ~ 1.0
     QTimer*      m_timer  = nullptr;
     QVBoxLayout* m_layout = nullptr;
+    int          m_roundedCorners = CornerAll;
 
     // 색상 상수
     static const QColor COL_A;     // 메인 테두리 좌상

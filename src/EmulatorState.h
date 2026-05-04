@@ -51,6 +51,12 @@ struct EmulatorState {
     // 연습용 1P↔2P 포트 스왑 (싱글 플레이 연습 모드)
     bool swapPlayers = false;
 
+    // ── 서비스 모드 ─────────────────────────────────────────
+    // true 일 때만 START 장누름이 코어로 전달됨 (기판 서비스 메뉴 진입 허용)
+    // ` (백틱) 키로 토글. 5초(300프레임) 후 자동 해제.
+    bool serviceMode        = false;
+    int  serviceModeFrames  = 0;    // 활성화 후 경과 프레임
+
     // 현재 눌린 키보드 인덱스 집합
     QSet<int>   kbHeld;
 

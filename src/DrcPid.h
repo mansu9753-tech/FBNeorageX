@@ -55,8 +55,20 @@ public:
         const int16_t* src = reinterpret_cast<const int16_t*>(data.constData());
         int srcFrames = data.size() / 4;
 
-        // 출력 프레임 수 (최소 1 보장)
-        int dstFrames = std::max(1, static_cast<int>(std::floor(srcFrames / ratio)));
+        // ── 위상-연속 출력 프레임 수 계산 ────────────────────────
+        // m_phase 를 반영해 출력 프레임 수를 결정:
+        //   dstFrames = floor((srcFrames - m_phase) / ratio)
+        //
+        // 이전 코드(floor(srcFrames/ratio))는 m_phase 를 무시하여
+        // 매 프레임 잔여 위상(~0.3~0.98프레임)을 버림 → 평균 출력 속도가
+        // HW 소비 속도보다 약간 낮아져 PID가 지속적으로 보정 → 미세 진동
+        //
+        // 수정 후: dstFrames 가 프레임마다 floor/floor+1 을 교대하며
+        // 평균 출력 속도가 정확히 coreSampleRate/hwSampleRate 에 수렴.
+        // CPS1(~739 smp/f)이나 NeoGeo(~745 smp/f) 등 게임별 fps 차이에도
+        // 위상 정보가 손실 없이 누적됨.
+        int dstFrames = std::max(1,
+            static_cast<int>((srcFrames - m_phase) / ratio));
 
         QByteArray out(dstFrames * 4, '\0');
         int16_t* dst = reinterpret_cast<int16_t*>(out.data());
@@ -83,9 +95,14 @@ public:
             pos += ratio;
         }
 
-        // 위상 갱신 — 0 이상으로 클램프
-        m_phase = pos - static_cast<double>(srcFrames);
-        if (m_phase < 0.0) m_phase = 0.0;
+        // ── 위상 갱신 — 정확한 잔여분 전달 ──────────────────────
+        // 새 위상 = 처리 후 입력 위치 - srcFrames
+        // 범위: (-ratio, 0] → 다음 호출에서 dstFrames 계산에 반영됨
+        // (음수: 청크 시작 직전을 약간 참조 → getSample 클램핑으로 처리)
+        m_phase = m_phase + static_cast<double>(dstFrames) * ratio
+                  - static_cast<double>(srcFrames);
+        // 극단적 비율 변화(DRC maxAdj 초과) 시 위상 이탈 방지
+        if (m_phase < -ratio * 2.0 || m_phase > 1.0) m_phase = 0.0;
 
         return out;
     }

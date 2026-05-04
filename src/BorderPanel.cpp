@@ -20,6 +20,44 @@ const QColor BorderPanel::COL_B    (0,   0,   160);
 const QColor BorderPanel::COL_HI   (74, 190,  255);
 const QColor BorderPanel::COL_TITLE(255, 255, 255);
 
+// ─────────────────────────────────────────────────────────────
+//  setRoundedCorners — 코너별 라운딩 설정
+// ─────────────────────────────────────────────────────────────
+void BorderPanel::setRoundedCorners(int cornerFlags)
+{
+    m_roundedCorners = cornerFlags;
+    update();
+}
+
+// ─────────────────────────────────────────────────────────────
+//  코너별 라운드 직사각형 경로 생성 헬퍼
+//  corners: Qt::Corner 비트마스크 (라운딩할 코너만 포함)
+// ─────────────────────────────────────────────────────────────
+static QPainterPath makeCornerPath(int W, int H, int r, int corners)
+{
+    qreal tl = (corners & BorderPanel::CornerTL) ? r : 0;
+    qreal tr = (corners & BorderPanel::CornerTR) ? r : 0;
+    qreal br = (corners & BorderPanel::CornerBR) ? r : 0;
+    qreal bl = (corners & BorderPanel::CornerBL) ? r : 0;
+
+    QPainterPath path;
+    path.moveTo(tl, 0);
+    path.lineTo(W - tr, 0);
+    if (tr > 0) path.arcTo(W - 2*tr, 0,        2*tr, 2*tr,  90, -90);
+    else        path.lineTo(W, 0);
+    path.lineTo(W, H - br);
+    if (br > 0) path.arcTo(W - 2*br, H - 2*br, 2*br, 2*br,   0, -90);
+    else        path.lineTo(W, H);
+    path.lineTo(bl, H);
+    if (bl > 0) path.arcTo(0,        H - 2*bl, 2*bl, 2*bl, -90, -90);
+    else        path.lineTo(0, H);
+    path.lineTo(0, tl);
+    if (tl > 0) path.arcTo(0,        0,        2*tl, 2*tl, 180, -90);
+    else        path.lineTo(0, 0);
+    path.closeSubpath();
+    return path;
+}
+
 // ── 생성자 ────────────────────────────────────────────────
 BorderPanel::BorderPanel(const QString& title, QWidget* parent)
     : QWidget(parent)
@@ -104,9 +142,8 @@ void BorderPanel::paintEvent(QPaintEvent* event)
     // 외곽 라운드 반지름 (bw/2 이하 → 코너 처리가 테두리 strip 안에서만)
     constexpr int r = 9;
 
-    // ── 외곽 라운드 경로 (모든 strip 클리핑 기준) ──────────
-    QPainterPath outerPath;
-    outerPath.addRoundedRect(QRectF(0, 0, W, H), r, r);
+    // ── 외곽 경로: 지정 코너만 라운드, 나머지는 직각 ────────
+    QPainterPath outerPath = makeCornerPath(W, H, r, m_roundedCorners);
 
     // ── 애니메이션: 시계방향 드로잉 진행률 계산 ────────────
     const bool full  = (m_prog >= 1.0);

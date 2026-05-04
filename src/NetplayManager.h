@@ -33,21 +33,22 @@ public:
     // ── 메시지 타입 ──────────────────────────────────────────
     static constexpr uint8_t MSG_INPUT     = 0x00; // 번들 입력
     static constexpr uint8_t MSG_LOAD_GAME = 0x01; // 게임 선택 동기화
-    static constexpr uint8_t MSG_READY     = 0x03; // 로딩 완료 선언
-    static constexpr uint8_t MSG_START     = 0x04; // 호스트→양쪽 동시 시작
+    static constexpr uint8_t MSG_READY     = 0x03; // 로딩 완료 선언 (+ RTT 페이로드)
+    static constexpr uint8_t MSG_START     = 0x04; // 호스트→클라이언트 시작 신호
     static constexpr uint8_t MSG_STATE     = 0x05; // 스냅샷 청크
     static constexpr uint8_t MSG_HELLO     = 0x06; // UDP 핸드셰이크
     static constexpr uint8_t MSG_ACK       = 0x07; // 핸드셰이크 응답
     static constexpr uint8_t MSG_GAME_OVER = 0x08; // 게임 종료 선언
     static constexpr uint8_t MSG_HEARTBEAT = 0x09; // 연결 유지
+    static constexpr uint8_t MSG_START_ACK = 0x0A; // 클라이언트→호스트 시작 확인
 
     // ── 상수 ────────────────────────────────────────────────
-    static constexpr int  MAX_ROLLBACK      = 20;
+    static constexpr int  MAX_ROLLBACK      = 30;   // 롤백 창 확대 (20→30)
     static constexpr int  MAX_AHEAD         = 8;
-    static constexpr int  SYNC_INTERVAL     = 8;
+    static constexpr int  SYNC_INTERVAL     = 4;    // 싱크 간격 축소 (8→4 프레임)
     static constexpr int  DEFAULT_PORT      = 7845;
     static constexpr int  CHUNK_SIZE        = 1300;
-    static constexpr int  INPUT_REDUNDANCY  = 5;
+    static constexpr int  INPUT_REDUNDANCY  = 8;    // 입력 중복 전송 증가 (5→8)
     static constexpr int  HELLO_RETRY_MAX   = 50;
     static constexpr int  HELLO_INTERVAL_MS = 200;
     static constexpr int  HEARTBEAT_INTERVAL_MS = 500;
@@ -72,6 +73,7 @@ public:
     bool    isHost()   const { return m_isHost; }
     bool    playing()  const { return m_state == State::Playing; }
     QString localIp()  const;
+    int     rttMs()    const { return m_rttMs; }
 
     // ── 게임 흐름 메시지 ─────────────────────────────────────
     void sendLoadGame(const QString& romName);  // 호스트: 게임 선택 알림
@@ -118,9 +120,14 @@ private:
     QHostAddress m_remoteAddr;
     quint16      m_remotePort = 0;
 
-    // ── HELLO 재시도 ─────────────────────────────────────────
-    QTimer* m_helloTimer = nullptr;
-    int     m_helloRetry = 0;
+    // ── HELLO 재시도 + RTT 측정 ──────────────────────────────
+    QTimer*       m_helloTimer   = nullptr;
+    int           m_helloRetry   = 0;
+    QElapsedTimer m_helloSentAt;  // 첫 HELLO 송신 시각 (RTT 측정용)
+    int           m_rttMs        = 100; // 왕복 지연 추정치 (ms, HELLO→ACK 측정)
+
+    // ── ACK 기반 동시 시작 제어 ──────────────────────────────
+    bool          m_waitingStartAck = false; // sendStart 후 ACK 대기 플래그
 
     // ── Heartbeat / Disconnect 감지 ──────────────────────────
     QTimer*       m_heartbeatTimer = nullptr;
