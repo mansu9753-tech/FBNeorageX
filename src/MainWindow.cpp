@@ -176,7 +176,7 @@ QString MainWindow::groupStyle() {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("FBNEORAGEX Core Edition 1.8");
+    setWindowTitle("FBNEORAGEX Core Edition 1.9");
     m_windowedSize = QSize(1360, 840);
     resize(m_windowedSize);
     setMinimumSize(900, 640);

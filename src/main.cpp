@@ -16,7 +16,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     app.setApplicationName("FBNeoRageX");
-    app.setApplicationVersion("1.8");
+    app.setApplicationVersion("1.9");
     app.setOrganizationName("FBNeoRageX");
 
     // ── 작업 디렉터리를 실행파일 위치로 고정 ──────────────
