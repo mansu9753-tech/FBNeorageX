@@ -87,7 +87,10 @@ CheatPlatform CheatManager::detectPlatform(const QString& romName) const {
     static const QStringList cpsPfx = {
         "sf","ssf","sfa","sfz","xmvsf","msh","mvsc","mvc","avsp","vsav",
         "knights","ffight","ghouls","strider","1941","1944","19xx",
-        "progear","gigawing","mmatrix","cybots","cyvern","ddtod","ddsoma"};
+        "progear","gigawing","mmatrix","cybots","cyvern","ddtod","ddsoma",
+        // CPS1 추가 (dino=케딜락앤다이노소어, punisher, slammast, wof=워리어스오브페이트, kod=킹오브드래곤)
+        "dino","punisher","slammast","wof","kod","mercs","willow","unsquad",
+        "dynwar","cawing","forgottn","varth","pang","mpang","qad","traja"};
 
     QString lc = romName.toLower();
     for (const QString& p : neoPfx)

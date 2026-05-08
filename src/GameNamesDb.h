@@ -1,9 +1,14 @@
 #pragma once
 // GameNamesDb.h — 내장 게임명 데이터베이스 (헤더 전용)
 // rom파일명 → 표시명 (한글/영문 혼용)
+// gamelist.xml (라즈겜동 한글화 파일) 지원 — exe 폴더에 파일을 넣으면 자동 적용
 
 #include <QHash>
 #include <QString>
+#include <QFile>
+#include <QDir>
+#include <QXmlStreamReader>
+#include <QCoreApplication>
 
 inline const QHash<QString, QString>& gameNamesDb() {
     static const QHash<QString, QString> db = {
@@ -200,9 +205,83 @@ inline const QHash<QString, QString>& gameNamesDb() {
     return db;
 }
 
-// 표시명 반환 (없으면 대문자 romName)
+// gamelist.xml 로드 (exe 폴더 또는 상위 폴더에 있으면 자동 적용, 없으면 빈 DB)
+// 라즈겜동 한글화 파일 형식: <game><path>./romname.zip</path><name>한글명</name>...</game>
+// 탐색 순서:
+//   1) exe 폴더/gamelist.xml          (Windows: FBNeoRageX.exe 옆)
+//   2) exe 폴더/../gamelist.xml       (Steam Deck: bin/ 하위 바이너리 → 루트 폴더)
+inline const QHash<QString, QString>& gamelistXmlDb() {
+    static QHash<QString, QString> db;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        const QString appDir = QCoreApplication::applicationDirPath();
+        // QDir::absolutePath()로 .. 를 실제 경로로 정규화 (Linux/Steam Deck 필수)
+        QStringList candidates = {
+            appDir + "/gamelist.xml",
+            QDir(appDir + "/..").absolutePath() + "/gamelist.xml"
+        };
+        QString xmlPath;
+        for (const QString& candidate : candidates) {
+            qDebug() << "[GamelistXml] 탐색:" << candidate
+                     << (QFile::exists(candidate) ? "✅ 발견" : "❌ 없음");
+            if (QFile::exists(candidate)) {
+                xmlPath = candidate;
+                break;
+            }
+        }
+        if (xmlPath.isEmpty()) {
+            qDebug() << "[GamelistXml] gamelist.xml 없음 — 한글화 미적용";
+            return db;
+        }
+        qDebug() << "[GamelistXml] 로드:" << xmlPath;
+        QFile file(xmlPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            QXmlStreamReader xml(&file);
+            QString currentPath, currentName;
+            bool inGame = false;
+            while (!xml.atEnd() && !xml.hasError()) {
+                xml.readNext();
+                if (xml.isStartElement()) {
+                    const auto tag = xml.name();
+                    if (tag == QLatin1String("game")) {
+                        inGame = true;
+                        currentPath.clear();
+                        currentName.clear();
+                    } else if (inGame && tag == QLatin1String("path")) {
+                        currentPath = xml.readElementText();
+                    } else if (inGame && tag == QLatin1String("name")) {
+                        currentName = xml.readElementText();
+                    }
+                } else if (xml.isEndElement() && xml.name() == QLatin1String("game")) {
+                    if (!currentPath.isEmpty() && !currentName.isEmpty()) {
+                        // ./romname.zip → romname
+                        QString romId = currentPath;
+                        if (romId.startsWith("./"))
+                            romId = romId.mid(2);
+                        if (romId.endsWith(".zip", Qt::CaseInsensitive))
+                            romId.chop(4);
+                        db.insert(romId.toLower(), currentName);
+                    }
+                    inGame = false;
+                }
+            }
+        }
+    }
+    return db;
+}
+
+// 표시명 반환: gamelist.xml → 내장 DB → 대문자 romName 순으로 조회
 inline QString getGameDisplayName(const QString& romName) {
+    const QString key = romName.toLower();
+
+    // 1순위: 사용자 gamelist.xml (라즈겜동 한글화)
+    const auto& xmlDb = gamelistXmlDb();
+    auto xmlIt = xmlDb.find(key);
+    if (xmlIt != xmlDb.end()) return xmlIt.value();
+
+    // 2순위: 내장 DB
     const auto& db = gameNamesDb();
-    auto it = db.find(romName.toLower());
+    auto it = db.find(key);
     return (it != db.end()) ? it.value() : romName.toUpper();
 }
