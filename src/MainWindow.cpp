@@ -181,23 +181,26 @@ MainWindow::MainWindow(QWidget* parent)
     resize(m_windowedSize);
     setMinimumSize(900, 640);
 
-    // 아이콘 — EXE 내장 리소스(icon.png)를 모든 크기로 사용
-    // 탐색기 아이콘은 app.rc + icon.ico 가 담당 (winres 링크 단계)
-    // 창 제목표시줄 아이콘은 QIcon(픽스맵)
+    // 아이콘 — 탐색기/작업표시줄/타이틀바 모두 동일한 아이콘 적용
+    // icon.ico : ICO 파일 내부에 16~256px 다중 해상도가 내장되어 있어 품질 최적
+    // icon.png : ICO 로드 실패 시 폴백 (PNG 스케일링)
     {
-        QIcon appIcon;
-        // Qt 리소스에서 로드 (빌드 시 EXE에 내장)
-        QPixmap pm(":/assets/icon.png");
-        if (!pm.isNull()) {
-            // 여러 크기 추가 → 제목표시줄/작업표시줄 모두 선명하게 표시
-            for (int sz : {16, 24, 32, 48, 64, 128, 256})
-                appIcon.addPixmap(pm.scaled(sz, sz,
-                    Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        } else {
-            // fallback: 외부 파일
+        // 1순위: QRC 내장 ICO (다중 해상도, 탐색기 아이콘과 동일한 원본)
+        QIcon appIcon(":/assets/icon.ico");
+        if (appIcon.isNull()) {
+            // 2순위: 파일시스템 ICO
             QString icoPath = QCoreApplication::applicationDirPath() + "/assets/icon.ico";
             if (QFile::exists(icoPath))
                 appIcon = QIcon(icoPath);
+        }
+        if (appIcon.isNull()) {
+            // 3순위: PNG 스케일링 폴백
+            QPixmap pm(":/assets/icon.png");
+            if (!pm.isNull()) {
+                for (int sz : {16, 24, 32, 48, 64, 128, 256})
+                    appIcon.addPixmap(pm.scaled(sz, sz,
+                        Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            }
         }
         if (!appIcon.isNull())
             setWindowIcon(appIcon);

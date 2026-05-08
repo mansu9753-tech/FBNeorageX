@@ -4,5 +4,6 @@
     <file alias="mousepoint.png">assets/mousepoint.png</file>
     <file alias="loading.png">assets/loading.png</file>
     <file alias="icon.png">assets/icon.png</file>
+    <file alias="icon.ico">assets/icon.ico</file>
 </qresource>
 </RCC>
