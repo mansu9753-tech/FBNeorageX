@@ -423,11 +423,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_timer->setTimerType(Qt::PreciseTimer);
     connect(m_timer, &QTimer::timeout, this, &MainWindow::onEmuTimer);
 
-    // 커스텀 마우스 커서 적용
+    // 커서 미리 생성 (런타임 allocation 없이 빠른 전환 — Wayland 렉 방지)
     {
         QPixmap curPx(":/assets/mousepoint.png");
-        if (!curPx.isNull())
-            QApplication::setOverrideCursor(QCursor(curPx, 0, 0));
+        m_customCursor = curPx.isNull() ? QCursor(Qt::ArrowCursor) : QCursor(curPx, 0, 0);
+        m_blankCursor  = QCursor(Qt::BlankCursor);
+        // setOverrideCursor 대신 widget-level setCursor 사용
+        // → Wayland에서 포인터 진입 시점에만 실제 갱신, 렌더링 루프 간섭 없음
+        setCursor(m_customCursor);
     }
 
     // UI 빌드
@@ -2354,13 +2357,10 @@ bool MainWindow::loadRomInternal() {
             log(QString("치트 %1개 로드 (%2.ini)").arg(m_cheat->count()).arg(m_selectedGame));
     }
 
-    // 로딩 커서 → 커스텀 마우스 커서로 복원
+    // 로딩 커서 해제 후 커스텀 커서 복원
+    // restoreOverrideCursor: 로딩용 setOverrideCursor 1회만 팝
     QApplication::restoreOverrideCursor();
-    {
-        QPixmap curPx(":/assets/mousepoint.png");
-        if (!curPx.isNull())
-            QApplication::setOverrideCursor(QCursor(curPx, 0, 0));
-    }
+    setCursor(m_customCursor);  // widget-level 커스텀 커서 (스택 누적 없음)
 
     return ok;
 }
@@ -3116,7 +3116,7 @@ void MainWindow::leaveGameScreen() {
     // GUI로 돌아오면 커서 타이머 중지 + 커서 복원
     if (m_cursorTimer) m_cursorTimer->stop();
     if (m_cursorHidden) {
-        QApplication::restoreOverrideCursor();
+        setCursor(m_customCursor);  // 커서 복원 (widget-level)
         m_cursorHidden = false;
     }
 
@@ -3158,7 +3158,7 @@ void MainWindow::resetCursorTimer() {
 
     // 숨겨져 있으면 즉시 복원
     if (m_cursorHidden) {
-        QApplication::restoreOverrideCursor();
+        setCursor(m_customCursor);  // widget-level: Wayland 동기 통신 없음
         m_cursorHidden = false;
     }
 
@@ -3170,7 +3170,7 @@ void MainWindow::hideCursor() {
     // 게임 화면 중이고 아직 숨기지 않았을 때만
     if (!m_stack || m_stack->currentIndex() != 1) return;
     if (!m_cursorHidden) {
-        QApplication::setOverrideCursor(Qt::BlankCursor);
+        setCursor(m_blankCursor);   // widget-level: Wayland 동기 통신 없음
         m_cursorHidden = true;
     }
 }

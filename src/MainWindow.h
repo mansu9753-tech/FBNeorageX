@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QCursor>
 #include <QTextEdit>
 #include <QLineEdit>
 #include <QComboBox>
@@ -243,7 +244,9 @@ private:
     QElapsedTimer    m_aflClock;
     double           m_frameAccum  = 0.0;   // 프레임 누산기 (AFL 타이밍 정밀도 개선)
     QTimer*          m_cursorTimer  = nullptr; // 마우스 커서 자동 숨김 타이머
-    bool             m_cursorHidden = false;  // setOverrideCursor 적용 중 여부
+    bool             m_cursorHidden = false;  // BlankCursor 적용 중 여부
+    QCursor          m_customCursor;          // mousepoint.png 커서 (미리 생성)
+    QCursor          m_blankCursor;           // 숨김용 BlankCursor (미리 생성)
 
     // ── UI 게임패드 네비게이션 (D-패드로 게임목록 탐색) ──────────
     QTimer*          m_uiNavTimer   = nullptr;
