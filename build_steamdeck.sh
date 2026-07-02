@@ -16,6 +16,11 @@
 
 set -euo pipefail
 
+# ★ WSL 비대화형 셸(wsl --exec bash)은 로그인 프로파일을 안 읽어 PATH 가
+#   최소화되는 경우가 있음 → /usr/bin 의 apt-get·qmake6 를 못 찾아 실패.
+#   표준 시스템 경로를 명시적으로 앞에 붙여 보장한다.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build_linux"
 # ※ cmake 빌드 바이너리: $BUILD_DIR/FBNeoRageX  (파일)

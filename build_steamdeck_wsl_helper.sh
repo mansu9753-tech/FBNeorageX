@@ -6,6 +6,9 @@
 
 set -euo pipefail
 
+# WSL 비대화형 셸 PATH 최소화 방지 (apt-get/rsync/qmake6 탐색 보장)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 WIN_SRC="${1:-/mnt/c/fbneoragex}"
 WSL_BUILD="${HOME}/FBNeoRageX_wsl_build"
 
