@@ -116,14 +116,30 @@ if command -v apt-get &>/dev/null; then
         dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || MISSING+=("$pkg")
     done
     if [ "${#MISSING[@]}" -gt 0 ]; then
-        info "누락 패키지 설치 중: ${MISSING[*]}"
-        sudo apt-get update -qq
-        sudo apt-get install -y "${MISSING[@]}"
+        # ★ 이 스크립트는 wsl --exec 로 "비대화형" 실행되므로 sudo 가
+        #   비밀번호를 물으면 입력할 수 없어 무한 대기(hang) 한다.
+        #   → sudo -n(비대화형)로 먼저 확인. 비밀번호가 필요하면
+        #     설치 명령을 안내하고 즉시 종료 (대기 방지).
+        if sudo -n true 2>/dev/null; then
+            info "누락 패키지 설치 중: ${MISSING[*]}"
+            sudo -n apt-get update -qq
+            sudo -n apt-get install -y "${MISSING[@]}" \
+                || die "패키지 설치 실패 — 위 오류를 확인하세요."
+        else
+            echo
+            warn "sudo 가 비밀번호를 요구합니다. 비대화형 빌드에서는 자동 설치가 불가합니다."
+            warn "아래 명령을 WSL 터미널에서 한 번 직접 실행(비밀번호 입력)한 뒤 빌드를 다시 하세요:"
+            echo
+            echo "    sudo apt-get update"
+            echo "    sudo apt-get install -y ${MISSING[*]}"
+            echo
+            die "의존성 미설치 — 위 명령 실행 후 다시 빌드하세요."
+        fi
     else
         info "모든 의존성 충족됨"
     fi
 else
-    warn "apt-get 없음. cmake ninja g++ qt6-base-dev patchelf wget 가 필요합니다."
+    die "apt-get 없음 — Ubuntu WSL 이 아니거나 PATH 문제입니다. (Ubuntu 배포판 확인)"
 fi
 
 # Qt6 qmake 경로
