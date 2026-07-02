@@ -1,12 +1,19 @@
 # Build output directories
 build_win/
+build_win_test/
 build_static/
+build_static_test/
 build_linux/
 build_arm/
+build/
 
 # Logs
 *.log
 build_result.log
+build_log.txt
+
+# Cloudflare wrangler cache
+relay/.wrangler/
 
 # Qt generated
 *.user

@@ -43,21 +43,80 @@
 #include <QHeaderView>
 #include <QTableWidget>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QClipboard>
+#include <QHostAddress>
+#include <QRandomGenerator>
+#include <QScopeGuard>
+
+// ── 배경 이미지 위젯 (paintEvent로 직접 렌더링) ─────────────────
+//
+//  ★ 주의: 부모(QStackedWidget) 또는 자기 자신에 stylesheet 가 적용되어 있어도
+//    custom paintEvent 가 항상 동작하도록 다음 속성 강제:
+//      - WA_StyledBackground = false  → Qt styling engine 의 background 그리기 비활성화
+//      - WA_OpaquePaintEvent = true   → Qt 가 paint 전 영역을 clear 하지 않음
+//      - autoFillBackground = false   → palette 색 자동 채움 방지
+//    이 셋이 모두 false/true 일 때만 paintEvent 가 화면 픽셀의 단독 책임을 가진다.
+//
+#include <QPainter>
+class BgWidget : public QWidget {
+    QPixmap m_bg;
+public:
+    explicit BgWidget(QWidget* parent = nullptr) : QWidget(parent) {
+        m_bg = QPixmap(":/assets/background.png");
+        if (m_bg.isNull())
+            qWarning("BgWidget: ':/assets/background.png' 로드 실패 — "
+                     "resources.qrc 또는 assets/background.png 확인 필요");
+        else
+            qDebug("BgWidget: background.png %dx%d 로드 완료",
+                   m_bg.width(), m_bg.height());
+
+        setAttribute(Qt::WA_StyledBackground, false);
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+        setAutoFillBackground(false);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        if (m_bg.isNull()) {
+            // 폴백: 어두운 단색으로 채워 깨진 화면 방지
+            p.fillRect(rect(), QColor(0, 4, 16));
+            return;
+        }
+        // KeepAspectRatioByExpanding: 화면 비율에 맞춰 잘라서 가득 채우기
+        QSize scaled = m_bg.size().scaled(rect().size(),
+                                           Qt::KeepAspectRatioByExpanding);
+        QRect target((rect().width()  - scaled.width())  / 2,
+                     (rect().height() - scaled.height()) / 2,
+                     scaled.width(), scaled.height());
+        p.drawPixmap(target, m_bg, m_bg.rect());
+    }
+};
 
 // ── KEY CAPTURE DIALOG (non-Q_OBJECT) ──────────────────────────
 class KeyCaptureDialog : public QDialog {
 public:
-    int capturedKey = 0;
-    explicit KeyCaptureDialog(const QString& action, QWidget* parent)
-        : QDialog(parent) {
+    int  capturedKey  = 0;
+    int  capturedMods = 0;        // 핫키 캡처 시 Shift/Ctrl/Alt 비트 (1/2/4)
+    bool captureMods  = false;    // true 면 모디파이어도 함께 캡처
+    explicit KeyCaptureDialog(const QString& action, QWidget* parent,
+                              bool withMods = false)
+        : captureMods(withMods), QDialog(parent) {
         setWindowTitle("Key Remap");
-        setFixedSize(300, 100);
+        setFixedSize(320, 100);
         setStyleSheet("QDialog{background:#000820;border:1px solid #334488;}");
         auto* lbl = new QLabel(
             QString("<center><b style='color:#aaccff;font-family:Courier New;font-size:13px;'>"
                     "[ %1 ]</b><br>"
                     "<span style='color:#668899;font-family:Courier New;font-size:10px;'>"
-                    "Press any key... (Esc = cancel)</span></center>").arg(action),
+                    "%2</span></center>")
+                .arg(action,
+                     withMods ? "키 조합을 누르세요 (예: Ctrl+F9) / Esc = 취소"
+                              : "Press any key... (Esc = cancel)"),
             this);
         lbl->setTextFormat(Qt::RichText);
         lbl->setAlignment(Qt::AlignCenter);
@@ -69,7 +128,16 @@ protected:
     void keyPressEvent(QKeyEvent* e) override {
         int k = e->key();
         if (k == Qt::Key_Escape) { reject(); return; }
+        // 모디파이어 키 단독 입력은 무시 (실제 키를 기다림)
+        if (k == Qt::Key_Shift || k == Qt::Key_Control ||
+            k == Qt::Key_Alt   || k == Qt::Key_Meta) return;
         capturedKey = k;
+        if (captureMods) {
+            int m = e->modifiers();
+            capturedMods = ((m & Qt::ShiftModifier)   ? 1 : 0)
+                         | ((m & Qt::ControlModifier) ? 2 : 0)
+                         | ((m & Qt::AltModifier)     ? 4 : 0);
+        }
         accept();
     }
 };
@@ -170,6 +238,35 @@ QString MainWindow::groupStyle() {
            "border-radius:2px;margin-top:12px;padding:4px;"
            "font-family:'Courier New';font-size:10px;}"
            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;}";
+}
+
+// ════════════════════════════════════════════════════════════
+//  ROOM CODE 헬퍼 (토큰 방식 — IP 미포함)
+//  포맷: XXXXXX (6자 base-36 영숫자 대문자)
+//
+//  ★ 토큰 자체에는 IP/포트가 없음. 워커(Cloudflare KV)가 토큰 →
+//    {ip, port} 매핑을 관리. HOST/JOIN 모두 토큰을 키로 워커에 등록.
+//
+//  헷갈리기 쉬운 문자(0/O, 1/I) 제외한 32문자 알파벳 사용.
+// ════════════════════════════════════════════════════════════
+static const QString kTokenChars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";  // 32자
+static constexpr int kTokenLen   = 6;
+
+static QString generateRoomCode() {
+    QString code;
+    for (int i = 0; i < kTokenLen; ++i) {
+        int v = QRandomGenerator::global()->bounded(kTokenChars.size());
+        code += kTokenChars[v];
+    }
+    return code;  // 예: "AB3K7M"
+}
+
+static bool isValidRoomCode(const QString& raw) {
+    QString s = raw.toUpper().trimmed();
+    if (s.length() != kTokenLen) return false;
+    for (QChar c : s)
+        if (kTokenChars.indexOf(c) < 0) return false;
+    return true;
 }
 
 // ── 생성자 ─────────────────────────────────────────────────
@@ -343,14 +440,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&gNetplay(), &NetplayManager::disconnected,    this, &MainWindow::onNetDisconnected);
     connect(&gNetplay(), &NetplayManager::error,           this, &MainWindow::onNetError);
     connect(&gNetplay(), &NetplayManager::stateChanged,    this, &MainWindow::onNetStateChanged);
-    connect(&gNetplay(), &NetplayManager::loadGameReceived,this, &MainWindow::onNetLoadGame);
+    connect(&gNetplay(), &NetplayManager::loadGameReceived,
+            this, &MainWindow::onNetLoadGame);
     connect(&gNetplay(), &NetplayManager::readyReceived,   this, &MainWindow::onNetReady);
     connect(&gNetplay(), &NetplayManager::startReceived,   this, &MainWindow::onNetStart);
     connect(&gNetplay(), &NetplayManager::gameOverReceived,this, &MainWindow::onNetGameOver);
+    // GGPO desync 감지
+    connect(&gNetplay(), &NetplayManager::checksumReceived, this, &MainWindow::onNetChecksum);
+    connect(&gNetplay(), &NetplayManager::resyncRequested,  this, &MainWindow::onNetResyncReq);
 
     // ── 하드 싱크 수신 (클라이언트 측) ────────────────────────
-    // 호스트 스냅샷 수신 → 즉각 복원 + 청크 재시뮬 (MAX_RESIM_PER_TICK 분산)
-    // 대형 catch-up을 onEmuTimer 여러 틱으로 분산 → 이벤트 루프 블로킹 방지
+    // ★ 소켓 시그널 핸들러 안에서 m_core->unserialize() / m_core->run() 을
+    //   절대 호출하지 않는다 — onEmuTimer 에서 안전하게 적용 (크래시 방지)
     connect(&gNetplay(), &NetplayManager::stateReceived,
             this, [this](quint32 frame, QByteArray data) {
         // 호스트는 수신 무시, 코어 미로드 상태도 무시
@@ -359,63 +460,22 @@ MainWindow::MainWindow(QWidget* parent)
         int sf  = static_cast<int>(frame);
         int cur = gState.frameCount;
 
-        // 너무 오래된 싱크는 폐기 (이미 MAX_ROLLBACK 창 밖)
-        if (sf < cur - NetplayManager::MAX_ROLLBACK) return;
+        // [SYNC] 진단 — 30회마다 1회 (플러드 방지)
+        static int s_recvCount = 0;
+        if ((++s_recvCount % 30) == 1)
+            qDebug("[SYNC] recv #%d frame=%d size=%d cur=%d (diff=%d)",
+                   s_recvCount, sf, (int)data.size(), cur, cur - sf);
 
-        // ── Time Drift: 드리프트 크기에 비례한 frameDelay 조정 ──
-        // 대형 드리프트는 빠르게 흡수, 소형 드리프트는 완만하게
-        {
-            double fps    = (gState.coreFps > 0) ? gState.coreFps : 60.0;
-            double baseMs = 1000.0 / fps;
-            int    drift  = cur - sf;   // 양수=로컬 앞섬, 음수=로컬 뒤처짐
-            // 드리프트가 클수록 큰 폭으로 조정 (최대 ±3ms/frame)
-            double adj = std::clamp((drift * baseMs) / 30.0, -3.0 * baseMs, 3.0 * baseMs);
-            m_frameDelay = std::clamp(m_frameDelay + adj, -5.0, 8.0);
-        }
+        // ★ 호스트 상태는 항상 권위(authoritative) — 절대 폐기하지 않는다.
+        //   이전엔 sf 가 MAX_ROLLBACK 밖이면 폐기 → 한 번 격차가 벌어지면
+        //   영원히 거부 → drift 보정도 멈춤 → 영구 desync(죽음의 소용돌이).
+        //   이제는 큐의 더 오래된/중복 상태만 거르고, 최신 상태는 무조건 보관.
+        if (m_pendingSyncSf >= sf) return;
 
-        // ── Step 1: 호스트 스냅샷으로 sf 시점 복원 ─────────────
-        int savedCur = cur;
-        m_core->unserialize(data.constData(), static_cast<size_t>(data.size()));
-        gState.frameCount = sf;
-        gNetplay().confirmFramesUpTo(static_cast<uint32_t>(sf));
-
-        // ── Step 2: 첫 청크 즉시 재시뮬 (sf → sf+MAX_RESIM_PER_TICK) ─
-        // 나머지는 m_pendingResimTo 에 저장 → onEmuTimer 분산 처리
-        int chunkEnd = std::min(sf + MAX_RESIM_PER_TICK, savedCur);
-        gState.netplayResim = true;
-        for (int rf = sf; rf < chunkEnd; ++rf) {
-            NpInputState& is = m_npInputHistory[rf];
-            uint16_t lb = is.local;
-            uint16_t rb = static_cast<uint16_t>(
-                gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
-            is.remote = rb;
-            gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
-            npApplyInput(lb, rb);
-            m_core->run();
-            gState.frameCount = rf + 1;
-            size_t sz = m_core->serializeSize();
-            if (sz > 0) {
-                QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
-                if (m_core->serialize(buf.data(), sz))
-                    m_npStates[rf + 1] = buf;
-            }
-        }
-
-        if (chunkEnd >= savedCur) {
-            // 모든 프레임 처리 완료 → 히스토리 정리
-            gState.netplayResim = false;
-            m_pendingResimTo = -1;
-            int cutoff = sf - 2;
-            for (auto it = m_npStates.begin(); it != m_npStates.end(); )
-                it = (it.key() < cutoff) ? m_npStates.erase(it) : ++it;
-            while (!m_npInputHistory.empty() &&
-                   m_npInputHistory.begin()->first < cutoff)
-                m_npInputHistory.erase(m_npInputHistory.begin());
-        } else {
-            // 미처리 프레임 → onEmuTimer 에서 분산 처리
-            m_pendingResimTo = savedCur;
-            // netplayResim 은 pending 완료 시 해제 (onEmuTimer에서)
-        }
+        // 데이터만 큐에 저장 — 실제 적용은 onEmuTimer 에서
+        m_pendingSyncSf  = sf;
+        m_pendingSyncCur = cur;
+        m_pendingSyncData = std::move(data);
     });
 
     // 에뮬 타이머 (1ms → AFL 로 조절)
@@ -512,13 +572,14 @@ void MainWindow::buildUi() {
     m_stack = new QStackedWidget(this);
     setCentralWidget(m_stack);
 
-    // ── GUI 화면 (index 0) ──────────────────────────────────
-    m_guiWidget = new QWidget;
+    // ── GUI 화면 (index 0) — BgWidget으로 배경 이미지 렌더링 ──
+    m_guiWidget = new BgWidget;
     m_guiWidget->setObjectName("guiRoot");
     m_guiWidget->setStyleSheet(
-        "QWidget#guiRoot{"
-        "border-image:url(:/assets/background.png) 0 0 0 0 stretch stretch;}"
-        "QWidget{background:transparent;}");
+        "QWidget{background:transparent;}"
+        "QListWidget{background:rgba(10,15,40,120);}"
+        "QListWidget::item:selected{background:rgba(0,30,120,200);}"
+        "QListWidget::item:hover{background:rgba(0,20,80,150);}");
 
     QVBoxLayout* guiV = new QVBoxLayout(m_guiWidget);
     guiV->setContentsMargins(0, 0, 0, 0);
@@ -609,10 +670,19 @@ void MainWindow::buildMainTab() {
     m_gamelistPanel->innerLayout()->addWidget(m_searchEdit);
 
     m_gameList = new QListWidget;
+    // ★ QListWidget 완전 투명 처리 — BorderPanel 의 내부 알파만 색조 담당
+    //   1) viewport autoFillBackground=false
+    //   2) viewport stylesheet background:transparent (명시적 지정)
+    //   3) QListWidget frame background:transparent
+    //   4) ::item background:transparent (palette Base fall-through 차단)
+    //   → 패널 안 어떤 paint 경로로도 색을 칠하지 않음.
+    //     PREVIEW(QLabel) / EVENTS(QTextEdit) 와 동일한 가시성 보장.
+    m_gameList->viewport()->setAutoFillBackground(false);
+    m_gameList->viewport()->setStyleSheet("background:transparent;");
     m_gameList->setStyleSheet(
-        "QListWidget{background:rgba(0,0,8,220);border:none;color:#99ccee;"
+        "QListWidget{background:transparent;border:none;color:#99ccee;"
         "font-family:'Courier New';font-size:12px;outline:none;}"
-        "QListWidget::item{padding:4px 8px;}"
+        "QListWidget::item{padding:4px 8px;background:transparent;}"
         "QListWidget::item:selected{background:#001166;color:#ffffff;"
         "border-left:3px solid #0088ff;font-weight:bold;}"
         "QListWidget::item:hover{background:#000833;}"
@@ -682,6 +752,8 @@ void MainWindow::buildMainTab() {
 
     // ── 전체폭 콘텐츠 스택 ───────────────────────────────────
     m_optionsStack = new QStackedWidget;
+    // palette 자동 채움 해제 — BorderPanel 의 반투명 내부가 비치도록
+    m_optionsStack->setAutoFillBackground(false);
     m_optionsStack->setStyleSheet(
         "QStackedWidget{background:transparent;}"
         "QScrollArea{background:#000410;border:none;}"
@@ -697,6 +769,10 @@ void MainWindow::buildMainTab() {
     // ════════════════════════════════════════════════════════
     {
         QWidget* homePage = new QWidget;
+        // BgWidget 의 배경 이미지가 비치도록 autoFillBackground 명시 해제
+        // (stylesheet 의 background:transparent 만으로는 Qt6 에서 viewport 자동
+        //  채움이 그대로 동작하는 경우가 있어 명시적 false 설정 필수)
+        homePage->setAutoFillBackground(false);
         // guiRoot의 border-image가 비쳐 보이도록 transparent 유지
         // (border-image 중복 설정 제거 → guiRoot 하나로 통일)
         homePage->setStyleSheet(
@@ -900,6 +976,22 @@ void MainWindow::buildMainTab() {
     connect(m_swapBtn, &QPushButton::clicked, this, [this]{ toggleSwapPlayers(); });
     btnBar->addWidget(m_swapBtn);
 
+    // TATE 버튼 (세로형 슈팅게임 화면 회전, F8)
+    m_tateBtn = new QPushButton("⟳  TATE");
+    m_tateBtn->setCheckable(false);
+    m_tateBtn->setFixedHeight(36);
+    m_tateBtn->setToolTip(
+        "세로형 화면 회전 (F8)\n"
+        "AUTO → 90°CCW → 90°CW → OFF → AUTO\n"
+        "세로형 슈팅게임: 1942, DonPachi, Raiden 등");
+    m_tateBtn->setStyleSheet(
+        "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
+        "font-family:'Courier New';font-size:10px;font-weight:bold;}"
+        "QPushButton:hover{background:#00004d;color:#99ccff;}"
+        "QPushButton:pressed{background:#001166;}");
+    connect(m_tateBtn, &QPushButton::clicked, this, [this]{ toggleTate(); });
+    btnBar->addWidget(m_tateBtn);
+
     makeBarBtn("⛶  FULLSCREEN",false, [this]{ toggleFullscreen(); });
     makeBarBtn("✖  EXIT",       false, [this]{ close(); });
     vRoot->addLayout(btnBar);
@@ -912,12 +1004,21 @@ void MainWindow::buildMainTab() {
     m_previewPanel = new BorderPanel("PREVIEW");
     m_previewLabel = new QLabel("NO PREVIEW");
     m_previewLabel->setAlignment(Qt::AlignCenter);
-    m_previewLabel->setStyleSheet("color:#335577;background:#000008;font-family:'Courier New';font-size:10px;");
+    // 완전 투명 — BorderPanel 알파만 색조 담당 (다른 패널과 동일)
+    m_previewLabel->setAutoFillBackground(false);
+    m_previewLabel->setStyleSheet("color:#335577;background:transparent;"
+                                  "font-family:'Courier New';font-size:10px;");
     m_previewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_videoWidget  = new QVideoWidget;
+    // QVideoWidget 은 영상 재생 중엔 영상이 모든 픽셀을 덮으므로
+    // 배경색은 영상 미재생 시(placeholder 대체 직전)에만 영향. 검정 유지.
     m_videoWidget->setStyleSheet("background:#000008;");
     m_videoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_previewStack = new QStackedWidget;
+    // QStackedWidget 도 palette 색 자동 채움이 활성화되어 있어
+    // BorderPanel 의 반투명 내부 오버레이를 가려버린다. 명시적 해제.
+    m_previewStack->setAutoFillBackground(false);
+    m_previewStack->setStyleSheet("QStackedWidget{background:transparent;}");
     m_previewStack->addWidget(m_previewLabel);
     m_previewStack->addWidget(m_videoWidget);
     m_previewStack->setCurrentIndex(0);
@@ -936,8 +1037,11 @@ void MainWindow::buildMainTab() {
     m_eventsPanel = new BorderPanel("EVENTS");
     m_logEdit = new QTextEdit;
     m_logEdit->setReadOnly(true);
+    // QTextEdit 완전 투명 — BorderPanel 알파만 색조 담당 (m_gameList 와 동일)
+    m_logEdit->viewport()->setAutoFillBackground(false);
+    m_logEdit->viewport()->setStyleSheet("background:transparent;");
     m_logEdit->setStyleSheet(
-        "QTextEdit{background:rgba(0,0,8,200);border:none;color:#99ccee;"
+        "QTextEdit{background:transparent;border:none;color:#99ccee;"
         "font-family:'Courier New';font-size:10px;}"
         "QScrollBar:vertical{background:#000022;width:8px;}"
         "QScrollBar::handle:vertical{background:#224466;}"
@@ -1156,6 +1260,92 @@ void MainWindow::buildControlsPage(QWidget* page) {
         periodH->addWidget(periodLbl); periodH->addWidget(periodSpin); periodH->addStretch();
         turboV->addLayout(periodH);
         v->addWidget(turboGroup);
+    }
+
+    // ── 컨트롤 저장 범위 (전역/기종별/게임별) ───────────────────
+    {
+        const QString grpStyleCtrl =
+            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
+            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
+        QGroupBox* scopeGroup = new QGroupBox("저장 범위 (현재 매핑을 어디에 저장할지)");
+        scopeGroup->setStyleSheet(grpStyleCtrl);
+        QVBoxLayout* sgV = new QVBoxLayout(scopeGroup);
+
+        QLabel* scopeHint = new QLabel(
+            "전역=모든 게임 / 기종별=같은 기종 게임 공통 / 게임별=이 게임 전용\n"
+            "적용 우선순위:  게임별 > 기종별 > 전역 > 기본");
+        scopeHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
+        sgV->addWidget(scopeHint);
+
+        QHBoxLayout* sh = new QHBoxLayout; sh->setSpacing(6);
+        auto* saveGlobalBtn = new QPushButton("전역 저장");
+        auto* savePlatBtn   = new QPushButton("기종별 저장");
+        auto* saveGameBtn   = new QPushButton("게임별 저장");
+        for (auto* b : {saveGlobalBtn, savePlatBtn, saveGameBtn}) {
+            b->setStyleSheet(btnStyle(true)); b->setFixedHeight(26);
+        }
+        connect(saveGlobalBtn, &QPushButton::clicked, this, [this]{ saveControlsToScope("global"); });
+        connect(savePlatBtn,   &QPushButton::clicked, this, [this]{ saveControlsToScope("plat");   });
+        connect(saveGameBtn,   &QPushButton::clicked, this, [this]{ saveControlsToScope("game");   });
+        sh->addWidget(saveGlobalBtn); sh->addWidget(savePlatBtn); sh->addWidget(saveGameBtn);
+        sgV->addLayout(sh);
+        v->addWidget(scopeGroup);
+    }
+
+    // ── 핫키 설정 ────────────────────────────────────────────
+    {
+        const QString grpStyleCtrl =
+            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
+            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
+        QGroupBox* hkGroup = new QGroupBox("핫키 설정");
+        hkGroup->setStyleSheet(grpStyleCtrl);
+        QVBoxLayout* hkV = new QVBoxLayout(hkGroup);
+
+        QLabel* hkHint = new QLabel(
+            "[REMAP] 클릭 후 원하는 키(조합)를 누르세요. F1~F8(세이브스테이트)은 고정.\n"
+            "잘못되면 [기본값 복원]으로 언제든 되돌릴 수 있습니다.");
+        hkHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
+        hkV->addWidget(hkHint);
+
+        m_hotkeyTable = new QTableWidget;
+        m_hotkeyTable->setColumnCount(3);
+        m_hotkeyTable->setHorizontalHeaderLabels({"기능", "현재 키", ""});
+        m_hotkeyTable->setStyleSheet(tblStyle);
+        m_hotkeyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_hotkeyTable->setSelectionMode(QAbstractItemView::NoSelection);
+        m_hotkeyTable->verticalHeader()->setVisible(false);
+        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+        m_hotkeyTable->setColumnWidth(1, 110);
+        m_hotkeyTable->setColumnWidth(2, 68);
+        m_hotkeyTable->verticalHeader()->setDefaultSectionSize(26);
+        m_hotkeyTable->setFixedHeight(26 * 11 + 28);   // 행 수에 맞춤
+        hkV->addWidget(m_hotkeyTable);
+        rebuildHotkeyTable();
+
+        QHBoxLayout* hkBtns = new QHBoxLayout; hkBtns->setSpacing(6);
+        auto* hkResetBtn = new QPushButton("기본값 복원");
+        auto* hkSaveBtn  = new QPushButton("저장");
+        hkResetBtn->setStyleSheet(btnStyle(false)); hkResetBtn->setFixedHeight(26);
+        hkSaveBtn->setStyleSheet(btnStyle(true));   hkSaveBtn->setFixedHeight(26);
+        connect(hkResetBtn, &QPushButton::clicked, this, [this]{
+            gSettings.hotkeyMap.clear();   // 비우면 기본값 사용
+            gSettings.save();
+            rebuildHotkeyTable();
+            log("핫키 기본값으로 복원됨");
+        });
+        connect(hkSaveBtn, &QPushButton::clicked, this, [this]{
+            gSettings.save();
+            log("핫키 설정 저장됨");
+        });
+        hkBtns->addStretch();
+        hkBtns->addWidget(hkResetBtn);
+        hkBtns->addWidget(hkSaveBtn);
+        hkV->addLayout(hkBtns);
+        v->addWidget(hkGroup);
     }
 
     // ── 하단 리셋 버튼 ───────────────────────────────────────
@@ -1403,6 +1593,54 @@ void MainWindow::refreshWinMMTable() {
     m_winmmTable->blockSignals(false);
 }
 
+// ── 핫키 테이블 갱신 ─────────────────────────────────────────
+void MainWindow::rebuildHotkeyTable() {
+    if (!m_hotkeyTable) return;
+    const QString remapStyle =
+        "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
+        "padding:2px;font-family:'Courier New';font-size:9px;}"
+        "QPushButton:hover{background:#002255;color:#aaccff;}";
+
+    int n = 0; const HotkeyDef* defs = hotkeyDefs(&n);
+    m_hotkeyTable->setRowCount(n);
+    m_hotkeyTable->blockSignals(true);
+
+    for (int row = 0; row < n; ++row) {
+        const QString action = defs[row].action;
+
+        auto* actItem = new QTableWidgetItem(defs[row].label);
+        actItem->setForeground(QColor("#99ccee"));
+        m_hotkeyTable->setItem(row, 0, actItem);
+
+        auto* keyItem = new QTableWidgetItem(hotkeyText(hotkeyOf(action)));
+        keyItem->setTextAlignment(Qt::AlignCenter);
+        keyItem->setForeground(QColor("#ffcc44"));
+        keyItem->setFont(QFont("Courier New", 10, QFont::Bold));
+        m_hotkeyTable->setItem(row, 1, keyItem);
+
+        QPushButton* remapBtn = new QPushButton("REMAP");
+        remapBtn->setStyleSheet(remapStyle);
+        connect(remapBtn, &QPushButton::clicked, this, [this, action]{
+            int n2 = 0; const HotkeyDef* d = hotkeyDefs(&n2);
+            QString label = action;
+            for (int i = 0; i < n2; ++i)
+                if (action == d[i].action) { label = d[i].label; break; }
+
+            KeyCaptureDialog dlg(label, this, /*withMods=*/true);
+            if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
+                gSettings.hotkeyMap[action] =
+                    hotkeyEncode(dlg.capturedKey, dlg.capturedMods);
+                gSettings.save();
+                rebuildHotkeyTable();
+                log(QString("핫키 재설정: %1 → %2")
+                    .arg(label, hotkeyText(hotkeyOf(action))));
+            }
+        });
+        m_hotkeyTable->setCellWidget(row, 2, remapBtn);
+    }
+    m_hotkeyTable->blockSignals(false);
+}
+
 // ── 페이지 1: DIRECTORIES (경로 설정) ────────────────────────
 void MainWindow::buildDirectoriesPage(QWidget* page) {
     // 스크롤 래퍼
@@ -1529,7 +1767,42 @@ void MainWindow::buildVideoPage(QWidget* page) {
     crtH->addWidget(m_crtSlider); crtH->addWidget(crtValLbl);
     vidForm->addRow(makeLabel("CRT Intensity"), crtH);
 
+    // ── 플래시 감소 (눈 보호) ────────────────────────────────
+    m_flashGuardCheck = new QCheckBox("플래시 감소 (눈 보호)");
+    m_flashGuardCheck->setStyleSheet(ckStyle);
+    m_flashGuardCheck->setToolTip(
+        "카운터 번쩍임·총구 화염 등 화면이 갑자기 밝아지는 순간을 감지해\n"
+        "그 프레임을 어둡게 처리합니다. 눈부심·눈 피로를 줄여줍니다.");
+    vidForm->addRow(makeLabel(""), m_flashGuardCheck);
+
+    QHBoxLayout* flashH = new QHBoxLayout;
+    m_flashSlider = new QSlider(Qt::Horizontal);
+    m_flashSlider->setRange(0, 100);
+    m_flashSlider->setValue(gSettings.videoFlashStrength);
+    m_flashSlider->setStyleSheet(slStyle);
+    QLabel* flashValLbl = new QLabel(QString("%1%").arg(gSettings.videoFlashStrength));
+    flashValLbl->setStyleSheet(labelStyle()); flashValLbl->setFixedWidth(36);
+    connect(m_flashSlider, &QSlider::valueChanged, this, [flashValLbl](int v){
+        flashValLbl->setText(QString("%1%").arg(v));
+    });
+    // 실시간 반영: 슬라이더/체크 변경 즉시 캔버스에 적용
+    connect(m_flashSlider, &QSlider::valueChanged, this, [this](int v){
+        if (m_canvas) m_canvas->setFlashGuard(
+            m_flashGuardCheck && m_flashGuardCheck->isChecked(), v / 100.0f);
+    });
+    connect(m_flashGuardCheck, &QCheckBox::toggled, this, [this](bool on){
+        if (m_canvas) m_canvas->setFlashGuard(
+            on, (m_flashSlider ? m_flashSlider->value() : 80) / 100.0f);
+    });
+    flashH->addWidget(m_flashSlider); flashH->addWidget(flashValLbl);
+    vidForm->addRow(makeLabel("플래시 강도"), flashH);
+
     m_vsyncCheck = new QCheckBox("VSync"); m_vsyncCheck->setStyleSheet(ckStyle);
+#ifdef Q_OS_LINUX
+    // Linux(GameScope): swapInterval은 항상 0 고정 → VSync 옵션 비활성화
+    m_vsyncCheck->setEnabled(false);
+    m_vsyncCheck->setToolTip("Steam Deck(GameScope)에서는 컴포지터가 VSync를 처리합니다.\n이 설정은 Linux에서 비활성화됩니다.");
+#endif
     vidForm->addRow(makeLabel(""), m_vsyncCheck);
 
     // GLSL 셰이더
@@ -1841,94 +2114,382 @@ void MainWindow::buildCheatsPage(QWidget* page) {
     vRoot->addWidget(hint);
 }
 
-// ── 페이지 7: NETPLAY (MULTIPLAYER) ─────────────────────────
+// ── 페이지 7: NETPLAY (MULTIPLAYER) — Fightcade Style ───────
 void MainWindow::buildNetplayPage(QWidget* page) {
     QVBoxLayout* vRoot = new QVBoxLayout(page);
-    vRoot->setContentsMargins(20, 14, 20, 14);
-    vRoot->setSpacing(10);
+    vRoot->setContentsMargins(16, 10, 16, 10);
+    vRoot->setSpacing(6);
 
-    auto makeLabel = [](const QString& t, bool bold = false) {
+    auto mkLbl = [](const QString& t, bool bold = false, const QString& col = "") {
         QLabel* l = new QLabel(t);
-        l->setStyleSheet(QString("color:%1;font-family:'Courier New';font-size:%2px;")
-                         .arg(bold ? "#aaccff" : "#6688aa").arg(bold ? 12 : 10));
+        QString c = col.isEmpty() ? (bold ? "#aaccff" : "#6688aa") : col;
+        l->setStyleSheet(QString("color:%1;font-family:'Courier New';font-size:%2px;%3")
+                         .arg(c).arg(bold ? 12 : 10).arg(bold ? "font-weight:bold;" : ""));
         return l;
     };
-    auto makeLine = [&]{
+    auto mkLine = [&]{
         QFrame* f = new QFrame; f->setFrameShape(QFrame::HLine);
-        f->setStyleSheet("color:#223366;"); vRoot->addWidget(f);
+        f->setStyleSheet("color:#1a2a4a;"); vRoot->addWidget(f);
     };
 
-    // 로컬 IP
-    QHBoxLayout* ipH = new QHBoxLayout;
-    ipH->addWidget(makeLabel("LOCAL IP :"));
-    m_npLocalIpLabel = new QLabel(gNetplay().localIp());
-    m_npLocalIpLabel->setStyleSheet(
-        "color:#44ffaa;font-family:'Courier New';font-size:12px;font-weight:bold;");
-    m_npLocalIpLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    ipH->addWidget(m_npLocalIpLabel); ipH->addStretch();
-    vRoot->addLayout(ipH);
-
-    m_npStatusLabel = new QLabel("● DISCONNECTED");
-    m_npStatusLabel->setStyleSheet("color:#cc4444;font-family:'Courier New';font-size:11px;");
+    // ── 상태 · IP 헤더 ──────────────────────────────────────
+    m_npStatusLabel = new QLabel("● OFFLINE");
+    m_npStatusLabel->setStyleSheet(
+        "color:#cc4444;font-family:'Courier New';font-size:11px;font-weight:bold;");
     m_npStatusLabel->setAlignment(Qt::AlignCenter);
     vRoot->addWidget(m_npStatusLabel);
-    makeLine();
 
-    // HOST
-    vRoot->addWidget(makeLabel("— HOST —", true));
-    QHBoxLayout* hostH = new QHBoxLayout; hostH->setSpacing(8);
-    hostH->addWidget(makeLabel("Port:"));
-    m_npPortSpin = new QSpinBox; m_npPortSpin->setStyleSheet(editStyle());
-    m_npPortSpin->setRange(1024, 65535); m_npPortSpin->setValue(gSettings.netplayPort);
-    m_npPortSpin->setFixedWidth(90); hostH->addWidget(m_npPortSpin);
-    m_npHostBtn = new QPushButton("📡  HOST GAME"); m_npHostBtn->setStyleSheet(btnStyle(true));
-    connect(m_npHostBtn, &QPushButton::clicked, this, [this]{
-        gNetplay().hostListen(m_npPortSpin->value());
-        log(QString("포트 %1 대기 중...").arg(m_npPortSpin->value()));
-    });
-    hostH->addWidget(m_npHostBtn); hostH->addStretch();
-    vRoot->addLayout(hostH);
-    makeLine();
+    // RTT 레이블 (연결 후 표시)
+    m_npRttLabel = new QLabel("");
+    m_npRttLabel->setStyleSheet(
+        "color:#aaaaff;font-family:'Courier New';font-size:9px;");
+    m_npRttLabel->setAlignment(Qt::AlignCenter);
+    vRoot->addWidget(m_npRttLabel);
 
-    // JOIN
-    vRoot->addWidget(makeLabel("— JOIN —", true));
-    QHBoxLayout* joinH = new QHBoxLayout; joinH->setSpacing(8);
-    joinH->addWidget(makeLabel("IP:"));
-    m_npIpEdit = new QLineEdit("127.0.0.1"); m_npIpEdit->setStyleSheet(editStyle());
-    m_npIpEdit->setFixedWidth(160); joinH->addWidget(m_npIpEdit);
-    joinH->addWidget(makeLabel("Port:"));
-    QSpinBox* joinPort = new QSpinBox; joinPort->setStyleSheet(editStyle());
-    joinPort->setRange(1024, 65535); joinPort->setValue(gSettings.netplayPort);
-    joinPort->setFixedWidth(90); joinH->addWidget(joinPort);
-    m_npConnectBtn = new QPushButton("🔌  CONNECT"); m_npConnectBtn->setStyleSheet(btnStyle(true));
-    connect(m_npConnectBtn, &QPushButton::clicked, this, [this, joinPort]{
-        gNetplay().clientConnect(m_npIpEdit->text(), joinPort->value());
-        log(QString("%1:%2 연결 중...").arg(m_npIpEdit->text()).arg(joinPort->value()));
-    });
-    joinH->addWidget(m_npConnectBtn); joinH->addStretch();
-    vRoot->addLayout(joinH);
-    makeLine();
+    mkLine();
 
-    QHBoxLayout* ctrlH = new QHBoxLayout; ctrlH->setSpacing(8);
-    m_npStartBtn = new QPushButton("▶  START GAME (HOST)");
-    m_npStartBtn->setStyleSheet(btnStyle(true)); m_npStartBtn->setEnabled(false);
-    connect(m_npStartBtn, &QPushButton::clicked, this, &MainWindow::netplayStartGame);
-    ctrlH->addWidget(m_npStartBtn);
-    m_npDisconnBtn = new QPushButton("✖  DISCONNECT");
-    m_npDisconnBtn->setStyleSheet(btnStyle(false)); m_npDisconnBtn->setEnabled(false);
-    connect(m_npDisconnBtn, &QPushButton::clicked, this, [this]{
-        cleanupNetplay();       // 게임 중이면 정리
-        gNetplay().shutdown();  // 소켓까지 완전 종료
-        log("연결 해제됨");
-    });
-    ctrlH->addWidget(m_npDisconnBtn); ctrlH->addStretch();
-    vRoot->addLayout(ctrlH);
+    // ── 공개 IP 표시 ────────────────────────────────────────
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        h->addWidget(mkLbl("YOUR IP :"));
+        m_npPublicIpLabel = new QLabel("조회 중...");
+        m_npPublicIpLabel->setStyleSheet(
+            "color:#44ffaa;font-family:'Courier New';font-size:11px;font-weight:bold;");
+        m_npPublicIpLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        h->addWidget(m_npPublicIpLabel);
+        h->addStretch();
+
+        // 로컬 IP도 숨겨두기 (localIp() 조회용 — localIpLabel은 더 이상 UI에 표시 안 함)
+        m_npLocalIpLabel = new QLabel(gNetplay().localIp());
+        m_npLocalIpLabel->hide();
+        vRoot->addLayout(h);
+    }
+
+    // 공개 IP 비동기 조회
+    {
+        auto* nam = new QNetworkAccessManager(this);
+        connect(nam, &QNetworkAccessManager::finished, this,
+                [this, nam](QNetworkReply* reply){
+            if (reply->error() == QNetworkReply::NoError) {
+                m_publicIp = reply->readAll().trimmed();
+                if (m_npPublicIpLabel) m_npPublicIpLabel->setText(m_publicIp);
+            } else {
+                m_publicIp = gNetplay().localIp();
+                if (m_npPublicIpLabel) m_npPublicIpLabel->setText(m_publicIp + " (local)");
+            }
+            reply->deleteLater();
+            nam->deleteLater();
+
+            // 토큰 방식: 코드 갱신 불필요 (IP가 코드에 포함되지 않음).
+            // ipify 결과는 STUN 실패 시 폴백용으로만 사용.
+        });
+        nam->get(QNetworkRequest(QUrl("https://api.ipify.org")));
+    }
+
+    mkLine();
+
+    // ── HOST 섹션 ────────────────────────────────────────────
+    vRoot->addWidget(mkLbl("— HOST —", true));
+
+    // Port + Input Delay + HOST GAME
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        h->addWidget(mkLbl("Port:"));
+        m_npPortSpin = new QSpinBox; m_npPortSpin->setStyleSheet(editStyle());
+        m_npPortSpin->setRange(1024, 65535);
+        m_npPortSpin->setValue(gSettings.netplayPort);
+        m_npPortSpin->setFixedWidth(80); h->addWidget(m_npPortSpin);
+
+        h->addWidget(mkLbl("Delay:"));
+        m_npDelaySpinBox = new QSpinBox; m_npDelaySpinBox->setStyleSheet(editStyle());
+        m_npDelaySpinBox->setRange(0, 8);
+        m_npDelaySpinBox->setValue(gSettings.netplayInputDelay);
+        m_npDelaySpinBox->setSuffix("f");
+        m_npDelaySpinBox->setFixedWidth(60); h->addWidget(m_npDelaySpinBox);
+        h->addWidget(mkLbl("(권장: 해외 2~4f)"));
+
+        m_npHostBtn = new QPushButton("📡  HOST GAME");
+        m_npHostBtn->setStyleSheet(btnStyle(true));
+        connect(m_npHostBtn, &QPushButton::clicked, this, [this]{
+            // 중복 클릭 방지 (룸코드 갱신되어 매칭 깨지는 문제 차단)
+            // 재시도하려면 DISCONNECT 후 다시 HOST GAME.
+            m_npHostBtn->setEnabled(false);
+            if (m_npConnectBtn) m_npConnectBtn->setEnabled(false);
+            if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
+            // 버튼 비활성화 시 포커스가 Relay URL 로 튀는 것 방지
+            if (m_npDisconnBtn) m_npDisconnBtn->setFocus(Qt::OtherFocusReason);
+
+            int port  = m_npPortSpin->value();
+            int delay = m_npDelaySpinBox->value();
+            gSettings.netplayPort       = port;
+            gSettings.netplayInputDelay = delay;
+            gSettings.save();
+
+            // 1. UDP 소켓 바인드 (호스트 대기)
+            gNetplay().hostListen(port);
+            m_relayPeerHandled = false;   // 새 연결 — 피어 처리 플래그 리셋
+
+            // 2. 토큰 룸 코드 생성 (워커가 토큰→IP:Port 매핑 관리)
+            QString code = generateRoomCode();
+            if (m_npRoomCodeLabel) m_npRoomCodeLabel->setText(code);
+            log("🎫 룸 코드: " + code + "  (상대에게 공유하세요)");
+            log(QString("포트 %1 대기 중 (딜레이 %2f)").arg(port).arg(delay));
+
+            // 3. STUN 으로 외부 IP:Port 정확히 발견 → 릴레이 등록
+            //    이전 연결 정리 (중복 클릭 방지)
+            disconnect(&gNetplay(), &NetplayManager::externalAddressDiscovered,
+                       this, nullptr);
+            disconnect(&gNetplay(), &NetplayManager::stunFailed,
+                       this, nullptr);
+
+            connect(&gNetplay(), &NetplayManager::externalAddressDiscovered, this,
+                [this, code](const QString& extIp, int extPort){
+                    log(QString("✓ STUN: 내 외부 주소 %1:%2").arg(extIp).arg(extPort));
+                    if (gSettings.netplayRelayUrl.isEmpty()) {
+                        log("⚠ 릴레이 URL 미설정 — 직접 IP 접속만 가능");
+                        return;
+                    }
+                    // 소켓 read 핸들러 재진입 방지 — 다음 이벤트 루프로 지연
+                    QTimer::singleShot(0, this, [this, code, extIp, extPort]{
+                        relayRegister(code, "host", extIp, extPort);
+                        relayPollPeer(code, "host");
+                    });
+                }, Qt::SingleShotConnection);
+
+            connect(&gNetplay(), &NetplayManager::stunFailed, this,
+                [this, code, port](const QString& reason){
+                    log("⚠ STUN 실패(" + reason + ") → ipify 폴백");
+                    QString ip = m_publicIp.isEmpty() ? gNetplay().localIp() : m_publicIp;
+                    if (gSettings.netplayRelayUrl.isEmpty()) return;
+                    QTimer::singleShot(0, this, [this, code, ip, port]{
+                        relayRegister(code, "host", ip, port);
+                        relayPollPeer(code, "host");
+                    });
+                }, Qt::SingleShotConnection);
+
+            log("STUN 외부 주소 조회 중...");
+            gNetplay().discoverExternalAddress();
+
+            // 4. UPnP 는 보조 (성공/실패와 무관하게 릴레이 등록은 위에서 진행)
+            log("UPnP 포트 개방 시도 (보조)...");
+            if (m_upnp) { m_upnp->cancel(); m_upnp->deleteLater(); }
+            m_upnp = new UPnpMapper(this);
+            connect(m_upnp, &UPnpMapper::mapped, this, [this, port](int){
+                log(QString("✓ UPnP: %1/UDP 개방 — 직접 IP 접속도 가능").arg(port));
+                if (m_npStatusLabel)
+                    m_npStatusLabel->setText(QString("● 대기 중 (UPnP %1)").arg(port));
+            });
+            connect(m_upnp, &UPnpMapper::failed, this, [this](const QString& reason){
+                log("· UPnP 미지원: " + reason.split('\n').first()
+                    + "  (릴레이 홀펀칭으로 진행)");
+            });
+            m_upnp->map(port, gNetplay().localIp());
+        });
+        h->addWidget(m_npHostBtn); h->addStretch();
+        vRoot->addLayout(h);
+    }
+
+    // 룸 코드 표시 (HOST GAME 클릭 후 onNetConnected에서 갱신)
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        h->addWidget(mkLbl("Room Code:"));
+        m_npRoomCodeLabel = new QLabel("—");
+        m_npRoomCodeLabel->setStyleSheet(
+            "color:#ffdd44;font-family:'Courier New';font-size:13px;font-weight:bold;"
+            "letter-spacing:2px;");
+        m_npRoomCodeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        h->addWidget(m_npRoomCodeLabel);
+
+        QPushButton* copyBtn = new QPushButton("⎘ COPY");
+        copyBtn->setStyleSheet(
+            "QPushButton{background:#001133;color:#aaccff;border:1px solid #334488;"
+            "padding:3px 8px;font-family:'Courier New';font-size:10px;}"
+            "QPushButton:hover{background:#002255;}");
+        connect(copyBtn, &QPushButton::clicked, this, [this]{
+            if (m_npRoomCodeLabel && m_npRoomCodeLabel->text() != "—")
+                QApplication::clipboard()->setText(m_npRoomCodeLabel->text());
+        });
+        h->addWidget(copyBtn); h->addStretch();
+        vRoot->addLayout(h);
+    }
+
+    mkLine();
+
+    // ── JOIN 섹션 ────────────────────────────────────────────
+    vRoot->addWidget(mkLbl("— JOIN —", true));
+
+    // 룸 코드 입력
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        h->addWidget(mkLbl("Room Code:"));
+        m_npRoomCodeEdit = new QLineEdit;
+        m_npRoomCodeEdit->setStyleSheet(editStyle());
+        m_npRoomCodeEdit->setPlaceholderText("XXXXXX");
+        m_npRoomCodeEdit->setMaxLength(kTokenLen);
+        // 입력 마스크 제거 — 6자 영숫자만 (대문자 자동 변환은 toUpper)
+        m_npRoomCodeEdit->setFixedWidth(90); h->addWidget(m_npRoomCodeEdit);
+
+        // 직접 IP 입력 (룸 코드 없을 때 대안)
+        h->addWidget(mkLbl("or IP:"));
+        m_npIpEdit = new QLineEdit("127.0.0.1");
+        m_npIpEdit->setStyleSheet(editStyle());
+        m_npIpEdit->setFixedWidth(120); h->addWidget(m_npIpEdit);
+
+        h->addStretch();
+        vRoot->addLayout(h);
+    }
+
+    // CONNECT 버튼
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        m_npConnectBtn = new QPushButton("🔌  JOIN GAME");
+        m_npConnectBtn->setStyleSheet(btnStyle(true));
+        connect(m_npConnectBtn, &QPushButton::clicked, this, [this]{
+            // 중복 클릭 방지 (재시도는 DISCONNECT 후 다시 JOIN GAME)
+            m_npConnectBtn->setEnabled(false);
+            if (m_npHostBtn)    m_npHostBtn->setEnabled(false);
+            if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
+            // 버튼 비활성화 시 Qt 가 포커스를 다음 위젯(Relay URL)으로 옮기는 것 방지
+            if (m_npDisconnBtn) m_npDisconnBtn->setFocus(Qt::OtherFocusReason);
+
+            log("[JOIN] 버튼 클릭 — 핸들러 진입");   // ← 진단: 핸들러 진입 확인
+
+            QString rawCode = m_npRoomCodeEdit ? m_npRoomCodeEdit->text().trimmed() : QString();
+            QString code    = rawCode.toUpper();
+            log(QString("[JOIN] 입력 룸코드='%1'").arg(code));
+
+            // ── 직접 IP 입력 모드 (룸 코드 비어있음) ──
+            // 동일 LAN 테스트 / 포트포워딩 직결 환경용. 릴레이/STUN 미사용.
+            if (code.isEmpty()) {
+                QString ip = m_npIpEdit->text().trimmed();
+                int port   = gSettings.netplayPort;
+                log(QString("[JOIN] 직접 연결 모드 → %1:%2").arg(ip).arg(port));
+                gNetplay().clientConnect(ip, port);
+                log(QString("(직접) %1:%2 연결 중...").arg(ip).arg(port));
+                return;
+            }
+
+            // ── 룸 코드 모드 ──
+            if (!isValidRoomCode(code)) {
+                log("❌ 잘못된 룸 코드 (6자 영숫자)");
+                return;
+            }
+            if (gSettings.netplayRelayUrl.isEmpty()) {
+                log("❌ 릴레이 URL 미설정 — Relay URL 항목을 입력하세요");
+                return;
+            }
+
+            // 1. UDP 소켓 바인드만 (HELLO 미발사 — 호스트 주소를 아직 모름)
+            log("[JOIN] clientPrepare() 호출 직전");
+            if (!gNetplay().clientPrepare()) {
+                log("❌ UDP 소켓 바인드 실패");
+                return;
+            }
+            m_relayPeerHandled = false;   // 새 연결 — 피어 처리 플래그 리셋
+            log(QString("🎫 룸 코드 '%1' 워커에 조회 시작").arg(code));
+
+            // 2. STUN → 릴레이 등록 → 호스트 폴링 (relayPollPeer 가 처리)
+            disconnect(&gNetplay(), &NetplayManager::externalAddressDiscovered,
+                       this, nullptr);
+            disconnect(&gNetplay(), &NetplayManager::stunFailed,
+                       this, nullptr);
+
+            connect(&gNetplay(), &NetplayManager::externalAddressDiscovered, this,
+                [this, code](const QString& extIp, int extPort){
+                    log(QString("✓ STUN: 내 외부 주소 %1:%2").arg(extIp).arg(extPort));
+                    log("[DIAG] JOIN extAddr 람다 — singleShot 스케줄 직전");
+                    // ★ 네트워크 호출을 다음 이벤트 루프 틱으로 지연 (재진입 차단)
+                    QTimer::singleShot(0, this, [this, code, extIp, extPort]{
+                        log("[DIAG] JOIN 지연 람다 실행 — relayRegister 호출 직전");
+                        relayRegister(code, "client", extIp, extPort);
+                        relayPollPeer(code, "client");
+                    });
+                }, Qt::SingleShotConnection);
+
+            connect(&gNetplay(), &NetplayManager::stunFailed, this,
+                [this, code](const QString& reason){
+                    log("⚠ STUN 실패(" + reason + ") → ipify 폴백");
+                    QString ip   = m_publicIp.isEmpty() ? gNetplay().localIp() : m_publicIp;
+                    int     port = static_cast<int>(gNetplay().localPort());
+                    QTimer::singleShot(0, this, [this, code, ip, port]{
+                        relayRegister(code, "client", ip, port);
+                        relayPollPeer(code, "client");
+                    });
+                }, Qt::SingleShotConnection);
+
+            log("STUN 외부 주소 조회 중...");
+            gNetplay().discoverExternalAddress();
+        });
+        h->addWidget(m_npConnectBtn); h->addStretch();
+        vRoot->addLayout(h);
+    }
+
+    mkLine();
+
+    // ── 게임 제어 버튼 ─────────────────────────────────────
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(8);
+        m_npStartBtn = new QPushButton("▶  START GAME (HOST)");
+        m_npStartBtn->setStyleSheet(btnStyle(true));
+        m_npStartBtn->setEnabled(false);
+        connect(m_npStartBtn, &QPushButton::clicked, this, &MainWindow::netplayStartGame);
+        h->addWidget(m_npStartBtn);
+
+        m_npDisconnBtn = new QPushButton("✖  DISCONNECT");
+        m_npDisconnBtn->setStyleSheet(btnStyle(false));
+        m_npDisconnBtn->setEnabled(false);
+        connect(m_npDisconnBtn, &QPushButton::clicked, this, [this]{
+            log("✖ DISCONNECT — 연결 완전 해제 중...");
+            // 게임 중이면 상대에게도 종료 통지
+            if (gNetplay().playing()) gNetplay().sendGameOver();
+            cleanupNetplay();
+            gNetplay().shutdown();          // 소켓 완전 종료 → disconnected 신호
+            if (m_npRoomCodeLabel) m_npRoomCodeLabel->setText("—");
+            if (m_npRttLabel)      m_npRttLabel->setText("");
+            // 버튼 상태 복구 (HOST/JOIN 재시도 가능하게)
+            if (m_npHostBtn)    m_npHostBtn->setEnabled(true);
+            if (m_npConnectBtn) m_npConnectBtn->setEnabled(true);
+            if (m_npStartBtn)   m_npStartBtn->setEnabled(false);
+            m_npDisconnBtn->setEnabled(false);
+            log("✖ 연결 해제됨");
+        });
+        h->addWidget(m_npDisconnBtn); h->addStretch();
+        vRoot->addLayout(h);
+    }
 
     vRoot->addStretch();
-    QLabel* hint = new QLabel("1. HOST: 포트 설정 후 HOST GAME → 게임 선택 → START GAME\n"
-                              "2. JOIN: IP/포트 입력 후 CONNECT\n"
-                              "최대 롤백 8프레임 / 예측 기반 0ms 레이턴시");
-    hint->setStyleSheet("color:#335566;font-family:'Courier New';font-size:9px;");
+
+    // ── 릴레이 서버 (URL 숨김 — 프라이버시) ────────────────────
+    // URL 에 계정 ID 가 포함되므로 화면에 그대로 노출하지 않는다.
+    // Password 에코 모드로 점(●) 표시 → 어깨너머/스크린샷 노출 방지.
+    // (값은 그대로 동작·저장되며, 본인이 클릭해 편집은 가능)
+    {
+        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
+        h->addWidget(mkLbl("Relay:"));
+        m_npRelayUrlEdit = new QLineEdit(gSettings.netplayRelayUrl);
+        m_npRelayUrlEdit->setEchoMode(QLineEdit::Password);   // ● 로 표시
+        m_npRelayUrlEdit->setPlaceholderText("(내장 릴레이 서버 사용 중)");
+        m_npRelayUrlEdit->setStyleSheet(editStyle());
+        connect(m_npRelayUrlEdit, &QLineEdit::editingFinished, this, [this]{
+            gSettings.netplayRelayUrl = m_npRelayUrlEdit->text().trimmed();
+            gSettings.save();
+        });
+        // 연결 상태만 간단히 표시 (URL 미노출)
+        QLabel* relayState = new QLabel(
+            gSettings.netplayRelayUrl.isEmpty() ? "● 미설정" : "● 내장 서버 사용 중");
+        relayState->setStyleSheet("color:#44aa66;font-family:'Courier New';font-size:9px;");
+        h->addWidget(relayState);
+        h->addWidget(m_npRelayUrlEdit, 1);
+        vRoot->addLayout(h);
+    }
+
+    // ── 사용 안내 ────────────────────────────────────────────
+    QLabel* hint = new QLabel(
+        "[ HOST ]  Delay 설정 → HOST GAME → 6자 룸 코드 공유 → 게임 선택 → START GAME\n"
+        "[ JOIN ]  6자 룸 코드 입력 → JOIN GAME  (또는 직접 IP 입력)\n"
+        "Delay: 국내 0~1f / 아시아 2~3f / 해외 4~6f  |  롤백: 최대 30f\n"
+        "게임 중 ESC = 양쪽 게임 종료(Lobby 복귀) / DISCONNECT = 연결 완전 해제");
+    hint->setStyleSheet("color:#2a3a5a;font-family:'Courier New';font-size:9px;");
     hint->setWordWrap(true);
     vRoot->addWidget(hint);
 }
@@ -1967,8 +2528,30 @@ void MainWindow::rebuildMachineSettings() {
 
     v->addWidget(makeLabel("— DIP SWITCHES —", true));
 
+    // ── 저장 범위 선택 (게임별 / 기종별) ──────────────────────
+    {
+        QHBoxLayout* sh = new QHBoxLayout; sh->setSpacing(6);
+        sh->addWidget(makeLabel("저장 범위:"));
+        QComboBox* scopeCombo = new QComboBox;
+        scopeCombo->setStyleSheet(editStyle());
+        scopeCombo->addItem("게임별 (이 게임 전용)", "game");
+        scopeCombo->addItem(QString("기종별 (%1 공통)")
+                            .arg(gamePlatform(m_loadedGame.isEmpty()
+                                              ? m_selectedGame : m_loadedGame)), "plat");
+        int si = scopeCombo->findData(m_machineScope);
+        if (si >= 0) scopeCombo->setCurrentIndex(si);
+        connect(scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, scopeCombo](int){
+            m_machineScope = scopeCombo->currentData().toString();
+            log("머신세팅 저장 범위: " + m_machineScope);
+        });
+        sh->addWidget(scopeCombo, 1);
+        v->addLayout(sh);
+    }
+
     // 안내
-    auto* hint = new QLabel("변경 사항은 즉시 적용됩니다. 일부 설정은 리셋 후 반영됩니다.");
+    auto* hint = new QLabel("변경 사항은 즉시 적용·저장됩니다. 일부 설정은 리셋 후 반영됩니다.\n"
+                            "적용 우선순위:  게임별 > 기종별 > 코어 기본");
     hint->setStyleSheet("color:#334455;font-family:'Courier New';font-size:9px;");
     hint->setWordWrap(true);
     v->addWidget(hint);
@@ -2009,8 +2592,13 @@ void MainWindow::rebuildMachineSettings() {
             if (i >= 0 && i < options.size()) {
                 gState.variables[key] = options[i];
                 gState.variablesUpdated.store(true);
-                // 머신 세팅 즉시 저장 (게임 재실행 시 자동 복원)
-                gSettings.machineVars[m_loadedGame][key] = options[i];
+                // 머신 세팅 즉시 저장 — 선택된 범위(게임별/기종별)에
+                if (m_machineScope == "plat") {
+                    QString plat = gamePlatform(m_loadedGame);
+                    gSettings.machineVarsByPlatform[plat][key] = options[i];
+                } else {
+                    gSettings.machineVars[m_loadedGame][key] = options[i];
+                }
                 gSettings.save();
             }
         });
@@ -2317,6 +2905,8 @@ bool MainWindow::loadRomInternal() {
     if (!m_core || m_selectedGame.isEmpty()) return false;
 
     // 로딩 커서 적용
+    // processEvents() 제거: loadGame() 전에 이벤트 처리 시 MSG_START 등이
+    // 재진입(re-entrant)으로 처리되어 이중 startEmu() 발생 → 크래시 원인
     {
         QPixmap loadPx(":/assets/loading.png");
         if (!loadPx.isNull())
@@ -2324,7 +2914,6 @@ bool MainWindow::loadRomInternal() {
         else
             QApplication::setOverrideCursor(Qt::WaitCursor);
     }
-    QApplication::processEvents();
 
     // .zip 우선, 없으면 확장자 없이 시도
     QString romPath = gSettings.romPath + "/" + m_selectedGame + ".zip";
@@ -2342,11 +2931,24 @@ bool MainWindow::loadRomInternal() {
     gState.variables.clear();
     gState.variableOptions.clear();
     gState.variableDescriptions.clear();
-    const auto& saved = gSettings.machineVars.value(m_selectedGame);
-    for (auto it = saved.begin(); it != saved.end(); ++it)
-        gState.variables[it.key()] = it.value();
+    // 머신 세팅 복원: 기종별(기본 베이스) → 게임별(우선 덮어쓰기)
+    {
+        const QString plat = gamePlatform(m_selectedGame);
+        const auto& platVars = gSettings.machineVarsByPlatform.value(plat);
+        for (auto it = platVars.begin(); it != platVars.end(); ++it)
+            gState.variables[it.key()] = it.value();
+        const auto& gameVars = gSettings.machineVars.value(m_selectedGame);
+        for (auto it = gameVars.begin(); it != gameVars.end(); ++it)
+            gState.variables[it.key()] = it.value();   // 게임별이 기종별을 덮어씀
+    }
 
+    // 컨트롤 매핑 해석·적용 (게임별 > 기종별 > 전역 > 기본)
+    resolveAndApplyControls(m_selectedGame);
+
+    qDebug("[load] loadGame() path=%s npActive=%d",
+           romPath.toUtf8().constData(), gNetplay().active() ? 1 : 0);
     bool ok = m_core->loadGame(romPath);
+    qDebug("[load] loadGame() returned %d", ok ? 1 : 0);
 
     // 치트 로드 (게임 실행 시점에만 — 선택 시 로드하면 목록 이동마다 파일I/O 발생)
     if (ok && m_cheat) {
@@ -2369,6 +2971,8 @@ bool MainWindow::loadRomInternal() {
 //  에뮬레이션 시작/일시정지/전체화면
 // ════════════════════════════════════════════════════════════
 void MainWindow::startEmu() {
+    qDebug("[emu] startEmu() gameLoaded=%d npPlaying=%d",
+           gState.gameLoaded ? 1 : 0, gNetplay().playing() ? 1 : 0);
     m_npStates.clear();
     m_npInputHistory.clear();
     m_frameDelay     = 0.0;
@@ -2395,9 +2999,25 @@ void MainWindow::startEmu() {
         m_canvas->setScaleMode(gSettings.videoScaleMode);
         m_canvas->setSmooth(gSettings.videoSmooth);
         m_canvas->setCrtMode(gSettings.videoCrtMode, gSettings.videoCrtIntensity);
+        m_canvas->setFlashGuard(gSettings.videoFlashGuard,
+                                gSettings.videoFlashStrength / 100.0f);
         if (!gSettings.videoShaderPath.isEmpty())
             m_canvas->setShaderPath(gSettings.videoShaderPath);
     }
+
+    // ── TATE 자동 감지: 코어 회전값 적용 ───────────────────────
+    // SET_ROTATION으로 회전이 보고된 경우 auto(-1) 상태에서 자동 반영
+    // m_canvas->rotation() == -1이면 gState.videoRotation을 그대로 사용
+    // 수동 설정(0/1/3)이면 유지
+    QTimer::singleShot(50, this, [this]{
+        // 게임 첫 프레임 이후 videoRotation이 확정됨
+        if (m_canvas && m_canvas->rotation() == -1) {
+            // auto 상태: 버튼 라벨만 갱신 (실제 적용은 updateVertices에서 gState 참조)
+            applyTate(-1);
+        }
+        if (gState.videoRotation != 0)
+            log(QString("⟳ 세로형 게임 감지 — 자동 회전 %1° 적용").arg(gState.videoRotation * 90));
+    });
 
     m_frameAccum = 0.0;
     m_aflClock.start();
@@ -2493,6 +3113,67 @@ void MainWindow::toggleSwapPlayers() {
         : "⇄ 1P 포트로 복귀");
 }
 
+// ════════════════════════════════════════════════════════════
+//  TATE 모드 (세로형 게임 화면 회전)
+// ════════════════════════════════════════════════════════════
+void MainWindow::toggleTate() {
+    if (!m_canvas) return;
+    int cur = m_canvas->rotation();  // 현재 적용값 (-1=auto, 0, 1, 3)
+
+    // 순환: auto(-1) → 90°CCW(1) → 90°CW(3) → off(0) → auto(-1)
+    int next;
+    if      (cur == -1) next = 1;
+    else if (cur ==  1) next = 3;
+    else if (cur ==  3) next = 0;
+    else                next = -1;
+
+    applyTate(next);
+}
+
+void MainWindow::applyTate(int rot) {
+    if (!m_canvas) return;
+    m_canvas->setRotation(rot);
+
+    // 버튼 라벨 + 색상 업데이트
+    if (m_tateBtn) {
+        QString lbl;
+        QString activeStyle =
+            "QPushButton{background:#002200;color:#44ff88;border:2px solid #00cc44;"
+            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#003300;}";
+        QString inactiveStyle =
+            "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
+            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#00004d;}";
+
+        switch (rot) {
+        case  1: lbl = "⟳  90°CCW"; m_tateBtn->setStyleSheet(activeStyle);   break;
+        case  3: lbl = "⟲  90°CW";  m_tateBtn->setStyleSheet(activeStyle);   break;
+        case  0: lbl = "⟳  OFF";    m_tateBtn->setStyleSheet(inactiveStyle);  break;
+        default: // -1 = auto
+            {
+                int autoRot = gState.videoRotation;
+                if (autoRot == 0)
+                    lbl = "⟳  TATE";     // 코어가 회전 안 함 → 비활성
+                else
+                    lbl = "⟳  AUTO";     // 코어가 회전 지정 → 활성
+                m_tateBtn->setStyleSheet(autoRot != 0 ? activeStyle : inactiveStyle);
+            }
+            break;
+        }
+        m_tateBtn->setText(lbl);
+    }
+
+    QString rotName;
+    switch (rot) {
+    case  1: rotName = "90°CCW"; break;
+    case  3: rotName = "90°CW";  break;
+    case  0: rotName = "OFF";    break;
+    default: rotName = QString("AUTO(%1°)").arg(gState.videoRotation * 90); break;
+    }
+    log("⟳ TATE: " + rotName);
+}
+
 void MainWindow::togglePause() {
     if (!gState.gameLoaded) return;
     gState.isPaused = !gState.isPaused;
@@ -2550,7 +3231,20 @@ void MainWindow::npApplyInput(uint16_t lb, uint16_t rb) {
 //  에뮬 루프 (Phase 3: AFL + Rollback)
 // ════════════════════════════════════════════════════════════
 void MainWindow::onEmuTimer() {
+    // ── 재진입 방지 ──────────────────────────────────────────
+    // FBNeo DLL이 retro_run() 내부에서 DirectSound/WinMM API를 호출하면
+    // Windows 메시지 펌프가 돌아 Qt 이벤트 루프가 재진입될 수 있음.
+    // 재진입 시 m_core 상태 충돌 → 크래시. 플래그로 완전 차단.
+    if (m_emuTimerBusy) return;
+    m_emuTimerBusy = true;
+    auto _busyGuard = qScopeGuard([this]{ m_emuTimerBusy = false; });
+
     if (!gState.gameLoaded || !m_core || gState.isPaused) return;
+
+    // 넷플레이 첫 프레임 진입 진단 (frame=0일 때만 1회)
+    if (gNetplay().playing() && gState.frameCount == 0) {
+        qDebug("[NP] FIRST FRAME entered — playing=true frameCount=0 core=%p", (void*)m_core);
+    }
 
     // ── 게임패드 메뉴 진입: SELECT+START 2초 홀드 ─────────────────
     // · Start 단독은 게임으로 그대로 전달 (KOF 보스선택 커맨드 정상 작동)
@@ -2607,9 +3301,83 @@ void MainWindow::onEmuTimer() {
     // Playing 상태일 때만 넷플레이 롤백 루프 실행
     // (Lobby/Loading/Ready 상태에서는 싱글플레이어 경로 사용)
     if (gNetplay().playing()) {
+
+        // ── ① 호스트 스냅샷 큐 적용 ─────────────────────────────
+        // stateReceived 는 소켓 시그널 핸들러 안이므로 m_core 호출 금지.
+        // 데이터를 큐에 저장해 두고, 여기서(onEmuTimer) 안전하게 적용한다.
+        if (m_pendingSyncSf >= 0) {
+            int sf       = m_pendingSyncSf;
+            int savedCur = m_pendingSyncCur;
+            QByteArray syncData = std::move(m_pendingSyncData);
+            m_pendingSyncSf  = -1;
+            m_pendingSyncCur = -1;
+
+            size_t expectedSz = m_core->serializeSize();
+            bool sizeOk = (!syncData.isEmpty() && expectedSz > 0
+                           && static_cast<size_t>(syncData.size()) == expectedSz);
+            if (!sizeOk) {
+                // 크기 불일치는 깊은 문제(롬/컨텍스트 차이)이거나 손상 → 이 상태만 건너뜀
+                static int s_szCount = 0;
+                if ((++s_szCount % 30) == 1)
+                    qDebug("[SYNC] reject SIZE #%d recv=%d expected=%zu",
+                           s_szCount, (int)syncData.size(), expectedSz);
+            } else {
+                // ★ 호스트 상태는 항상 적용(권위적). 격차(gap)로 적용 *방법*만 결정.
+                //   gap > 0 : 클라가 호스트 송신시점보다 앞서있음(정상 — 지연 때문)
+                //   gap ≤ 0 : 클라가 뒤처짐
+                int gap = savedCur - sf;
+
+                static int s_applyCount = 0;
+                if ((++s_applyCount % 30) == 1)
+                    qDebug("[SYNC] APPLY #%d sf=%d cur=%d gap=%d sz=%d",
+                           s_applyCount, sf, savedCur, gap, (int)syncData.size());
+
+                // Time Drift 조정 (항상 실행 — 격차를 0 근처로 수렴시켜
+                //   하드스냅을 거의 안 쓰게 함. 이게 죽음의 소용돌이 방지의 핵심)
+                {
+                    double fps    = (gState.coreFps > 0) ? gState.coreFps : 60.0;
+                    double baseMs = 1000.0 / fps;
+                    double adj = std::clamp((gap * baseMs) / 30.0,
+                                           -3.0 * baseMs, 3.0 * baseMs);
+                    m_frameDelay = std::clamp(m_frameDelay + adj, -5.0, 8.0);
+                }
+
+                m_core->unserialize(syncData.constData(),
+                                    static_cast<size_t>(syncData.size()));
+                gState.frameCount = sf;
+                gNetplay().confirmFramesUpTo(static_cast<uint32_t>(sf));
+
+                // 재동기 완료 → 플래그/체크섬 맵 리셋 (다음 desync 감지 준비)
+                m_resyncPending = false;
+                m_localChecksums.clear();
+                m_remoteChecksums.clear();
+                m_lastChecksumFrame = 0;
+
+                // 동기화 이전 스냅샷/입력은 호스트 state 와 호환 불가 → 전부 삭제
+                m_npStates.clear();
+                m_npInputHistory.clear();
+
+                // 격차에 따라 따라잡기 방법 결정.
+                //   RESIM_BUDGET 이내 양수 격차 → 부드럽게 재시뮬(틱당 8프레임 분산)
+                //   그 외(너무 큼/음수) → 하드 스냅(시각 점프 감수, 영구 desync 보다 나음)
+                const int RESIM_BUDGET = 90;   // 1.5초
+                if (gap > 0 && gap <= RESIM_BUDGET) {
+                    gState.netplayResim = true;
+                    m_pendingResimTo    = savedCur;
+                } else {
+                    gState.netplayResim = false;
+                    m_pendingResimTo    = -1;
+                    static int s_hardCount = 0;
+                    if ((++s_hardCount % 10) == 1)
+                        qDebug("[SYNC] HARD-SNAP #%d sf=%d cur=%d gap=%d",
+                               s_hardCount, sf, savedCur, gap);
+                }
+            }
+        }
+
         int cur = gState.frameCount;
 
-        // ── ① 청크 재시뮬 계속 처리 (stateReceived 미완료분) ────
+        // ── ② 청크 재시뮬 계속 처리 (pendingResimTo 분산 처리) ──
         // 재시뮬 중에는 일반 프레임 진행 없이 catch-up 우선
         if (m_pendingResimTo >= 0 && cur < m_pendingResimTo) {
             int chunkEnd = std::min(cur + MAX_RESIM_PER_TICK, m_pendingResimTo);
@@ -2667,28 +3435,39 @@ void MainWindow::onEmuTimer() {
         int rollbackTo = gNetplay().getRollbackFrame(cur);
         if (rollbackTo >= 0 && rollbackTo < cur
                 && m_npStates.contains(rollbackTo)) {
-            gState.netplayResim = true;
-            m_core->unserialize(m_npStates[rollbackTo].constData(),
-                                m_npStates[rollbackTo].size());
-            gState.frameCount = rollbackTo;
+            // 크기 검증 — 불일치 시 unserialize 크래시 방지
+            size_t expectedSz = m_core->serializeSize();
+            const QByteArray& rbState = m_npStates[rollbackTo];
+            if (expectedSz == 0
+                    || static_cast<size_t>(rbState.size()) != expectedSz) {
+                log(QString("⚠ 롤백 크기 불일치 — 건너뜀 (frame=%1 size=%2 expected=%3)")
+                    .arg(rollbackTo).arg(rbState.size()).arg(expectedSz));
+                m_npStates.clear();   // 불량 상태 전체 제거
+            } else {
+                gState.netplayResim = true;
+                m_core->unserialize(rbState.constData(), rbState.size());
+                gState.frameCount = rollbackTo;
 
-            for (int rf = rollbackTo; rf < cur; ++rf) {
-                NpInputState& is = m_npInputHistory[rf];
-                uint16_t lb = is.local;
-                uint16_t rb = static_cast<uint16_t>(
-                    gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
-                is.remote = rb;
-                // 재시뮬 확정값으로 예측 덮어씀 → 무한 롤백 루프 차단
-                gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
-                npApplyInput(lb, rb);
-                m_core->run();
-                gState.frameCount = rf + 1;
-            }
-            gState.netplayResim = false;
-        }
+                for (int rf = rollbackTo; rf < cur; ++rf) {
+                    NpInputState& is = m_npInputHistory[rf];
+                    uint16_t lb = is.local;
+                    uint16_t rb = static_cast<uint16_t>(
+                        gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
+                    is.remote = rb;
+                    // 재시뮬 확정값으로 예측 덮어씀 → 무한 롤백 루프 차단
+                    gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
+                    npApplyInput(lb, rb);
+                    m_core->run();
+                    gState.frameCount = rf + 1;
+                }
+                gState.netplayResim = false;
+            }  // else (크기 정상)
+        }  // if (rollbackTo...)
 
         // ── ④ 현재 프레임 스냅샷 저장 (run() 직전) ──────────────
         // m_npStates[cur] = "cur 실행 직전" 상태 → 롤백 기준점
+        // ★ 순수 GGPO: 풀스테이트 상시 전송 안 함 (이전의 sendState 제거).
+        //   대신 확정 프레임에서 체크섬(8바이트)만 교환해 desync 를 감지한다.
         {
             size_t sz = m_core->serializeSize();
             if (sz > 0) {
@@ -2696,21 +3475,49 @@ void MainWindow::onEmuTimer() {
                 if (m_core->serialize(buf.data(), sz)) {
                     m_npStates[cur] = buf;
 
-                    // 호스트: SYNC_INTERVAL마다 스냅샷을 클라이언트로 전송
-                    // 클라이언트는 stateReceived에서 즉각 롤백+재시뮬 실행
-                    if (gNetplay().isHost()
-                            && cur >= NetplayManager::SYNC_INTERVAL
-                            && (cur % NetplayManager::SYNC_INTERVAL) == 0) {
-                        gNetplay().sendState(static_cast<uint32_t>(cur), buf);
+                    // ── 체크섬 교환 (desync 감지) ──────────────────
+                    // 확정 프레임(양쪽 입력 final, 더 이상 롤백 안 됨)에서만 계산.
+                    //   confirmed = min(cur, remoteMaxFrame)
+                    uint32_t remoteF   = gNetplay().remoteMaxFrame();
+                    uint32_t confirmed = std::min<uint32_t>(
+                                            static_cast<uint32_t>(cur), remoteF);
+                    if (confirmed >= NetplayManager::CHECKSUM_INTERVAL
+                            && (confirmed % NetplayManager::CHECKSUM_INTERVAL) == 0
+                            && confirmed > m_lastChecksumFrame
+                            && m_npStates.contains(static_cast<int>(confirmed))) {
+                        const QByteArray& cs = m_npStates[static_cast<int>(confirmed)];
+                        uint32_t crc = npChecksum(cs);
+                        m_localChecksums[confirmed] = crc;
+                        gNetplay().sendChecksum(confirmed, crc);
+                        m_lastChecksumFrame = confirmed;
+                        checkDesync(confirmed);
+                        // 오래된 체크섬 정리 (최근 것만 유지)
+                        while (m_localChecksums.size() > 16)
+                            m_localChecksums.erase(m_localChecksums.begin());
                     }
                 }
             }
         }
 
         // ── ⑤ 입력 수집 · 전송 · 히스토리 저장 ──────────────────
-        uint16_t localBits = 0;
+        uint16_t rawBits = 0;
         for (int i = 0; i < 16; ++i)
-            if (gState.rawKeys[i]) localBits |= (1 << i);
+            if (gState.rawKeys[i]) rawBits |= (1 << i);
+
+        // ── 입력 지연 큐 (Fightcade-style delay-based netcode) ──
+        // rawBits를 (cur + delay) 프레임에 예약, cur 프레임은 큐에서 꺼냄
+        // delay=0이면 즉시 전송 (롤백 전용)
+        uint16_t localBits = 0;
+        {
+            const int delay = qMax(0, gSettings.netplayInputDelay);
+            if (delay > 0) {
+                m_npDelayQueue[static_cast<uint32_t>(cur + delay)] = rawBits;
+                localBits = m_npDelayQueue.value(static_cast<uint32_t>(cur), 0);
+                m_npDelayQueue.remove(static_cast<uint32_t>(cur));
+            } else {
+                localBits = rawBits;
+            }
+        }
 
         gNetplay().sendInput(static_cast<uint32_t>(cur), localBits);
 
@@ -3031,6 +3838,8 @@ void MainWindow::applySettings() {
     if (m_crtSlider)          gSettings.videoCrtIntensity = m_crtSlider->value() / 100.0;
     if (m_vsyncCheck)         gSettings.videoVsync       = m_vsyncCheck->isChecked();
     if (m_frameskipSpin)      gSettings.videoFrameskip   = m_frameskipSpin->value();
+    if (m_flashGuardCheck)    gSettings.videoFlashGuard    = m_flashGuardCheck->isChecked();
+    if (m_flashSlider)        gSettings.videoFlashStrength = m_flashSlider->value();
 
     if (m_volumeSlider)       gSettings.audioVolume      = m_volumeSlider->value();
     if (m_sampleRateCombo)    gSettings.audioSampleRate  = m_sampleRateCombo->currentText().toInt();
@@ -3049,6 +3858,8 @@ void MainWindow::applySettings() {
         m_canvas->setScaleMode(gSettings.videoScaleMode);
         m_canvas->setSmooth(gSettings.videoSmooth);
         m_canvas->setCrtMode(gSettings.videoCrtMode, gSettings.videoCrtIntensity);
+        m_canvas->setFlashGuard(gSettings.videoFlashGuard,
+                                gSettings.videoFlashStrength / 100.0f);
     }
     if (m_audio) {
         m_audio->setVolume(gSettings.audioVolume / 100.0);
@@ -3082,6 +3893,8 @@ void MainWindow::refreshSettingsUi() {
                                   static_cast<int>(gSettings.videoCrtIntensity * 100));
     if (m_vsyncCheck)         m_vsyncCheck->setChecked(gSettings.videoVsync);
     if (m_frameskipSpin)      m_frameskipSpin->setValue(gSettings.videoFrameskip);
+    if (m_flashGuardCheck)    m_flashGuardCheck->setChecked(gSettings.videoFlashGuard);
+    if (m_flashSlider)        m_flashSlider->setValue(gSettings.videoFlashStrength);
 
     if (m_volumeSlider)       m_volumeSlider->setValue(gSettings.audioVolume);
     if (m_sampleRateCombo)    m_sampleRateCombo->setCurrentText(
@@ -3136,6 +3949,18 @@ void MainWindow::leaveGameScreen() {
     }
     if (m_overlayTimer) m_overlayTimer->stop();
     if (m_playerOverlay) m_playerOverlay->hide();
+
+    // 게임 종료 시 TATE/회전 상태 리셋 (다음 게임은 auto부터)
+    gState.videoRotation = 0;
+    if (m_canvas) m_canvas->setRotation(-1);  // auto
+    if (m_tateBtn) {
+        m_tateBtn->setText("⟳  TATE");
+        m_tateBtn->setStyleSheet(
+            "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
+            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
+            "QPushButton:hover{background:#00004d;color:#99ccff;}"
+            "QPushButton:pressed{background:#001166;}");
+    }
 
     m_stack->setCurrentIndex(0);
     filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
@@ -3273,29 +4098,37 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
 
     if (e->isAutoRepeat()) { QMainWindow::keyPressEvent(e); return; }
     bool shift = (e->modifiers() & Qt::ShiftModifier);
+    const int mods = e->modifiers();
 
-    // Tab: 메인 GUI ↔ 게임 화면 전환 (원래 동작 유지)
-    if (k == Qt::Key_Tab)  { togglePause(); return; }
+    // ── 설정 가능한 핫키 (action 별로 hotkeyMatch) ──────────────
+    //   기본값은 buildDefaultKeymap 옆 hotkeyDefs() 와 동일 → 기존 동작 유지.
+    //   사용자가 컨트롤 옵션에서 재배정하면 그 키로 동작.
 
-    // ESC: 게임 종료 → GUI로 복귀
-    if (k == Qt::Key_Escape && gState.gameLoaded) {
+    // 게임 ↔ 메뉴 전환 (어느 상태에서나)
+    if (hotkeyMatch("pause", k, mods)) { togglePause(); return; }
+
+    // 게임 종료 (게임 로드 중일 때만)
+    if (hotkeyMatch("exit", k, mods) && gState.gameLoaded) {
+        if (gNetplay().playing()) {
+            gNetplay().sendGameOver();
+            log("■ 게임 종료 — 넷플레이 (상대 통지, Lobby 복귀)");
+            cleanupNetplay();
+            return;
+        }
         m_timer->stop();
         gState.isPaused = false;
         if (m_core) m_core->unloadGame();
         m_loadedGame.clear();
         leaveGameScreen();
-        log("■ ESC — 게임 종료");
+        log("■ 게임 종료");
         return;
     }
 
-    // Alt+Enter: 전체화면
-    if ((k == Qt::Key_Return || k == Qt::Key_Enter)
-        && (e->modifiers() & Qt::AltModifier)) { toggleFullscreen(); return; }
+    // 전체화면
+    if (hotkeyMatch("fullscreen", k, mods)) { toggleFullscreen(); return; }
 
-    // ` (백틱): 서비스 모드 토글
-    // serviceMode=true 시 L2(Xbox LT) 차단 해제 → FBNeo 기판 서비스 메뉴 진입 가능
-    // 5초(300프레임) 후 자동 해제됨
-    if (k == Qt::Key_QuoteLeft) {
+    // 서비스 모드 (게임 중 + 일시정지 아닐 때)
+    if (hotkeyMatch("service", k, mods)) {
         if (gState.gameLoaded && !gState.isPaused) {
             gState.serviceMode       = !gState.serviceMode;
             gState.serviceModeFrames = 0;
@@ -3304,7 +4137,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
-    // F1~F8: 슬롯 로드 / Shift+F1~F8: 슬롯 저장
+    // ── 세이브스테이트 슬롯 (F1~F8 로드 / Shift+F1~F8 저장) ──────
+    //   안전을 위해 고정·예약 (재배정 불가). 핫키보다 먼저 체크.
     static const int fKeys[] = {
         Qt::Key_F1, Qt::Key_F2, Qt::Key_F3, Qt::Key_F4,
         Qt::Key_F5, Qt::Key_F6, Qt::Key_F7, Qt::Key_F8
@@ -3317,19 +4151,16 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         }
     }
 
-    bool ctrl = (e->modifiers() & Qt::ControlModifier);
-
-    // F9: 일반 녹화 토글 / Ctrl+F9: 프리뷰 영상 녹화 토글
-    if (k == Qt::Key_F9)  { ctrl ? togglePreviewRecord() : toggleRecording(); return; }
-
-    // F10: 1P↔2P 스왑 토글 (싱글 연습 모드)
-    if (k == Qt::Key_F10) { toggleSwapPlayers(); return; }
-
-    // F11: 패스트포워드 토글
-    if (k == Qt::Key_F11) { toggleFastForward(!gState.fastForward); return; }
-
-    // F12: 일반 스크린샷 / Ctrl+F12: 프리뷰 이미지 저장
-    if (k == Qt::Key_F12) { ctrl ? savePreviewShot() : takeScreenshot(); return; }
+    // 프리뷰 녹화 / 일반 녹화 (모디파이어 포함이 먼저 매칭되도록 순서 주의)
+    if (hotkeyMatch("preview_rec",  k, mods)) { togglePreviewRecord(); return; }
+    if (hotkeyMatch("record",       k, mods)) { toggleRecording();     return; }
+    // 1P↔2P 스왑
+    if (hotkeyMatch("swap",         k, mods)) { toggleSwapPlayers();   return; }
+    // 패스트포워드
+    if (hotkeyMatch("fast_forward", k, mods)) { toggleFastForward(!gState.fastForward); return; }
+    // 프리뷰 이미지 저장 / 스크린샷
+    if (hotkeyMatch("preview_shot", k, mods)) { savePreviewShot();     return; }
+    if (hotkeyMatch("screenshot",   k, mods)) { takeScreenshot();      return; }
 
     applyKeyPress(k);
     QMainWindow::keyPressEvent(e);
@@ -3360,6 +4191,121 @@ void MainWindow::applyKeyRelease(int qtKey) {
     }
 }
 
+// ════════════════════════════════════════════════════════════
+//  기종(플랫폼) 분류기 — ROM 이름 프리픽스 기반
+//  컨트롤/머신 "기종별 전역" 설정의 그룹 키로 사용.
+//  gamelist.xml 에 하드웨어 필드가 없어 프리픽스로 추정한다.
+//  분류가 틀리면 사용자가 "게임별" 저장으로 우회 가능.
+// ════════════════════════════════════════════════════════════
+QString MainWindow::gamePlatform(const QString& rom) {
+    const QString lc = rom.toLower();
+    auto starts = [&](std::initializer_list<const char*> pfx) {
+        for (const char* p : pfx) if (lc.startsWith(p)) return true;
+        return false;
+    };
+    if (starts({"kof","mslug","garou","samsho","rbff","fatfury","aof","wh",
+                "nam1975","lbowling","blazstar","lastsold","neo","magdrop",
+                "pbobble","neobombe","turfmast","lastblad","rotd","ssideki",
+                "twinspri","ironclad"," kabuki","matrim","svc"," kizuna",
+                "shocktro","ragnagrd","breakers","galaxyfg","wjammers"}))
+        return "neogeo";
+    if (starts({"sf","ssf","sfa","sfz","xmvsf","msh","mvsc","mvc","avsp","vsav",
+                "knights","ffight","ghouls","strider","1941","1944","19xx",
+                "progear","gigawing","mmatrix","cybots","ddtod","ddsom",
+                "dino","punisher","slammast","wof","kod","mercs","willow",
+                "unsquad","dynwar","cawing","forgottn","varth","captcomm",
+                "pnickj","qad","nwarr","sgemf","jojo","redearth","vhunt",
+                "vsavo","cps"}))
+        return "cps";
+    if (starts({"rtype","hharry","dkgen","poundfor","airduel","gallop",
+                "cosmccop","kengo","matchit","xmultipl","dbreed","loht",
+                "imgfight","nspirit","mrheli","bchopper","gunforce","bmaster",
+                "lethalth","thndblst","uccops","mysticri","gunhohki","majtitl",
+                "hook","ppan","rtypeleo","inthunt","kaiteids","leaguemn",
+                "ssoldier","psoldier","dsoccr","gunforc2","geostorm","nbbatman",
+                "hcube","spelunk","kungfum","ldrun","kidniki","vigilant"}))
+        return "irem";
+    if (starts({"ddonpach","donpachi","esprade","guwange","dfeveron","uopoko",
+                "ddpdoj","espgal","mushi","ketsui","pinkswts","deathsml",
+                "ibara","ddp"}))
+        return "cave";
+    if (starts({"batsugun","dogyuun","hellfire","truxton","tatsujin","zerowing",
+                "outzone","snowbros","fixeight","vfive","grindstm","kingdmgp",
+                "kbash","pipibibs","whoopee","tekipaki","ghox","dharma",
+                "rallybik","demonwld","vimana","teki"}))
+        return "toaplan";
+    if (starts({"gunbird","strikers","s1945","sengoku","samuraia","btlkroad",
+                "sengokmj","tengai","gachiko","loverboy","daraku","hotgmck"}))
+        return "psikyo";
+    return "arcade";   // 기본 (그 외 모든 게임 공통)
+}
+
+// ════════════════════════════════════════════════════════════
+//  핫키 정의 — action 이름 / 표시 라벨 / 기본 키 / 기본 모디파이어
+//  modifiers 비트: 1=Shift, 2=Ctrl, 4=Alt
+//  인코딩:  enc = (key & 0x0FFFFFFF) | (mods << 28)
+//  (Qt::Key 는 25비트 이내라 상위 비트가 비어있음)
+//  ※ 세이브스테이트 슬롯(F1~F8 / Shift+F1~F8)은 안전을 위해 고정 — 표에 없음
+// ════════════════════════════════════════════════════════════
+const MainWindow::HotkeyDef* MainWindow::hotkeyDefs(int* count) {
+    static const HotkeyDef defs[] = {
+        {"pause",        "게임 ↔ 메뉴 전환",      Qt::Key_Tab,        0},
+        {"exit",         "게임 종료",             Qt::Key_Escape,     0},
+        {"fullscreen",   "전체화면",              Qt::Key_Return,     4}, // Alt+Enter
+        {"service",      "서비스 모드",           Qt::Key_QuoteLeft,  0}, // `
+        {"record",       "녹화",                  Qt::Key_F9,         0},
+        {"preview_rec",  "프리뷰 영상 녹화",      Qt::Key_F9,         2}, // Ctrl+F9
+        {"swap",         "1P ↔ 2P 스왑",          Qt::Key_F10,        0},
+        {"fast_forward", "패스트포워드",          Qt::Key_F11,        0},
+        {"screenshot",   "스크린샷",              Qt::Key_F12,        0},
+        {"preview_shot", "프리뷰 이미지 저장",    Qt::Key_F12,        2}, // Ctrl+F12
+    };
+    if (count) *count = static_cast<int>(sizeof(defs) / sizeof(defs[0]));
+    return defs;
+}
+
+int MainWindow::hotkeyEncode(int key, int mods) {
+    return (key & 0x0FFFFFFF) | ((mods & 0x7) << 28);
+}
+void MainWindow::hotkeyDecode(int enc, int& key, int& mods) {
+    key  = enc & 0x0FFFFFFF;
+    mods = (enc >> 28) & 0x7;
+}
+
+// 핫키 인코딩 → 사람이 읽는 문자열 ("Ctrl+F9", "Tab", "`" 등)
+QString MainWindow::hotkeyText(int enc) {
+    int key, mods; hotkeyDecode(enc, key, mods);
+    if (key == 0) return "—";
+    QString s;
+    if (mods & 2) s += "Ctrl+";
+    if (mods & 1) s += "Shift+";
+    if (mods & 4) s += "Alt+";
+    QString kn = QKeySequence(key).toString(QKeySequence::NativeText);
+    if (kn.isEmpty()) kn = QString("0x%1").arg(key, 0, 16);
+    return s + kn;
+}
+
+// action 의 현재 핫키 인코딩 (사용자 설정 > 기본값)
+int MainWindow::hotkeyOf(const QString& action) {
+    if (gSettings.hotkeyMap.contains(action))
+        return gSettings.hotkeyMap.value(action);
+    int n = 0; const HotkeyDef* d = hotkeyDefs(&n);
+    for (int i = 0; i < n; ++i)
+        if (action == d[i].action) return hotkeyEncode(d[i].key, d[i].mods);
+    return 0;
+}
+
+// 현재 이벤트(key+mods)가 action 핫키와 일치하는가
+bool MainWindow::hotkeyMatch(const QString& action, int key, int qtMods) {
+    int enc = hotkeyOf(action);
+    int hk, hm; hotkeyDecode(enc, hk, hm);
+    if (hk == 0) return false;
+    int curMods = ((qtMods & Qt::ShiftModifier)   ? 1 : 0)
+                | ((qtMods & Qt::ControlModifier) ? 2 : 0)
+                | ((qtMods & Qt::AltModifier)     ? 4 : 0);
+    return key == hk && curMods == hm;
+}
+
 QHash<int, int> MainWindow::buildDefaultKeymap() {
     return {
         {Qt::Key_Z,       0},   // B     (JOYPAD_B)
@@ -3377,24 +4323,258 @@ QHash<int, int> MainWindow::buildDefaultKeymap() {
     };
 }
 
+// ── 컨트롤 매핑 해석: 게임별 > 기종별 > 전역 > 기본 ──────────
+QHash<int,int> MainWindow::resolveCtrlMap(
+        const QHash<QString,QHash<int,int>>& scoped,
+        const QHash<int,int>& global,
+        const QHash<int,int>& dflt,
+        const QString& rom)
+{
+    if (!rom.isEmpty()) {
+        QString gk = "game:" + rom;
+        if (scoped.contains(gk) && !scoped[gk].isEmpty()) return scoped[gk];
+        QString pk = "plat:" + gamePlatform(rom);
+        if (scoped.contains(pk) && !scoped[pk].isEmpty()) return scoped[pk];
+    }
+    if (!global.isEmpty()) return global;
+    return dflt;
+}
+
+// 게임 로드 시 — 해당 게임에 맞는 컨트롤을 해석해 적용
+void MainWindow::resolveAndApplyControls(const QString& rom) {
+    m_ctrlScopeRom = rom;
+
+    // 키보드
+    m_keymap = resolveCtrlMap(gSettings.kbScoped, gSettings.keyboardMapping,
+                              buildDefaultKeymap(), rom);
+    // 게임패드
+    if (m_gamepad) {
+        QHash<int,int> xi = resolveCtrlMap(gSettings.xiScoped,
+                                gSettings.xinputMapping, {}, rom);
+        QHash<int,int> wm = resolveCtrlMap(gSettings.wmScoped,
+                                gSettings.winmmMapping,  {}, rom);
+        if (!xi.isEmpty()) m_gamepad->setXInputMapping(xi);
+        if (!wm.isEmpty()) m_gamepad->setWinMMMapping(wm);
+    }
+    // 테이블이 보이면 갱신
+    refreshControlsTable();
+    refreshPadTable();
+    refreshWinMMTable();
+}
+
+// 현재 테이블(m_keymap 등) 상태를 지정 스코프로 저장
+//   scope: "global"(전역) / "plat"(기종별) / "game"(게임별)
+void MainWindow::saveControlsToScope(const QString& scope) {
+    const QString rom = m_ctrlScopeRom.isEmpty() ? m_selectedGame : m_ctrlScopeRom;
+
+    QHash<int,int> xi = m_gamepad ? m_gamepad->getXInputMapping() : QHash<int,int>();
+    QHash<int,int> wm = m_gamepad ? m_gamepad->getWinMMMapping()  : QHash<int,int>();
+
+    if (scope == "global") {
+        gSettings.keyboardMapping = m_keymap;
+        gSettings.xinputMapping   = xi;
+        gSettings.winmmMapping    = wm;
+        log("🎮 컨트롤 → 전역 저장");
+    } else if (scope == "plat") {
+        if (rom.isEmpty()) { log("⚠ 기종 저장: 게임을 먼저 선택하세요"); return; }
+        QString pk = "plat:" + gamePlatform(rom);
+        gSettings.kbScoped[pk] = m_keymap;
+        gSettings.xiScoped[pk] = xi;
+        gSettings.wmScoped[pk] = wm;
+        log(QString("🎮 컨트롤 → 기종별 저장 (%1)").arg(gamePlatform(rom)));
+    } else { // game
+        if (rom.isEmpty()) { log("⚠ 게임별 저장: 게임을 먼저 선택하세요"); return; }
+        QString gk = "game:" + rom;
+        gSettings.kbScoped[gk] = m_keymap;
+        gSettings.xiScoped[gk] = xi;
+        gSettings.wmScoped[gk] = wm;
+        log(QString("🎮 컨트롤 → 게임별 저장 (%1)").arg(rom));
+    }
+    gSettings.save();
+}
+
 // ════════════════════════════════════════════════════════════
 //  넷플레이 슬롯
 // ════════════════════════════════════════════════════════════
 void MainWindow::onNetConnected(bool isHost) {
+    qDebug("[NP-conn] onNetConnected isHost=%d", isHost ? 1 : 0);
     log(QString("🌐 연결됨 — %1").arg(isHost ? "HOST(P1)" : "CLIENT(P2)"));
-    if (m_npStatusLabel)
+    if (m_npStatusLabel) {
         m_npStatusLabel->setText(
-            isHost ? "● HOSTING — 대기 중" : "● CONNECTED — 호스트 대기 중");
-    m_npStatusLabel->setStyleSheet(
-        "color:#44cc44;font-family:'Courier New';font-size:11px;");
-    if (m_npStartBtn)  m_npStartBtn->setEnabled(isHost);
+            isHost ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중");
+        m_npStatusLabel->setStyleSheet(
+            "color:#44cc44;font-family:'Courier New';font-size:11px;font-weight:bold;");
+    }
+    if (m_npStartBtn)   m_npStartBtn->setEnabled(isHost);
     if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
-    if (m_npHostBtn)   m_npHostBtn->setEnabled(false);
+    if (m_npHostBtn)    m_npHostBtn->setEnabled(false);
     if (m_npConnectBtn) m_npConnectBtn->setEnabled(false);
+
+    // 토큰 방식: 룸 코드는 HOST GAME 클릭 시점에 이미 생성·표시됨.
+    // 연결 성립 시점에 재생성하지 않음 (코드 안정성 유지).
+    Q_UNUSED(isHost);
+}
+
+// ════════════════════════════════════════════════════════════
+//  릴레이 홀펀칭 (Cloudflare Worker 기반)
+// ════════════════════════════════════════════════════════════
+
+// 공유 QNetworkAccessManager — 앱 생명주기 동안 1개만 유지 (TLS race 방지)
+QNetworkAccessManager* MainWindow::relayNam() {
+    if (!m_relayNam) m_relayNam = new QNetworkAccessManager(this);
+    return m_relayNam;
+}
+
+// 내 IP:Port 를 릴레이에 등록. 피어 정보가 있으면 즉시 반환.
+void MainWindow::relayRegister(const QString& code, const QString& role,
+                                const QString& ip,  int port)
+{
+    log(QString("[DIAG] relayRegister 진입 role=%1 ip=%2:%3").arg(role).arg(ip).arg(port));
+    QString base = gSettings.netplayRelayUrl;
+    if (base.isEmpty()) { log("[DIAG] relayRegister: base 비어있음 → return"); return; }
+    if (base.endsWith('/')) base.chop(1);
+    log("[DIAG] relayRegister: QNAM 생성 직전");
+
+    QJsonObject body;
+    body["code"] = code;
+    body["role"] = role;
+    body["ip"]   = ip;
+    body["port"] = port;
+
+    QUrl url(base + "/room");
+    QNetworkRequest req;
+    req.setUrl(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    auto* reply = relayNam()->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    log("[DIAG] relayRegister: POST 요청 전송 완료 (응답 대기)");
+    connect(reply, &QNetworkReply::finished, this, [this, reply, role](){
+        log("[DIAG] relayRegister 응답 핸들러 진입");
+        reply->deleteLater();   // 공유 nam 은 파괴하지 않음
+        if (reply->error() != QNetworkReply::NoError) {
+            log("릴레이 등록 실패: " + reply->errorString());
+            return;
+        }
+        QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        // ★ Qt6 함정 회피: doc.object() 임시객체를 명명 변수로 살려두고
+        //   peer 는 QJsonValue(값 복사)로 받는다. auto 로 받으면
+        //   QJsonValueConstRef(임시 참조) → 댕글링 → toObject() 크래시.
+        QJsonObject root = doc.object();
+        QJsonValue  peer = root.value("peer");
+        log("[DIAG] relayRegister 응답 파싱 완료");
+        if (peer.isObject()) {
+            QJsonObject po   = peer.toObject();
+            QString peerIp   = po.value("ip").toString();
+            int     peerPort = po.value("port").toInt();
+            if (!peerIp.isEmpty() && peerPort > 0) {
+                if (m_relayPeerHandled) {
+                    log("[DIAG] relayRegister: 피어 이미 처리됨 → 중복 무시");
+                    return;
+                }
+                m_relayPeerHandled = true;
+                log(QString("릴레이: 피어 발견 %1:%2 → 즉시 홀펀칭").arg(peerIp).arg(peerPort));
+                // 즉시 5회 프로브 (양쪽 동시 송신 → NAT 매핑 동시 생성)
+                for (int i = 0; i < 5; ++i)
+                    gNetplay().sendProbeTo(peerIp, peerPort);
+                // 클라이언트: 호스트 주소 확정 → HELLO 핸드셰이크 시작
+                if (role == "client" && !gNetplay().isHost()) {
+                    gNetplay().clientStartHandshake(peerIp, peerPort);
+                }
+            }
+        } else {
+            log("릴레이 등록 완료 — 상대 대기 중...");
+        }
+    });
+}
+
+// 피어가 나타날 때까지 1초 간격으로 폴링 (최대 60초)
+// ※ active() 대신 playing() 사용 — hostListen/clientConnect 후 active()는 즉시 true가 되므로
+void MainWindow::relayPollPeer(const QString& code, const QString& myRole, int tries)
+{
+    if (tries == 0) log(QString("[DIAG] relayPollPeer 진입 myRole=%1").arg(myRole));
+    if (tries >= 60) { log("릴레이 폴링 타임아웃"); return; }
+    if (gNetplay().playing()) return;  // 게임 중이면 중단
+
+    QString base = gSettings.netplayRelayUrl;
+    if (base.isEmpty()) return;
+    if (base.endsWith('/')) base.chop(1);
+
+    // 내가 host → peer는 client, 내가 client → peer는 host
+    QString peerRole = (myRole == "host") ? "client" : "host";
+    QString urlStr   = base + "/room/" + code + "/" + peerRole;
+
+    QUrl  url(urlStr);
+    QNetworkRequest req;
+    req.setUrl(url);
+    auto* reply = relayNam()->get(req);
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, code, myRole, tries](){
+        reply->deleteLater();   // 공유 nam 은 파괴하지 않음
+
+        if (gNetplay().playing()) return;  // 게임 중이면 중단
+
+        if (reply->error() == QNetworkReply::NoError) {
+            QJsonDocument doc  = QJsonDocument::fromJson(reply->readAll());
+            QJsonObject   root = doc.object();   // 임시객체 댕글링 방지
+            if (root.value("found").toBool()) {
+                QString peerIp   = root.value("ip").toString();
+                int     peerPort = root.value("port").toInt();
+                if (!peerIp.isEmpty() && peerPort > 0) {
+                    if (m_relayPeerHandled) {
+                        log("[DIAG] relayPollPeer: 피어 이미 처리됨 → 중복 무시");
+                        return;
+                    }
+                    m_relayPeerHandled = true;
+                    log(QString("릴레이: 피어 발견 %1:%2 → 홀펀칭 시작").arg(peerIp).arg(peerPort));
+                    qDebug("[relay] peer found %s:%d → probing",
+                           peerIp.toUtf8().constData(), peerPort);
+
+                    // 즉시 3회 프로브 (양쪽 동시 송신 → NAT 매핑 동시 생성)
+                    for (int i = 0; i < 3; ++i)
+                        gNetplay().sendProbeTo(peerIp, peerPort);
+
+                    // 클라이언트: 호스트 주소 확정 → HELLO 핸드셰이크 시작
+                    if (myRole == "client" && !gNetplay().isHost()) {
+                        gNetplay().clientStartHandshake(peerIp, peerPort);
+                    }
+
+                    qDebug("[relay] 3 probes sent — starting probeTimer");
+
+                    // 이후 500ms 간격으로 10초 동안 계속 프로브 (NAT 매핑 유지)
+                    auto* probeTimer = new QTimer(this);
+                    probeTimer->setInterval(500);
+                    int* probeCount = new int(0);
+                    connect(probeTimer, &QTimer::timeout, this, [this, peerIp, peerPort, probeTimer, probeCount](){
+                        if (gNetplay().active() || ++(*probeCount) >= 20) {
+                            probeTimer->stop();
+                            probeTimer->deleteLater();
+                            delete probeCount;
+                            return;
+                        }
+                        gNetplay().sendProbeTo(peerIp, peerPort);
+                    });
+                    probeTimer->start();
+                    qDebug("[relay] probeTimer started — relay lambda done");
+                    return;  // 폴링 종료 (피어 찾음)
+                }
+            }
+        }
+
+        // 아직 피어 없음 → 1초 후 재시도
+        if (m_relayPollTimer) m_relayPollTimer->deleteLater();
+        m_relayPollTimer = new QTimer(this);
+        m_relayPollTimer->setSingleShot(true);
+        connect(m_relayPollTimer, &QTimer::timeout, this, [this, code, myRole, tries](){
+            relayPollPeer(code, myRole, tries + 1);
+        });
+        m_relayPollTimer->start(1000);
+    });
 }
 
 void MainWindow::onNetDisconnected() {
     log("🌐 연결 끊김");
+    m_relayPeerHandled = false;   // 다음 연결을 위해 피어 처리 플래그 리셋
     cleanupNetplay();
     if (m_npStatusLabel) {
         m_npStatusLabel->setText("● DISCONNECTED");
@@ -3418,14 +4598,19 @@ void MainWindow::onNetError(const QString& msg) {
 
 // 상태 변화 → UI 업데이트
 void MainWindow::onNetStateChanged(NetplayManager::State s) {
+    qDebug("[NP-state] onNetStateChanged s=%d label=%p", (int)s, (void*)m_npStatusLabel);
     if (!m_npStatusLabel) return;
-    const char* style = "color:#44cc44;font-family:'Courier New';font-size:11px;";
+    const char* style =
+        "color:#44cc44;font-family:'Courier New';font-size:11px;font-weight:bold;";
     switch (s) {
     case NetplayManager::State::Lobby:
         m_npStatusLabel->setText(gNetplay().isHost()
             ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중");
         m_npStatusLabel->setStyleSheet(style);
         if (m_npStartBtn) m_npStartBtn->setEnabled(gNetplay().isHost());
+        // RTT 갱신 (Lobby 복귀 시)
+        if (m_npRttLabel)
+            m_npRttLabel->setText(QString("RTT: %1 ms").arg(gNetplay().rttMs()));
         break;
     case NetplayManager::State::Loading:
         m_npStatusLabel->setText("● 로딩 중...");
@@ -3435,22 +4620,43 @@ void MainWindow::onNetStateChanged(NetplayManager::State s) {
     case NetplayManager::State::Ready:
         m_npStatusLabel->setText("● 준비 완료 — 상대 대기 중...");
         m_npStatusLabel->setStyleSheet(style);
+        if (m_npRttLabel)
+            m_npRttLabel->setText(QString("RTT: %1 ms").arg(gNetplay().rttMs()));
         break;
     case NetplayManager::State::Playing:
-        m_npStatusLabel->setText("● 게임 중");
+        m_npStatusLabel->setText(QString("● 게임 중  |  RTT: %1 ms  |  Delay: %2f")
+            .arg(gNetplay().rttMs()).arg(gNetplay().inputDelay()));
         m_npStatusLabel->setStyleSheet(style);
+        if (m_npRttLabel) m_npRttLabel->setText("");
         break;
     default: break;
     }
 }
 
 // 조인: 호스트가 선택한 게임을 자동 로드 → 로딩 완료 시 READY 전송
-void MainWindow::onNetLoadGame(const QString& romName) {
+void MainWindow::onNetLoadGame(const QString& romName, int inputDelay) {
+    qDebug("[NP-conn] onNetLoadGame rom=%s delay=%d",
+           romName.toUtf8().constData(), inputDelay);
+
+    // ★ 중복 LOAD_GAME 무시: 호스트가 신뢰성 위해 5회+재전송하므로 같은 메시지가
+    //   여러 번 옴. 이미 같은 ROM 을 로드 완료했으면 재로드(각 ~600ms) 하지 말고
+    //   READY 만 재전송한다. (이전엔 매번 재로드 → 수 초 지연 → 시작 늦음)
+    if (m_npSelfLoaded && gState.gameLoaded && m_selectedGame == romName) {
+        gNetplay().sendReady();   // 호스트가 내 READY 를 놓쳤을 수 있으니 재전송
+        return;
+    }
+
     // 플래그 초기화
     m_npSelfLoaded = false;
     m_npPeerReady  = false;
+    m_npStarted    = false;
 
-    log("🌐 게임 수신: " + romName);
+    // 호스트가 지정한 입력 지연 반영 + 딜레이 큐 초기화
+    gSettings.netplayInputDelay = inputDelay;
+    m_npDelayQueue.clear();
+    if (m_npDelaySpinBox) m_npDelaySpinBox->setValue(inputDelay);
+
+    log(QString("🌐 게임 수신: %1  (딜레이 %2f)").arg(romName).arg(inputDelay));
     m_selectedGame = romName;
     if (loadRomInternal()) {
         m_npSelfLoaded = true;
@@ -3465,6 +4671,8 @@ void MainWindow::onNetLoadGame(const QString& romName) {
 
 // 양쪽: 상대방 READY 수신
 void MainWindow::onNetReady() {
+    qDebug("[NP-conn] onNetReady host=%d selfLoaded=%d",
+           gNetplay().isHost() ? 1 : 0, m_npSelfLoaded ? 1 : 0);
     log("🌐 상대 READY");
     m_npPeerReady = true;
 
@@ -3482,13 +4690,23 @@ void MainWindow::onNetReady() {
 
 // 양쪽: START 수신 → 프레임 0부터 동시 시작
 void MainWindow::onNetStart() {
-    log("🌐 START — Frame 0 동시 시작");
+    // 이중 시작 방지: MSG_START 중복 수신 or processEvents 재진입 시 크래시 차단
+    // (호스트가 신뢰성 위해 START 를 여러 번 보내므로 중복은 정상 — 로그 안 함)
+    if (m_npStarted) return;
+    m_npStarted = true;
+    qDebug("[NP] onNetStart() begin — gameLoaded=%d core=%p",
+           gState.gameLoaded ? 1 : 0, (void*)m_core);
+    log(QString("🌐 START — Frame 0 동시 시작 (딜레이 %1f)").arg(gSettings.netplayInputDelay));
     // READY 재전송 타이머 중지
     if (m_npReadyRetry) m_npReadyRetry->stop();
-    gState.frameCount = 0;
+    gState.frameCount  = 0;
     m_npStates.clear();
     m_npInputHistory.clear();
-    m_frameDelay = 0.0;
+    m_npDelayQueue.clear();
+    m_frameDelay     = 0.0;
+    m_pendingSyncSf  = -1;
+    m_pendingSyncCur = -1;
+    m_pendingSyncData.clear();
     startEmu();
 }
 
@@ -3498,8 +4716,80 @@ void MainWindow::onNetGameOver() {
     cleanupNetplay();
 }
 
+// ════════════════════════════════════════════════════════════
+//  GGPO desync 감지 (체크섬 비교 + 재동기)
+// ════════════════════════════════════════════════════════════
+
+// 상태 CRC32 (FNV-1a 32bit — 빠르고 결정론적, 충돌 무시 가능 수준)
+uint32_t MainWindow::npChecksum(const QByteArray& data) {
+    uint32_t h = 2166136261u;               // FNV offset basis
+    const unsigned char* p =
+        reinterpret_cast<const unsigned char*>(data.constData());
+    const int n = data.size();
+    for (int i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 16777619u;                      // FNV prime
+    }
+    return h;
+}
+
+// 상대 체크섬 수신 → 저장 후 같은 프레임 비교
+void MainWindow::onNetChecksum(quint32 frame, quint32 crc) {
+    if (gNetplay().isHost()) {
+        // 호스트도 체크섬을 받지만, 재동기는 클라가 요청하므로
+        // 호스트는 비교만 (로그용). 저장만 해둠.
+    }
+    m_remoteChecksums[frame] = crc;
+    checkDesync(frame);
+    while (m_remoteChecksums.size() > 16)
+        m_remoteChecksums.erase(m_remoteChecksums.begin());
+}
+
+// 같은 프레임의 로컬/원격 CRC 비교 → 불일치면 desync
+void MainWindow::checkDesync(uint32_t frame) {
+    auto itL = m_localChecksums.find(frame);
+    auto itR = m_remoteChecksums.find(frame);
+    if (itL == m_localChecksums.end() || itR == m_remoteChecksums.end())
+        return;   // 아직 양쪽 다 안 모임
+
+    if (itL->second == itR->second) {
+        // 일치 — 결정론 정상 (가끔 로그)
+        static int s_okCount = 0;
+        if ((++s_okCount % 20) == 1)
+            qDebug("[GGPO] sync OK #%d frame=%u crc=%08x", s_okCount, frame, itL->second);
+        return;
+    }
+
+    // 불일치 = desync
+    qDebug("[GGPO] DESYNC frame=%u local=%08x remote=%08x",
+           frame, itL->second, itR->second);
+    log(QString("⚠ desync 감지 (frame %1) → 재동기").arg(frame));
+
+    // 클라이언트: 호스트에 풀스테이트 재동기 요청 (중복 방지)
+    if (!gNetplay().isHost() && !m_resyncPending) {
+        m_resyncPending = true;
+        gNetplay().sendResyncReq(frame);
+    }
+}
+
+// 호스트: 클라의 재동기 요청 받음 → 현재 풀스테이트 1회 전송
+void MainWindow::onNetResyncReq(quint32 frame) {
+    Q_UNUSED(frame);
+    if (!gNetplay().isHost() || !m_core || !gState.gameLoaded) return;
+    size_t sz = m_core->serializeSize();
+    if (sz == 0) return;
+    QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
+    if (m_core->serialize(buf.data(), sz)) {
+        log(QString("🔄 재동기 요청 수신 → 풀스테이트 전송 (frame %1)")
+            .arg(gState.frameCount));
+        gNetplay().sendState(static_cast<uint32_t>(gState.frameCount), buf);
+    }
+}
+
 // ── 호스트: 게임 선택 후 START 버튼 ─────────────────────────
 void MainWindow::netplayStartGame() {
+    qDebug("[NP-conn] netplayStartGame rom=%s",
+           m_selectedGame.toUtf8().constData());
     if (m_selectedGame.isEmpty()) { log("게임을 먼저 선택하세요"); return; }
     if (!gNetplay().active() || !gNetplay().isHost()) return;
     if (gNetplay().netState() != NetplayManager::State::Lobby) {
@@ -3509,11 +4799,15 @@ void MainWindow::netplayStartGame() {
     // 플래그 초기화
     m_npSelfLoaded = false;
     m_npPeerReady  = false;
+    m_npStarted    = false;
 
-    log("🌐 게임 선택 동기화 → " + m_selectedGame);
+    int delay = m_npDelaySpinBox ? m_npDelaySpinBox->value() : gSettings.netplayInputDelay;
+    gSettings.netplayInputDelay = delay;
+    m_npDelayQueue.clear();
+    log(QString("🌐 게임 선택 동기화 → %1  (딜레이 %2f)").arg(m_selectedGame).arg(delay));
 
-    // 조인에게 게임 이름 전송 (조인은 자동 로드 → sendReady)
-    gNetplay().sendLoadGame(m_selectedGame);
+    // 조인에게 게임 이름 + 입력 지연 전송 (조인은 자동 로드 → sendReady)
+    gNetplay().sendLoadGame(m_selectedGame, delay);
 
     // 호스트도 동시에 로드
     if (!loadRomInternal()) { log("🌐 ROM 로드 실패"); return; }
@@ -3546,9 +4840,22 @@ void MainWindow::cleanupNetplay() {
     // 롤백 버퍼 초기화 (소켓은 건드리지 않음)
     m_npStates.clear();
     m_npInputHistory.clear();
+    m_npDelayQueue.clear();
     m_frameDelay = 0.0;
-    m_npSelfLoaded = false;
-    m_npPeerReady  = false;
+    m_pendingResimTo = -1;   // ← 재시뮬 상태 리셋 (다음 게임 속도 이상 방지)
+    m_npSelfLoaded   = false;
+    m_npPeerReady    = false;
+    m_npStarted      = false;
+    m_pendingSyncSf  = -1;
+    m_pendingSyncCur = -1;
+    m_pendingSyncData.clear();
+    // GGPO 체크섬 상태 리셋
+    m_localChecksums.clear();
+    m_remoteChecksums.clear();
+    m_lastChecksumFrame = 0;
+    m_resyncPending     = false;
+    // AFL 타이밍 누산기 리셋 (다음 게임이 잔류 누산으로 빨라지는 것 방지)
+    m_frameAccum = 0.0;
     if (m_npReadyRetry) m_npReadyRetry->stop();
     gNetplay().resetGameState();
     gNetplay().cleanupGame();

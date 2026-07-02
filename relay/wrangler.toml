@@ -1,0 +1,23 @@
+name = "fbneoragex-relay"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# ── Durable Object 바인딩 ──────────────────────────────────
+# 룸코드별 단일 인스턴스 + strong consistency.
+# KV(eventual consistency)와 달리 매치메이킹에 적합.
+[[durable_objects.bindings]]
+name       = "ROOMS"
+class_name = "RoomDO"
+
+# ── DO 마이그레이션 ────────────────────────────────────────
+# `new_sqlite_classes` 사용 → SQLite-backed DO (무료 플랜 호환).
+# (`new_classes` 는 유료 플랜 KV-backed storage. 우린 SQLite 사용)
+[[migrations]]
+tag                = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+# ── (선택) 기존 KV 바인딩 유지 ────────────────────────────
+# 새 코드에선 사용 안 함. 삭제해도 무방하지만 남겨둠 (잔존 데이터 보호).
+[[kv_namespaces]]
+binding = "KV"
+id      = "a39e93d1fa8549f9819868694af48704"

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FBNeoRageX
+GenericName=Arcade Emulator
+Comment=FinalBurn Neo libretro frontend — Neo Geo / CPS 아케이드 에뮬레이터
+Exec=FBNeoRageX.sh
+Icon=FBNeoRageX
+Terminal=false
+StartupNotify=false
+Categories=Game;Emulator;
+Keywords=emulator;neogeo;cps;arcade;fbneo;

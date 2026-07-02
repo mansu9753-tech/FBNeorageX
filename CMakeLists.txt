@@ -30,6 +30,8 @@ set(SOURCES
     src/GameCanvas.cpp
     src/AudioManager.cpp
     src/NetplayManager.cpp
+    src/StunClient.cpp
+    src/UPnpMapper.cpp
     src/CheatManager.cpp
     src/GamepadManager.cpp
     src/VideoRecorder.cpp
@@ -46,6 +48,8 @@ set(HEADERS
     src/GameCanvas.h
     src/AudioManager.h
     src/NetplayManager.h
+    src/StunClient.h
+    src/UPnpMapper.h
     src/CheatManager.h
     src/GamepadManager.h
     src/GameNamesDb.h
@@ -161,7 +165,6 @@ else()
                     Qt6::QWbmpPlugin
                     Qt6::QSvgPlugin
                     Qt6::QSvgIconPlugin
-                EXCLUDE_BY_TYPE tls
             )
 
             set(UCRT_LIB C:/msys64/ucrt64/lib)

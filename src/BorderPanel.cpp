@@ -1,10 +1,16 @@
-// BorderPanel.cpp — NeoRageX 스타일 3D 베벨 테두리 패널
+// BorderPanel.cpp — 아케이드 스타일 3D 파이프 테두리 패널 (CSS 스펙 구현)
 //
-// 조명 방향: 좌상단 (top-left light source)
-//   TOP  / LEFT  면 : 밝은 시안 그라데이션 (조명)
-//   BOTTOM / RIGHT 면: 어두운 네이비 그라데이션 (그림자)
-//   각 스트립은 QLinearGradient 로 5단계 페이드 표현
-//   코너: 상하 strip이 전체 폭을 담당 → 별도 코너 장식 없이 자연스럽게 이어짐
+// CSS 원본 스펙:
+//   파이프 두께:      18px  (BASE_BW)
+//   외곽 라운드:      28px  (BASE_OUTER_R)
+//   내측 라운드:      12px  (BASE_INNER_R)
+//   메인 컬러:        #3b82f6 (Vivid Blue)
+//   외부 드롭섀도우:  6px 6px 15px rgba(0,0,0,0.7)
+//   inset 그림자 4종:
+//     1) 어두운 엣지   inset 0  0  0   1px  rgba(0,0,0,0.8)
+//     2) TL 하이라이트 inset 3px 3px 12px rgba(255,255,255,0.6)
+//     3) BR 그림자    inset -3px -3px 10px rgba(0,0,0,0.4)
+//     4) 내측 비네트   inset 0  0  20px  8px  rgba(0,0,0,0.6)
 
 #include "BorderPanel.h"
 
@@ -13,27 +19,14 @@
 #include <QLinearGradient>
 #include <QFont>
 #include <QFontMetrics>
-
-// ── 색상 상수 (헤더 정의용, 실제 렌더는 paintEvent 내 팔레트 사용) ──
-const QColor BorderPanel::COL_A    (0,   0,   200);
-const QColor BorderPanel::COL_B    (0,   0,   160);
-const QColor BorderPanel::COL_HI   (74, 190,  255);
-const QColor BorderPanel::COL_TITLE(255, 255, 255);
+#include <QResizeEvent>
+#include <algorithm>
 
 // ─────────────────────────────────────────────────────────────
-//  setRoundedCorners — 코너별 라운딩 설정
+//  라운드 직사각형 경로 헬퍼 (x,y 오프셋 지원, 코너별 선택적 라운딩)
 // ─────────────────────────────────────────────────────────────
-void BorderPanel::setRoundedCorners(int cornerFlags)
-{
-    m_roundedCorners = cornerFlags;
-    update();
-}
-
-// ─────────────────────────────────────────────────────────────
-//  코너별 라운드 직사각형 경로 생성 헬퍼
-//  corners: Qt::Corner 비트마스크 (라운딩할 코너만 포함)
-// ─────────────────────────────────────────────────────────────
-static QPainterPath makeCornerPath(int W, int H, int r, int corners)
+static QPainterPath makeRoundedRectPath(qreal x, qreal y, qreal w, qreal h,
+                                         qreal r, int corners)
 {
     qreal tl = (corners & BorderPanel::CornerTL) ? r : 0;
     qreal tr = (corners & BorderPanel::CornerTR) ? r : 0;
@@ -41,24 +34,26 @@ static QPainterPath makeCornerPath(int W, int H, int r, int corners)
     qreal bl = (corners & BorderPanel::CornerBL) ? r : 0;
 
     QPainterPath path;
-    path.moveTo(tl, 0);
-    path.lineTo(W - tr, 0);
-    if (tr > 0) path.arcTo(W - 2*tr, 0,        2*tr, 2*tr,  90, -90);
-    else        path.lineTo(W, 0);
-    path.lineTo(W, H - br);
-    if (br > 0) path.arcTo(W - 2*br, H - 2*br, 2*br, 2*br,   0, -90);
-    else        path.lineTo(W, H);
-    path.lineTo(bl, H);
-    if (bl > 0) path.arcTo(0,        H - 2*bl, 2*bl, 2*bl, -90, -90);
-    else        path.lineTo(0, H);
-    path.lineTo(0, tl);
-    if (tl > 0) path.arcTo(0,        0,        2*tl, 2*tl, 180, -90);
-    else        path.lineTo(0, 0);
+    path.moveTo(x + tl,     y);
+    path.lineTo(x + w - tr, y);
+    if (tr > 0) path.arcTo(x + w - 2*tr, y,             2*tr, 2*tr,  90, -90);
+    else        path.lineTo(x + w,        y);
+    path.lineTo(x + w,      y + h - br);
+    if (br > 0) path.arcTo(x + w - 2*br, y + h - 2*br,  2*br, 2*br,   0, -90);
+    else        path.lineTo(x + w,        y + h);
+    path.lineTo(x + bl,     y + h);
+    if (bl > 0) path.arcTo(x,             y + h - 2*bl,  2*bl, 2*bl, -90, -90);
+    else        path.lineTo(x,             y + h);
+    path.lineTo(x,          y + tl);
+    if (tl > 0) path.arcTo(x,             y,             2*tl, 2*tl, 180, -90);
+    else        path.lineTo(x,             y);
     path.closeSubpath();
     return path;
 }
 
-// ── 생성자 ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+//  생성자
+// ─────────────────────────────────────────────────────────────
 BorderPanel::BorderPanel(const QString& title, QWidget* parent)
     : QWidget(parent)
     , m_title(title.toUpper())
@@ -67,15 +62,17 @@ BorderPanel::BorderPanel(const QString& title, QWidget* parent)
     setAutoFillBackground(false);
 
     m_timer = new QTimer(this);
-    m_timer->setInterval(12);   // 12ms ≈ 1.6초 완주
+    m_timer->setInterval(12);          // 12ms ≈ 1.6초 완주
     connect(m_timer, &QTimer::timeout, this, &BorderPanel::onTick);
 
     m_layout = new QVBoxLayout(this);
-    int topMargin = m_title.isEmpty() ? BW + 2 : 36;
-    m_layout->setContentsMargins(BW + 4, topMargin, BW + 4, BW + 4);
     m_layout->setSpacing(3);
+    updateMargins();
 }
 
+// ─────────────────────────────────────────────────────────────
+//  공개 인터페이스
+// ─────────────────────────────────────────────────────────────
 void BorderPanel::setTitle(const QString& t) {
     m_title = t.toUpper();
     update();
@@ -89,151 +86,259 @@ void BorderPanel::startAnim(int delayMs) {
         m_timer->start();
 }
 
+void BorderPanel::setRoundedCorners(int cornerFlags) {
+    m_roundedCorners = cornerFlags;
+    update();
+}
+
+// ─────────────────────────────────────────────────────────────
+//  내부 슬롯 / 이벤트
+// ─────────────────────────────────────────────────────────────
 void BorderPanel::onTick() {
     m_prog = std::min(1.0, m_prog + ANIM_STEP);
     update();
     if (m_prog >= 1.0) m_timer->stop();
 }
 
-// ─────────────────────────────────────────────────────────────
-//  3D 베벨 그라데이션 생성 헬퍼
-//  lit=true  : 조명 받는 면 (TOP/LEFT)  — 외곽 밝고 내측 어두운
-//  lit=false : 그림자 면  (BOTTOM/RIGHT) — 외곽 어둡고 내측 약간 밝음
-// ─────────────────────────────────────────────────────────────
-static QBrush makeBevelGrad(QPointF from, QPointF to, bool lit)
-{
-    QLinearGradient g(from, to);
-    if (lit) {
-        g.setColorAt(0.00, QColor(  0,   3,  22));   // 최외곽 — 어두운 기준선
-        g.setColorAt(0.04, QColor(172, 232, 255));   // 최외곽 글로우 (흰/시안)
-        g.setColorAt(0.13, QColor( 88, 190, 238));   // 밝은 페이스 피크
-        g.setColorAt(0.28, QColor( 44, 138, 188));   // 밝은 → 바디 전환
-        g.setColorAt(0.50, QColor( 16,  65, 128));   // 바디 중앙 (메인 파랑)
-        g.setColorAt(0.72, QColor( 10,  44,  88));   // 바디 → 어두운
-        g.setColorAt(0.87, QColor(  0,  15,  50));   // 내측 어두운 페이스
-        g.setColorAt(0.95, QColor(  0,   5,  20));   // 내측 어두운 선
-        g.setColorAt(1.00, QColor(  0,   2,  12));   // 콘텐츠 엣지
-    } else {
-        g.setColorAt(0.00, QColor(  0,   2,  12));   // 콘텐츠 엣지
-        g.setColorAt(0.05, QColor(  0,   8,  35));   // 내측 어두운 선
-        g.setColorAt(0.16, QColor(  5,  30,  65));   // 내측 바디 시작
-        g.setColorAt(0.40, QColor( 10,  44,  88));   // 바디 중앙
-        g.setColorAt(0.62, QColor(  5,  24,  55));   // 바디 → 어두운
-        g.setColorAt(0.78, QColor(  0,   8,  28));   // 어두운 페이스
-        g.setColorAt(0.93, QColor(  0,   3,  14));   // 외측 글로우 (dim)
-        g.setColorAt(1.00, QColor(  0,   2,  12));   // 최외곽 어두운 기준선
-    }
-    return QBrush(g);
+void BorderPanel::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    updateMargins();
+    update();
+}
+
+// 현재 해상도에 맞춰 레이아웃 마진 재계산
+void BorderPanel::updateMargins() {
+    if (!m_layout) return;
+    const double scale    = qMax(0.3, qMin(width(), height()) / 720.0);
+    const int    bw       = qMax(4, qRound(BASE_BW * scale));
+    const int    topMargin = m_title.isEmpty()
+                             ? bw + 2
+                             : qMax(bw + 2, qRound(28.0 * scale));
+    m_layout->setContentsMargins(bw + 4, topMargin, bw + 4, bw + 4);
 }
 
 // ─────────────────────────────────────────────────────────────
-//  paintEvent  — 3D 베벨 테두리 + 애니메이션
+//  paintEvent  — CSS 스펙 아케이드 파이프 테두리
 // ─────────────────────────────────────────────────────────────
 void BorderPanel::paintEvent(QPaintEvent* event)
 {
     QWidget::paintEvent(event);
     QPainter p(this);
-    // 라운드 코너를 위해 Antialiasing 활성화
-    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::Antialiasing,       true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    const int W  = width();
-    const int H  = height();
-    const int bw = BW;  // 20
-    // 외곽 라운드 반지름 (bw/2 이하 → 코너 처리가 테두리 strip 안에서만)
-    constexpr int r = 9;
+    const int W = width();
+    const int H = height();
+    if (W < 10 || H < 10) return;
 
-    // ── 외곽 경로: 지정 코너만 라운드, 나머지는 직각 ────────
-    QPainterPath outerPath = makeCornerPath(W, H, r, m_roundedCorners);
+    // ── 스케일 계산 (720p 기준 비례) ──────────────────────
+    const double scale  = qMax(0.3, qMin(W, H) / 720.0);
+    const int    bw     = qMax(4,  qRound(BASE_BW      * scale));
+    const int    outerR = qMax(2,  qRound(BASE_OUTER_R * scale));
+    const int    innerR = qMax(1,  qRound(BASE_INNER_R * scale));
 
-    // ── 애니메이션: 시계방향 드로잉 진행률 계산 ────────────
+    // ── 내측 콘텐츠 영역 계산 ─────────────────────────────
+    const qreal ix = bw,    iy = bw;
+    const qreal iW = W - 2.0*bw,  iH = H - 2.0*bw;
+
+    // ── 경로 생성 ─────────────────────────────────────────
+    const QPainterPath outerPath =
+        makeRoundedRectPath(0, 0, W, H, outerR, m_roundedCorners);
+
+    QPainterPath innerPath;
+    if (iW > 0 && iH > 0)
+        innerPath = makeRoundedRectPath(ix, iy, iW, iH, innerR, m_roundedCorners);
+
+    // 파이프 링 = 외곽 - 내측 구멍
+    const QPainterPath pipeBase = outerPath.subtracted(innerPath);
+
+    // ── 애니메이션 클립 ───────────────────────────────────
     const bool full  = (m_prog >= 1.0);
     const int  perim = 2 * (W + H);
     const int  drawn = full ? perim : static_cast<int>(perim * m_prog);
 
-    // 각 변의 픽셀 드로잉 길이 (시계방향: 상→우→하→좌)
     auto segLen = [&](int start, int len) -> int {
         if (full) return len;
         int rem = drawn - start;
         return (rem <= 0) ? 0 : std::min(rem, len);
     };
+    const int dTop   = segLen(0,         W);
+    const int dRight = segLen(W,         H);
+    const int dBot   = segLen(W + H,     W);
+    const int dLeft  = segLen(W + H + W, H);
 
-    const int dTop   = segLen(0,           W);
-    const int dRight = segLen(W,           H);
-    const int dBot   = segLen(W + H,       W);
-    const int dLeft  = segLen(W + H + W,   H);
-
-    // ── 1. 내부 콘텐츠 배경 (클립 없이 — 항상 먼저 표시) ───
-    // r=9 < bw=20 이므로 콘텐츠 rect(bw,bw ~ W-bw,H-bw)는
-    // outerPath 안쪽에 완전히 포함 → 별도 클립 불필요
-    p.setClipping(false);
-    p.fillRect(bw, bw, W - 2*bw, H - 2*bw, QColor(0, 0, 8, 215));
-
-    // ── 2. 클립 설정 ─────────────────────────────────────
-    // 애니메이션 중: 시계방향 sweep 직사각형 ∩ 라운드 외곽
-    // 완료 후: 라운드 외곽만 (코너가 부드럽게 잘림)
+    QPainterPath pipePath = pipeBase;
     if (!full) {
-        QPainterPath cp;
-        if (dTop   > 0) cp.addRect(QRectF(0,       0,       dTop,  bw));   // 상단 →
-        if (dRight > 0) cp.addRect(QRectF(W-bw,    0,       bw,    dRight));// 우측 ↓
-        if (dBot   > 0) cp.addRect(QRectF(W-dBot,  H-bw,   dBot,  bw));   // 하단 ←
-        if (dLeft  > 0) cp.addRect(QRectF(0,       H-dLeft, bw,    dLeft));// 좌측 ↑
-        // intersected: sweep 진행 범위 AND 라운드 외곽 → 코너가 곡선으로 등장
-        p.setClipPath(cp.intersected(outerPath));
-    } else {
-        p.setClipPath(outerPath);
+        QPainterPath sweep;
+        if (dTop   > 0) sweep.addRect(QRectF(0,       0,        dTop,   bw));
+        if (dRight > 0) sweep.addRect(QRectF(W - bw,  0,        bw,     dRight));
+        if (dBot   > 0) sweep.addRect(QRectF(W - dBot, H - bw,  dBot,   bw));
+        if (dLeft  > 0) sweep.addRect(QRectF(0,        H - dLeft, bw,   dLeft));
+        pipePath = pipeBase.intersected(sweep.intersected(outerPath));
     }
 
-    // ── 3. 4면 베벨 strip ─────────────────────────────────
-    // 상단·하단: 전체 폭(코너 포함) — outerPath 클립이 코너를 라운드로 잘라줌
-    // 좌측·우측: 코너를 제외한 중간 구간 — 상하 strip과 자연스럽게 이어짐
-
-    // 상단 strip (조명 받는 면)
-    p.fillRect(0, 0, W, bw,
-               makeBevelGrad({0.0, 0.0}, {0.0, (qreal)bw}, true));
-
-    // 하단 strip (그림자 면)
-    p.fillRect(0, H-bw, W, bw,
-               makeBevelGrad({0.0, (qreal)(H-bw)}, {0.0, (qreal)H}, false));
-
-    // 좌측 strip (조명 받는 면)
-    p.fillRect(0, bw, bw, H-2*bw,
-               makeBevelGrad({0.0, 0.0}, {(qreal)bw, 0.0}, true));
-
-    // 우측 strip (그림자 면)
-    p.fillRect(W-bw, bw, bw, H-2*bw,
-               makeBevelGrad({(qreal)(W-bw), 0.0}, {(qreal)W, 0.0}, false));
-
-    // ── 4. 타이틀 ─────────────────────────────────────────
-    QFont font("Press Start 2P", 8, QFont::Bold);
-    if (!font.exactMatch())
-        font = QFont("Courier New", 11, QFont::Bold);
-    p.setFont(font);
-    QFontMetrics fm(font);
-
-    const QString titleStr = m_title.isEmpty()
-                             ? QString()
-                             : (' ' + m_title + ' ');
-    const int tw = fm.horizontalAdvance(titleStr);
-    const int th = fm.height();
-    const int tx = bw;
-
-    if (!m_title.isEmpty() && m_prog > 0.05 && dTop > tx + 4) {
-        const int alpha = std::min(255, (int)(m_prog * 400));
+    // ═══════════════════════════════════════════════════════
+    //  [1] 외부 드롭섀도우 — 알파를 약하게 + 콘텐츠 영역에 그리지 않음
+    //      sb 번 누적되면 콘텐츠가 검게 덮이는 문제 회피.
+    // ═══════════════════════════════════════════════════════
+    {
+        const int sx = qRound(6  * scale);
+        const int sy = qRound(6  * scale);
+        const int sb = qMax(1, qRound(15 * scale));
 
         p.setClipping(false);
+        for (int i = sb; i >= 1; --i) {
+            const double t     = static_cast<double>(i) / sb;
+            // 알파를 30%로 낮춰 누적 마스크가 콘텐츠를 가리지 않게 함
+            const int    alpha = qRound(53.0 * (1.0 - t * 0.75));
+            const double ox    = sx + sb * t * 0.35;
+            const double oy    = sy + sb * t * 0.35;
+            p.save();
+            p.translate(ox, oy);
+            p.fillPath(outerPath, QColor(0, 0, 0, alpha));
+            p.restore();
+        }
+    }
 
-        // 타이틀 배경: 상단 strip 위에 검정 블록으로 텍스트 공간 확보
-        p.fillRect(tx - 2, 0, tw + 4, bw, QColor(0, 0, 10));
+    // ═══════════════════════════════════════════════════════
+    //  [2] 콘텐츠 배경 — #0f172a (반투명: 배경 이미지가 비치도록)
+    //  alpha 80 ≈ 31% 불투명 → 배경 이미지가 더 잘 비침.
+    //  자식 위젯(QListWidget viewport 등) 의 autoFillBackground 가
+    //  false 로 설정되어 있을 때만 효과가 보임.
+    // ═══════════════════════════════════════════════════════
+    p.setClipping(false);
+    if (!innerPath.isEmpty())
+        p.fillPath(innerPath, QColor(0x0f, 0x17, 0x2a, 80));
 
-        // 글로우 그림자
-        QColor glowCol(0, 100, 180, alpha / 4);
-        p.setPen(glowCol);
-        p.drawText(tx + 1, th, titleStr);
+    // ═══════════════════════════════════════════════════════
+    //  [3] 파이프 베이스 그라데이션 — #3b82f6 Vivid Blue TL→BR
+    // ═══════════════════════════════════════════════════════
+    {
+        QLinearGradient baseGrad(0, 0, W, H);
+        baseGrad.setColorAt(0.00, QColor(0x93, 0xc5, 0xfd));  // blue-300  (TL 밝음)
+        baseGrad.setColorAt(0.35, QColor(0x60, 0xa5, 0xfa));  // blue-400
+        baseGrad.setColorAt(0.55, QColor(0x3b, 0x82, 0xf6));  // blue-500  (메인)
+        baseGrad.setColorAt(0.75, QColor(0x25, 0x63, 0xeb));  // blue-600
+        baseGrad.setColorAt(1.00, QColor(0x1d, 0x4e, 0xd8));  // blue-700  (BR 어둠)
 
-        // 메인 텍스트 (밝은 시안)
-        QColor textCol(80, 195, 245);
+        p.setClipPath(pipePath);
+        p.fillPath(pipePath, QBrush(baseGrad));
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  [4] inset 그림자 4종 — 파이프 링 위에 오버레이
+    // ═══════════════════════════════════════════════════════
+
+    // ── 4a. 어두운 외곽 엣지 — inset 0 0 0 1px rgba(0,0,0,0.8) ──
+    {
+        p.setClipPath(pipePath);
+        QPen edgePen(QColor(0, 0, 0, 204), qMax(1.0, 1.5 * scale));
+        p.setPen(edgePen);
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(outerPath);
+    }
+
+    // ── 4b. TL 하이라이트 — inset 3px 3px 12px rgba(255,255,255,0.6) ──
+    {
+        p.setClipPath(pipePath);
+        const qreal hb = qRound(12 * scale);
+
+        // 좌측 → 오른쪽 (왼쪽 파이프 면이 밝게)
+        QLinearGradient hlLeft(0, 0, hb, 0);
+        hlLeft.setColorAt(0.0, QColor(255, 255, 255, 153));
+        hlLeft.setColorAt(1.0, QColor(255, 255, 255,   0));
+        p.fillPath(pipePath, QBrush(hlLeft));
+
+        // 위 → 아래 (상단 파이프 면이 밝게)
+        QLinearGradient hlTop(0, 0, 0, hb);
+        hlTop.setColorAt(0.0, QColor(255, 255, 255, 153));
+        hlTop.setColorAt(1.0, QColor(255, 255, 255,   0));
+        p.fillPath(pipePath, QBrush(hlTop));
+    }
+
+    // ── 4c. BR 그림자 — inset -3px -3px 10px rgba(0,0,0,0.4) ──
+    {
+        p.setClipPath(pipePath);
+        const qreal bb = qRound(10 * scale);
+
+        // 오른쪽 → 왼쪽 (오른쪽 파이프 면이 어둡게)
+        QLinearGradient shRight(W - bb, 0, W, 0);
+        shRight.setColorAt(0.0, QColor(0, 0, 0,   0));
+        shRight.setColorAt(1.0, QColor(0, 0, 0, 102));
+        p.fillPath(pipePath, QBrush(shRight));
+
+        // 아래 → 위 (하단 파이프 면이 어둡게)
+        QLinearGradient shBot(0, H - bb, 0, H);
+        shBot.setColorAt(0.0, QColor(0, 0, 0,   0));
+        shBot.setColorAt(1.0, QColor(0, 0, 0, 102));
+        p.fillPath(pipePath, QBrush(shBot));
+    }
+
+    // ── 4d. 내측 비네트 — inset 0 0 20px 8px rgba(0,0,0,0.6) ──
+    //    파이프 내부 엣지(콘텐츠 경계) 근처를 어둡게
+    {
+        p.setClipPath(pipePath);
+        const qreal vs = qRound(8  * scale);   // spread
+        const qreal vb = qRound(20 * scale);   // blur
+        const qreal vr = vs + vb;              // 총 범위
+
+        // 내측 상단 엣지 (iy에서 아래로 vr px)
+        QLinearGradient vTop(0, iy, 0, iy + vr);
+        vTop.setColorAt(0.0, QColor(0, 0, 0, 153));
+        vTop.setColorAt(1.0, QColor(0, 0, 0,   0));
+        p.fillPath(pipePath, QBrush(vTop));
+
+        // 내측 하단 엣지 (iy+iH에서 위로 vr px)
+        QLinearGradient vBot(0, iy + iH - vr, 0, iy + iH);
+        vBot.setColorAt(0.0, QColor(0, 0, 0,   0));
+        vBot.setColorAt(1.0, QColor(0, 0, 0, 153));
+        p.fillPath(pipePath, QBrush(vBot));
+
+        // 내측 좌측 엣지 (ix에서 오른쪽으로 vr px)
+        QLinearGradient vLeft(ix, 0, ix + vr, 0);
+        vLeft.setColorAt(0.0, QColor(0, 0, 0, 153));
+        vLeft.setColorAt(1.0, QColor(0, 0, 0,   0));
+        p.fillPath(pipePath, QBrush(vLeft));
+
+        // 내측 우측 엣지 (ix+iW에서 왼쪽으로 vr px)
+        QLinearGradient vRight(ix + iW - vr, 0, ix + iW, 0);
+        vRight.setColorAt(0.0, QColor(0, 0, 0,   0));
+        vRight.setColorAt(1.0, QColor(0, 0, 0, 153));
+        p.fillPath(pipePath, QBrush(vRight));
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  [5] 타이틀 텍스트
+    // ═══════════════════════════════════════════════════════
+    if (!m_title.isEmpty() && m_prog > 0.05 && dTop > bw + 4) {
+        p.setClipping(false);
+
+        const int    alpha     = std::min(255, static_cast<int>(m_prog * 400));
+        const double fontScale = qMax(0.6, scale);
+
+        QFont font("Press Start 2P", qRound(7 * fontScale), QFont::Bold);
+        if (!font.exactMatch())
+            font = QFont("Courier New", qRound(10 * fontScale), QFont::Bold);
+        p.setFont(font);
+        QFontMetrics fm(font);
+
+        const QString titleStr = ' ' + m_title + ' ';
+        const int tw = fm.horizontalAdvance(titleStr);
+        const int th = fm.height();
+        const int tx = bw;
+        const int ty = qMax(th, bw - 1);   // 상단 strip 안에 들어오도록
+
+        // 타이틀 배경 블록 (콘텐츠 배경색으로 텍스트 공간 확보)
+        p.fillRect(tx - 2, 0, tw + 4, bw, QColor(0x0f, 0x17, 0x2a, 220));
+
+        // 글로우 레이어 (파란 그림자)
+        p.setPen(QColor(0x3b, 0x82, 0xf6, alpha / 3));
+        p.drawText(tx + 1, ty, titleStr);
+
+        // 메인 텍스트 (밝은 흰색/시안)
+        QColor textCol(220, 235, 255);
         textCol.setAlpha(alpha);
         p.setPen(textCol);
-        p.drawText(tx, th - 1, titleStr);
+        p.drawText(tx, ty - 1, titleStr);
     }
 }

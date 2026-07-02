@@ -311,6 +311,12 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data) {
         *static_cast<bool*>(data) = gState.variablesUpdated.exchange(false);
         return true;
     }
+    case RETRO_ENVIRONMENT_SET_ROTATION: {
+        // 코어가 요청하는 화면 회전: 0=0°, 1=90°CCW, 2=180°, 3=270°CCW(=90°CW)
+        unsigned rot = *static_cast<const unsigned*>(data);
+        gState.videoRotation = static_cast<int>(rot & 3);
+        return true;
+    }
     case RETRO_ENVIRONMENT_SET_GEOMETRY: {
         auto geom = static_cast<const retro_game_geometry*>(data);
         if (g_core->m_gameLoaded) {
@@ -320,6 +326,28 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data) {
     }
     case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
         return false;  // 비트마스크 미지원 — false 반환으로 id-based 쿼리 유지
+
+    // ── 롤백 넷플레이 세이브스테이트 컨텍스트 ───────────────────
+    // FBNeo: 이 값이 없으면 hiscore.dat 등 비결정론적 데이터 포함 포맷 사용
+    //        → retro_serialize()가 절대 포인터를 포함 → 크로스-머신 unserialize 크래시
+    //
+    // crash_log.txt 실측으로 확인된 FBNeo v1.0.0.03 사용 값:
+    //   · 65608 = 72 | 0x10000  (EXPERIMENTAL 버전, 실측)
+    //   · 127                   (최신 libretro 스펙 대비 호환용)
+    case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:       // 127
+    case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT_EX: {  // 65608 = 72|0x10000
+        // FBNeo는 data=null로 "지원하냐?" 프로브를 먼저 보냄
+        // → null이면 true 반환(지원 표명)만 하고 쓰지 않는다
+        // → 이후 valid ptr로 다시 호출 시 실제 컨텍스트 값 기록
+        if (!data) return true;
+        bool netActive = gNetplay().active();
+        int ctx = netActive
+                  ? RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY
+                  : RETRO_SAVESTATE_CONTEXT_NORMAL;
+        *static_cast<int*>(data) = ctx;
+        // per-serialize 마다 호출되므로 로그 제거 (플러드 방지)
+        return true;
+    }
 
     default:
         return false;

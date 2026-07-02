@@ -7,9 +7,11 @@
 #include <QString>
 
 // ── 치트 패치 1개 (주소 + 값) ────────────────────────────────
+// ★ cpuAddr(원본 CPU 주소)를 저장한다. 실제 RAM 오프셋은 게임 로드 후
+//   ramSize 를 알 수 있는 applyFrame 시점에 계산 (마스킹 + 바이트스왑).
 struct CheatPatch {
-    uint32_t offset = 0;  // 실제 RAM 오프셋 (cpu_addr 변환 후)
-    uint8_t  value  = 0;
+    uint32_t cpuAddr = 0;  // 치트 파일의 원본 CPU 주소
+    uint8_t  value   = 0;
 };
 
 // ── 치트 항목 (1개 치트 = N개의 패치) ───────────────────────
@@ -21,7 +23,9 @@ struct CheatEntry {
 };
 
 // ── 타겟 기판 (바이트 오더 계산용) ───────────────────────────
-enum class CheatPlatform { NeoGeo, CPS, Generic };
+//   BigEndian   : 68000 계열 (NeoGeo/CPS/Cave/Toaplan/Psikyo 등) → ^1 스왑 필요
+//   LittleEndian: NEC V-시리즈/Z80 계열 (Irem M72/M92, Seibu raiden 등) → 스왑 없음
+enum class CheatPlatform { BigEndian, LittleEndian };
 
 class LibretroCore;
 
@@ -53,13 +57,13 @@ signals:
 private:
     QList<CheatEntry> m_entries;
     QString           m_loadedPath;
-    CheatPlatform     m_platform = CheatPlatform::Generic;
+    CheatPlatform     m_platform = CheatPlatform::BigEndian;
 
     // ── 내부 ─────────────────────────────────────────────────
     bool parseIni(const QString& path);
     QString findIni(const QString& romName, const QString& cheatDir) const;
     CheatPlatform detectPlatform(const QString& romName) const;
 
-    // CPU 주소 → RAM 오프셋
-    uint32_t cpuAddrToOffset(uint32_t cpuAddr) const;
+    // CPU 주소 → RAM 오프셋 (ramSize 로 마스킹 + 빅엔디언이면 ^1 스왑)
+    uint32_t cpuAddrToOffset(uint32_t cpuAddr, size_t ramSize) const;
 };

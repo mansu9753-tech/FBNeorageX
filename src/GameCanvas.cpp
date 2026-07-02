@@ -38,6 +38,7 @@ const char* GameCanvas::defaultFragSrc() {
         "uniform bool      uCrtMode;\n"
         "uniform float     uCrtIntensity;\n"
         "uniform float     uTexH;\n"        // 텍스처 픽셀 높이
+        "uniform float     uFlashInvert;\n" // 플래시 감소: 0=정상, >0=반전 강도
         "varying vec2      vUV;\n"
         "\n"
         "void main() {\n"
@@ -68,6 +69,14 @@ const char* GameCanvas::defaultFragSrc() {
         "        float lum = dot(col.rgb, vec3(0.299, 0.587, 0.114));\n"
         "        col.rgb += col.rgb * lum * uCrtIntensity * 0.12;\n"
         "        col.rgb = clamp(col.rgb, 0.0, 1.0);\n"
+        "    }\n"
+        "\n"
+        "    // ── 플래시 감소 (눈 보호): 밝은 픽셀을 색반전 ───────\n"
+        "    //   흰 번쩍임(밝음) → 검정. 어두운 배경은 거의 그대로 유지.\n"
+        "    if (uFlashInvert > 0.001) {\n"
+        "        float lum  = dot(col.rgb, vec3(0.299, 0.587, 0.114));\n"
+        "        float gate = smoothstep(0.45, 0.85, lum);\n"     // 밝을수록 강하게
+        "        col.rgb = mix(col.rgb, vec3(1.0) - col.rgb, uFlashInvert * gate);\n"
         "    }\n"
         "\n"
         "    gl_FragColor = col;\n"
@@ -115,6 +124,91 @@ void GameCanvas::setCrtMode(bool on, double intensity) {
 }
 void GameCanvas::setRecording(bool on) {
     m_recording = on;
+    update();
+}
+void GameCanvas::setFlashGuard(bool on, float strength) {
+    m_flashGuard    = on;
+    m_flashStrength = std::clamp(strength, 0.0f, 1.0f);
+    m_prevBrightFrac= -1.0f;     // 재초기화
+    m_flashHold     = 0;
+    m_flashInvert   = 0.0f;
+}
+
+// ── 플래시 감지 + 반전 강도 계산 ──────────────────────────────
+// 현재 프레임 평균 밝기를 베이스라인과 비교 → 급증(플래시)이면 반전 ON.
+// ★ 플래시 중에는 베이스라인을 동결(갱신 안 함) → 플래시 전체 구간을
+//   일정하게 억제하므로 "효과가 늦게 따라오는" 트레일링이 사라진다.
+// 다운샘플링으로 가볍게 측정 (~2000샘플). uploadFrame 에서 호출.
+void GameCanvas::computeFlashGuard() {
+    if (!m_flashGuard) { m_flashInvert = 0.0f; return; }
+
+    const int w = static_cast<int>(gState.videoWidth);
+    const int h = static_cast<int>(gState.videoHeight);
+    if (w <= 0 || h <= 0 || gState.videoBuffer.isEmpty()) return;
+
+    const uchar* buf = reinterpret_cast<const uchar*>(gState.videoBuffer.constData());
+    const size_t pitch = gState.videoPitch;
+    const bool xrgb = (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888);
+
+    // 가로/세로 각각 ~48 지점만 샘플 (총 ~2300)
+    const int stepX = std::max(1, w / 48);
+    const int stepY = std::max(1, h / 48);
+    const int brightCut = 190;      // 밝은 픽셀 기준 (0~255, ~0.75)
+    int bright = 0, n = 0;
+
+    for (int y = 0; y < h; y += stepY) {
+        const uchar* row = buf + static_cast<size_t>(y) * pitch;
+        for (int x = 0; x < w; x += stepX) {
+            int r, g, b;
+            if (xrgb) {
+                const uchar* px = row + static_cast<size_t>(x) * 4;  // BGRA
+                b = px[0]; g = px[1]; r = px[2];
+            } else {
+                const uint16_t p = *reinterpret_cast<const uint16_t*>(
+                                       row + static_cast<size_t>(x) * 2);  // RGB565
+                r = ((p >> 11) & 0x1F) << 3;
+                g = ((p >>  5) & 0x3F) << 2;
+                b = ( p        & 0x1F) << 3;
+            }
+            int luma = (r * 77 + g * 150 + b * 29) >> 8;   // 0~255
+            if (luma >= brightCut) ++bright;               // 밝은 픽셀 카운트
+            ++n;
+        }
+    }
+    if (n == 0) { m_flashInvert = 0.0f; return; }
+
+    // ── 밝은 픽셀 비율(brightFrac) 기반 "전체 번쩍임" 감지 ─────────
+    //   정상 화면: 밝은 요소(UI/글자)는 화면 일부 → 비율 낮음.
+    //   전체 번쩍임: 거의 모든 픽셀이 밝음 → 비율이 매우 높음.
+    float frac = static_cast<float>(bright) / static_cast<float>(n);   // 0~1
+
+    if (m_prevBrightFrac < 0.0f) { m_prevBrightFrac = frac; m_flashInvert = 0.0f; return; }
+
+    const float wholeThresh = 0.80f;   // 화면 80% 이상이 밝아야 "전체 번쩍임"
+    const float jumpThresh  = 0.25f;   // 직전 대비 비율이 급증해야 (밝은 스테이지 제외)
+    const int   maxHold     = 8;       // 안전 상한
+
+    bool nearWhole = (frac > wholeThresh);
+    bool sudden    = (frac - m_prevBrightFrac > jumpThresh);
+
+    // 새 번쩍임 시작: 화면 대부분이 갑자기 밝아짐
+    if (nearWhole && sudden && m_flashHold == 0)
+        m_flashHold = maxHold;
+
+    // 화면이 여전히 대부분 밝은(번쩍임 지속) 동안만 반전 유지
+    if (m_flashHold > 0 && nearWhole) {
+        m_flashInvert = m_flashStrength;
+        --m_flashHold;
+    } else {
+        m_flashHold   = 0;
+        m_flashInvert = 0.0f;
+    }
+
+    m_prevBrightFrac = frac;
+}
+void GameCanvas::setRotation(int rot) {
+    m_rotation = rot;  // -1=auto, 0~3=manual
+    if (m_glReady) { makeCurrent(); updateVertices(); doneCurrent(); }
     update();
 }
 bool GameCanvas::setShaderPath(const QString& path) {
@@ -431,7 +525,6 @@ QRectF GameCanvas::calcDestRect(int fw, int fh, int vw, int vh) const {
         return { (vw - fw) * 0.5, (vh - fh) * 0.5, (double)fw, (double)fh };
 
     if (m_scaleMode == "Fill")
-        // Fill = 화면 전체를 채우도록 비균등 스트레치 (잘림 없음, 비율 변형 허용)
         return { 0, 0, (double)vw, (double)vh };
 
     // "Fit" (기본) — 종횡비 유지, 레터박스
@@ -440,7 +533,7 @@ QRectF GameCanvas::calcDestRect(int fw, int fh, int vw, int vh) const {
     return { (vw - w) * 0.5, (vh - h) * 0.5, w, h };
 }
 
-// ── VBO 꼭짓점 갱신 ──────────────────────────────────────────
+// ── VBO 꼭짓점 갱신 (회전 포함) ──────────────────────────────
 void GameCanvas::updateVertices() {
     int fw = static_cast<int>(gState.videoWidth);
     int fh = static_cast<int>(gState.videoHeight);
@@ -449,19 +542,56 @@ void GameCanvas::updateVertices() {
     int vw = width(), vh = height();
     if (vw <= 0 || vh <= 0) return;
 
-    QRectF dr = calcDestRect(fw, fh, vw, vh);
+    // 실제 적용 회전: -1이면 코어 보고값(gState.videoRotation) 사용
+    int rot = (m_rotation >= 0) ? m_rotation : gState.videoRotation;
+    rot &= 3;  // 0~3
 
-    // NDC 변환: OpenGL Y축은 위가 +1
+    // 회전이 90° or 270°이면 논리 width/height 교환 (aspect ratio 계산용)
+    bool swapWH = (rot == 1 || rot == 3);
+    int  logW   = swapWH ? fh : fw;
+    int  logH   = swapWH ? fw : fh;
+
+    QRectF dr = calcDestRect(logW, logH, vw, vh);
+
+    // NDC 변환 (OpenGL Y축: 위=+1)
     float x0 = static_cast<float>(dr.x() / vw * 2.0 - 1.0);
     float x1 = static_cast<float>((dr.x() + dr.width())  / vw * 2.0 - 1.0);
-    float y0 = static_cast<float>(1.0 - dr.y() / vh * 2.0);         // 상단
-    float y1 = static_cast<float>(1.0 - (dr.y() + dr.height()) / vh * 2.0);  // 하단
+    float y0 = static_cast<float>(1.0 - dr.y() / vh * 2.0);
+    float y1 = static_cast<float>(1.0 - (dr.y() + dr.height()) / vh * 2.0);
+
+    // UV 매핑: 회전에 따라 텍스처 샘플링 방향 변경
+    // 꼭짓점 순서: BL(좌하), BR(우하), TL(좌상), TR(우상)
+    float u_bl, v_bl, u_br, v_br, u_tl, v_tl, u_tr, v_tr;
+    switch (rot) {
+    case 0:  // 0° — 정상
+        u_bl=0; v_bl=1;  u_br=1; v_br=1;
+        u_tl=0; v_tl=0;  u_tr=1; v_tr=0;
+        break;
+    case 1:  // 90°CCW — 세로형 게임 표준 (DonPachi, 1942 등)
+        // UV: (u,v) → (1-v, u)  / 회전 중심 (0.5,0.5) 기준
+        u_bl=0; v_bl=0;  u_br=0; v_br=1;
+        u_tl=1; v_tl=0;  u_tr=1; v_tr=1;
+        break;
+    case 2:  // 180° — 상하 반전
+        u_bl=1; v_bl=0;  u_br=0; v_br=0;
+        u_tl=1; v_tl=1;  u_tr=0; v_tr=1;
+        break;
+    case 3:  // 270°CCW (=90°CW) — 일부 세로형 게임
+        // UV: (u,v) → (v, 1-u)
+        u_bl=1; v_bl=1;  u_br=1; v_br=0;
+        u_tl=0; v_tl=1;  u_tr=0; v_tr=0;
+        break;
+    default:
+        u_bl=0; v_bl=1;  u_br=1; v_br=1;
+        u_tl=0; v_tl=0;  u_tr=1; v_tr=0;
+        break;
+    }
 
     float verts[] = {
-        x0, y1,  0.0f, 1.0f,   // 좌하
-        x1, y1,  1.0f, 1.0f,   // 우하
-        x0, y0,  0.0f, 0.0f,   // 좌상
-        x1, y0,  1.0f, 0.0f,   // 우상
+        x0, y1,  u_bl, v_bl,   // 좌하
+        x1, y1,  u_br, v_br,   // 우하
+        x0, y0,  u_tl, v_tl,   // 좌상
+        x1, y0,  u_tr, v_tr,   // 우상
     };
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -506,6 +636,9 @@ void GameCanvas::uploadFrame() {
                      gState.videoBuffer.constData());
     }
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+    // 플래시 감소: 새 프레임 밝기 측정 → m_brightness 갱신
+    computeFlashGuard();
 
     gState.frameReady.store(false, std::memory_order_release);
 }
@@ -581,10 +714,17 @@ void GameCanvas::paintGL() {
         for (auto it = m_pragmaDefaults.constBegin(); it != m_pragmaDefaults.constEnd(); ++it)
             m_prog.setUniformValue(qPrintable(it.key()), it.value());
     } else {
+        // CRT scanline: 회전 시 스캔라인 방향을 화면 기준으로 유지
+        int rot = (m_rotation >= 0) ? m_rotation : gState.videoRotation;
+        bool swapped = (rot == 1 || rot == 3);
+        float texLines = swapped
+            ? (float)gState.videoWidth   // 90°/270°: 화면 세로방향 = 원본 width
+            : (float)gState.videoHeight; // 0°/180°: 화면 세로방향 = 원본 height
         m_prog.setUniformValue("uTex",          0);
         m_prog.setUniformValue("uCrtMode",      m_crtMode);
         m_prog.setUniformValue("uCrtIntensity", (float)m_crtIntensity);
-        m_prog.setUniformValue("uTexH",         (float)gState.videoHeight);
+        m_prog.setUniformValue("uTexH",         texLines);
+        m_prog.setUniformValue("uFlashInvert",  m_flashInvert);  // 플래시 감소(반전)
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);

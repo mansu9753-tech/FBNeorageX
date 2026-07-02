@@ -33,8 +33,11 @@
 #include "LibretroCore.h"
 #include "AudioManager.h"
 #include "NetplayManager.h"
+#include "UPnpMapper.h"
 #include "CheatManager.h"
 #include "GamepadManager.h"
+
+class QNetworkAccessManager;   // 공유 릴레이 QNAM (전방 선언)
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -59,7 +62,7 @@ private slots:
     void onNetStateChanged(NetplayManager::State s);
 
     // 게임 흐름 (상태머신 기반)
-    void onNetLoadGame(const QString& romName); // 조인: 게임 자동 로드
+    void onNetLoadGame(const QString& romName, int inputDelay); // 조인: 게임 자동 로드
     void onNetReady();                          // 호스트: 상대 READY 수신
     void onNetStart();                          // 양쪽: 동시 시작 신호
     void onNetGameOver();                       // 양쪽: 게임 종료 복귀
@@ -101,6 +104,8 @@ private:
     void toggleFullscreen();
     void toggleFastForward(bool on);
     void toggleSwapPlayers();
+    void toggleTate();          // TATE 회전: auto→90°CCW→90°CW→off→auto 순환
+    void applyTate(int rot);    // -1=auto, 0=off, 1=90°CCW, 3=90°CW
 
     // 게임 캔버스 전환 헬퍼 (프리뷰 정지 + 스택 전환 통합)
     void enterGameScreen();   // GUI → 게임 화면 (프리뷰 정지)
@@ -147,6 +152,31 @@ private:
     void refreshPadTable();        // 게임패드(XInput) 테이블 갱신
     void refreshWinMMTable();      // 아케이드스틱(WinMM) 테이블 갱신
     QHash<int, int> m_keymap;      // Qt key → libretro button
+
+    // ── 기종 분류 + 핫키 시스템 ─────────────────────────────────
+    static QString gamePlatform(const QString& rom);   // 기종 분류
+    static int  hotkeyEncode(int key, int mods);
+    static void hotkeyDecode(int enc, int& key, int& mods);
+    static QString hotkeyText(int enc);                // 표시용 ("Ctrl+F9" 등)
+    void rebuildHotkeyTable();                         // 핫키 테이블 갱신
+    QTableWidget* m_hotkeyTable = nullptr;
+    QString m_machineScope = "game";   // 머신세팅 저장 범위: "game"/"plat"
+    int  hotkeyOf(const QString& action);              // 현재 핫키(설정>기본)
+    bool hotkeyMatch(const QString& action, int key, int qtMods);
+
+    // ── 컨트롤 스코프 해석/적용 (게임별 > 기종별 > 전역 > 기본) ──
+    QHash<int,int> resolveCtrlMap(const QHash<QString,QHash<int,int>>& scoped,
+                                  const QHash<int,int>& global,
+                                  const QHash<int,int>& dflt,
+                                  const QString& rom);
+    void resolveAndApplyControls(const QString& rom);  // 게임 로드 시 적용
+    void saveControlsToScope(const QString& scope);    // "global"/"plat"/"game"
+    QString m_ctrlScopeRom;        // 현재 컨트롤 테이블이 대상으로 하는 게임 (게임별 저장용)
+    QString m_hotkeyCapture;       // 핫키 캡처 중인 action (빈 문자열=비캡처)
+
+    // 핫키 정의 테이블
+    struct HotkeyDef { const char* action; const char* label; int key; int mods; };
+    static const HotkeyDef* hotkeyDefs(int* count);
 
     // ════════════════════════════════════════════════════
     //  위젯 멤버
@@ -201,6 +231,8 @@ private:
     QSlider*         m_crtSlider        = nullptr;
     QCheckBox*       m_vsyncCheck       = nullptr;
     QSpinBox*        m_frameskipSpin    = nullptr;
+    QCheckBox*       m_flashGuardCheck  = nullptr;   // 플래시 감소 on/off
+    QSlider*         m_flashSlider      = nullptr;   // 플래시 감소 강도
 
     // ── AUDIO 위젯 ───────────────────────────────────────
     QSlider*         m_volumeSlider     = nullptr;
@@ -215,14 +247,22 @@ private:
     QLabel*          m_cheatStatusLabel = nullptr;
 
     // ── NETPLAY 페이지 위젯 ──────────────────────────────
-    QLineEdit*       m_npIpEdit         = nullptr;
-    QSpinBox*        m_npPortSpin       = nullptr;
-    QLabel*          m_npStatusLabel    = nullptr;
-    QPushButton*     m_npHostBtn        = nullptr;
-    QPushButton*     m_npConnectBtn     = nullptr;
-    QPushButton*     m_npStartBtn       = nullptr;
-    QPushButton*     m_npDisconnBtn     = nullptr;
-    QLabel*          m_npLocalIpLabel   = nullptr;
+    QLineEdit*       m_npIpEdit          = nullptr;
+    QSpinBox*        m_npPortSpin        = nullptr;
+    QLabel*          m_npStatusLabel     = nullptr;
+    QPushButton*     m_npHostBtn         = nullptr;
+    QPushButton*     m_npConnectBtn      = nullptr;
+    QPushButton*     m_npStartBtn        = nullptr;
+    QPushButton*     m_npDisconnBtn      = nullptr;
+    QLabel*          m_npLocalIpLabel    = nullptr;
+    QLabel*          m_npPublicIpLabel   = nullptr;
+    QLabel*          m_npRoomCodeLabel   = nullptr;
+    QLineEdit*       m_npRoomCodeEdit    = nullptr;
+    QSpinBox*        m_npDelaySpinBox    = nullptr;
+    QLabel*          m_npRttLabel        = nullptr;
+    QLineEdit*       m_npRelayUrlEdit    = nullptr;         // 릴레이 URL 입력창
+    QString          m_publicIp;                            // 외부 공개 IP (api.ipify.org)
+    QHash<uint32_t, uint16_t> m_npDelayQueue;              // 입력 지연 큐 frame→bits
 
     // ════════════════════════════════════════════════════
     //  상태 멤버
@@ -233,6 +273,7 @@ private:
     QPushButton*     m_swapBtn       = nullptr;  // 1P↔2P 스왑 버튼
     QLabel*          m_playerOverlay = nullptr;  // 게임 화면 내 플레이어 표시 오버레이
     QTimer*          m_overlayTimer  = nullptr;  // 1P 복귀 시 오버레이 자동 숨김 타이머
+    QPushButton*     m_tateBtn       = nullptr;  // TATE 회전 버튼 (세로형 게임)
     int              m_glFilter     = 0;  // 0=ALL, 1=FAV(즐겨찾기만), 2=☆(미즐겨찾기만)
     QSize            m_windowedSize;
     int              m_stateSlot    = 1;
@@ -269,6 +310,20 @@ private:
     AudioManager*    m_audio   = nullptr;
     CheatManager*    m_cheat   = nullptr;
     GamepadManager*  m_gamepad = nullptr;
+    UPnpMapper*      m_upnp    = nullptr;
+
+    // ── 릴레이 홀펀칭 ────────────────────────────────────
+    void relayRegister(const QString& code, const QString& role,
+                       const QString& ip, int port);
+    void relayPollPeer(const QString& code, const QString& myRole, int tries = 0);
+    QTimer* m_relayPollTimer = nullptr;
+    // 피어 발견 처리 중복 방지: relayRegister(POST) 와 relayPollPeer(GET) 가
+    // 둘 다 워커에서 피어를 받아 clientStartHandshake/probe 를 이중 실행하던 문제 차단.
+    bool m_relayPeerHandled = false;
+    // ★ 공유 QNetworkAccessManager: 요청마다 새로 만들고 파괴하면 정적 빌드의
+    //   Schannel TLS 컨텍스트가 동시 파괴되며 충돌 → 크래시. 하나만 만들어 재사용.
+    QNetworkAccessManager* relayNam();
+    QNetworkAccessManager* m_relayNam = nullptr;
 
     // ── 녹화 (libav* 기반 VideoRecorder) ────────────────────
     VideoRecorder*        m_videoRecorder  = nullptr;
@@ -290,9 +345,35 @@ private:
     int  m_pendingResimTo  = -1;    // 목표 프레임(-1=없음)
     static constexpr int MAX_RESIM_PER_TICK = 8;
 
+    // ── 호스트 스냅샷 큐 (소켓 시그널 핸들러 내 run() 방지) ─────
+    // stateReceived 는 데이터만 저장 → onEmuTimer 에서 안전하게 적용
+    // (순수 GGPO 에선 desync 복구용 풀스테이트 재동기에서만 사용 — 평소엔 안 옴)
+    int        m_pendingSyncSf  = -1;  // 호스트 스냅샷 프레임 번호 (-1=없음)
+    int        m_pendingSyncCur = -1;  // 수신 시점 로컬 프레임 번호
+    QByteArray m_pendingSyncData;      // 스냅샷 페이로드
+
+    // ── GGPO desync 감지 (체크섬) ────────────────────────────
+    // 확정 프레임마다 상태 CRC 를 교환. 양쪽 같은 프레임 CRC 불일치 → desync.
+    // desync 시 클라가 호스트에 풀스테이트 재동기를 1회 요청 → 복구.
+    std::map<uint32_t,uint32_t> m_localChecksums;   // frame → 내 상태 CRC
+    std::map<uint32_t,uint32_t> m_remoteChecksums;  // frame → 상대 상태 CRC
+    uint32_t m_lastChecksumFrame = 0;               // 마지막 체크섬 계산 프레임
+    bool     m_resyncPending     = false;           // 재동기 요청 진행 중
+    void onNetChecksum(quint32 frame, quint32 crc); // 상대 체크섬 수신 핸들러
+    void onNetResyncReq(quint32 frame);             // 호스트: 재동기 요청 받음
+    void checkDesync(uint32_t frame);               // 같은 프레임 CRC 비교
+    static uint32_t npChecksum(const QByteArray& data);  // 상태 CRC (FNV-1a)
+
     // ── Loading Barrier ──────────────────────────────────
     // 양쪽 준비 판단을 MainWindow에서 직접 관리 (NetplayManager 플래그 경쟁 회피)
     bool   m_npPeerReady   = false; // 상대가 MSG_READY 보냈는지
     bool   m_npSelfLoaded  = false; // 내가 loadRomInternal() 완료했는지
+    bool   m_npStarted     = false; // onNetStart() 이미 호출됐는지 (이중 시작 방지)
     QTimer* m_npReadyRetry = nullptr; // READY 재전송 타이머 (300ms)
+
+    // ── onEmuTimer 재진입 방지 ───────────────────────────────
+    // FBNeo DLL이 run() 중 DirectSound/WinMM 등 Windows API를 호출하면
+    // Qt 이벤트 루프가 재진입하여 onEmuTimer가 중간에 다시 불릴 수 있음
+    // → m_core 상태 충돌 → 크래시. 이 플래그로 완전히 차단
+    bool m_emuTimerBusy = false;
 };

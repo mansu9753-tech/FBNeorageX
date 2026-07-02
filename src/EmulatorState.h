@@ -78,6 +78,9 @@ struct EmulatorState {
     size_t              videoPitch  = 0;
     retro_pixel_format  pixelFormat = RETRO_PIXEL_FORMAT_RGB565;
     std::atomic<bool>   frameReady  = false;
+    // 코어가 보고한 회전값 (RETRO_ENVIRONMENT_SET_ROTATION)
+    // 0=0°, 1=90°CCW, 2=180°, 3=270°CCW(=90°CW)
+    int                 videoRotation = 0;
 
     // ── 오디오 ────────────────────────────────────────────
     QByteArray  audioPending;    // retro_audio_batch 로 누적된 PCM 데이터

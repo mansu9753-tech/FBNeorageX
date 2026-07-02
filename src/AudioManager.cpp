@@ -152,14 +152,21 @@ bool AudioManager::init(int sampleRate, int bufferMs) {
     // QAudioSink 생성 (HW native rate)
     m_sink = std::make_unique<QAudioSink>(dev, fmt);
 
-    // 하드웨어 버퍼: 최소 40ms (PipeWire < 40ms 요청 시 불안정)
-    // HW 샘플레이트 기준으로 계산
+    // 하드웨어 버퍼 최솟값
+    // Linux(PipeWire): 96ms — quantum(21~43ms) × 4 이상 여유, 무거운 게임 스파이크 흡수
+    // Windows(WASAPI): 40ms — 낮은 레이턴시 유지
+#ifdef Q_OS_LINUX
+    int hwMs = std::max(m_bufferMs, 96);
+#else
     int hwMs = std::max(m_bufferMs, 40);
+#endif
     qsizetype hwBufBytes = static_cast<qsizetype>(
         m_hwSampleRate * 2 * 2 * hwMs / 1000);
     m_sink->setBufferSize(hwBufBytes);
 
-    // DRC 목표: bufferMs × 1.5 (HW 샘플레이트 기준)
+    // DRC 링버퍼 목표 레벨 = bufferMs × 1.5
+    // 양 플랫폼 동일: 레이턴시와 안정성 균형
+    // HW 버퍼(hwMs)가 Linux에서 더 크므로 PipeWire 언더런은 HW 단에서 흡수
     m_targetBytes = m_hwSampleRate * 4 * (m_bufferMs * 3 / 2) / 1000;
     if (m_targetBytes < 4096)  m_targetBytes = 4096;
     if (m_targetBytes > AudioRingBuffer::RING_BYTES / 2)

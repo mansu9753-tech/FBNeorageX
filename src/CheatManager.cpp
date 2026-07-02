@@ -76,49 +76,59 @@ QString CheatManager::findIni(const QString& romName, const QString& cheatDir) c
 
 // ════════════════════════════════════════════════════════════
 //  기판 감지 (바이트오더 계산용)
+//  ★ 베이스 주소는 더 이상 하드코딩하지 않는다 (cpuAddrToOffset 가
+//    ramSize 마스킹으로 자동 처리). 여기선 엔디언만 판별한다.
+//
+//  · LittleEndian (스왑 X): NEC V-시리즈/Z80 CPU
+//      - Irem M72/M92/M62 (R-Type, Gunforce, Image Fight 등)
+//      - Seibu raiden (V30)
+//  · BigEndian (^1 스왑): 그 외 거의 전부 68000
+//      - NeoGeo, CPS, Cave, Toaplan, Psikyo, Raizing, Sega 16/18 ...
+//      - 알 수 없는 게임도 기본 빅엔디언(68000) 으로 처리 (대부분 68000)
 // ════════════════════════════════════════════════════════════
 CheatPlatform CheatManager::detectPlatform(const QString& romName) const {
-    // NeoGeo 대표 prefix
-    static const QStringList neoPfx = {
-        "kof","mslug","garou","samsho","rbff","fatfury","aof","wh",
-        "nam1975","lbowling","blazstar","lastsold","neo","magdrop",
-        "pbobblen","pbobble","neobombe","turfmast","lastblad","rotd"};
-    // CPS 대표 prefix
-    static const QStringList cpsPfx = {
-        "sf","ssf","sfa","sfz","xmvsf","msh","mvsc","mvc","avsp","vsav",
-        "knights","ffight","ghouls","strider","1941","1944","19xx",
-        "progear","gigawing","mmatrix","cybots","cyvern","ddtod","ddsoma",
-        // CPS1 추가 (dino=케딜락앤다이노소어, punisher, slammast, wof=워리어스오브페이트, kod=킹오브드래곤)
-        "dino","punisher","slammast","wof","kod","mercs","willow","unsquad",
-        "dynwar","cawing","forgottn","varth","pang","mpang","qad","traja"};
+    // 리틀엔디언(NEC V-시리즈/Z80) — 스왑 안 함
+    static const QStringList littlePfx = {
+        // Irem M72
+        "rtype","hharry","dkgen","poundfor","airduel","gallop","cosmccop",
+        "kengo","matchit","xmultipl","dbreed","loht","imgfight","nspirit",
+        "mrheli","bchopper","lohtb",
+        // Irem M92 / M107
+        "gunforce","bmaster","lethalth","thndblst","uccops","mysticri",
+        "gunhohki","majtitl","hook","ppan","rtypeleo","inthunt","kaiteids",
+        "leaguemn","ssoldier","psoldier","dsoccr","gunforc2","geostorm",
+        "nbbatman","hcube","ddsoccer","gunhohki","dsccr",
+        // Irem M62/M63 등 구형 (Z80)
+        "spelunk","kungfum","ldrun","kidniki","vigilant","kidniki",
+        "lotlot","kungfub",
+        // Seibu raiden (V30)
+        "raiden"};
 
     QString lc = romName.toLower();
-    for (const QString& p : neoPfx)
-        if (lc.startsWith(p)) return CheatPlatform::NeoGeo;
-    for (const QString& p : cpsPfx)
-        if (lc.startsWith(p)) return CheatPlatform::CPS;
-    return CheatPlatform::Generic;
+    for (const QString& p : littlePfx)
+        if (lc.startsWith(p)) return CheatPlatform::LittleEndian;
+    return CheatPlatform::BigEndian;   // 기본: 68000
 }
 
 // ════════════════════════════════════════════════════════════
 //  CPU주소 → RAM오프셋 변환
-//  68000(NeoGeo/CPS) : (cpuAddr - base) ^ 1  (빅엔디언 워드 스왑)
+//  · 마스킹: cpuAddr & (ramSize-1)  → work RAM 베이스를 몰라도 정렬 매핑으로
+//    올바른 오프셋이 나온다 (NeoGeo/CPS/Cave/Toaplan/Psikyo/Irem 전부 동일).
+//  · 빅엔디언(68000): ^1 워드 스왑 추가 (FBNeo 가 68K RAM 을 스왑 저장).
+//    리틀엔디언(V30/Z80): 스왑 안 함.
 // ════════════════════════════════════════════════════════════
-uint32_t CheatManager::cpuAddrToOffset(uint32_t cpuAddr) const {
-    switch (m_platform) {
-    case CheatPlatform::NeoGeo: {
-        constexpr uint32_t base = 0x100000;
-        if (cpuAddr < base) return cpuAddr;
-        return (cpuAddr - base) ^ 1;
-    }
-    case CheatPlatform::CPS: {
-        constexpr uint32_t base = 0xFF0000;
-        if (cpuAddr < base) return cpuAddr;
-        return (cpuAddr - base) ^ 1;
-    }
-    default:
-        return cpuAddr;
-    }
+uint32_t CheatManager::cpuAddrToOffset(uint32_t cpuAddr, size_t ramSize) const {
+    uint32_t off;
+    if (ramSize != 0 && (ramSize & (ramSize - 1)) == 0)      // 2의 거듭제곱
+        off = cpuAddr & static_cast<uint32_t>(ramSize - 1);
+    else if (ramSize != 0)
+        off = cpuAddr % static_cast<uint32_t>(ramSize);
+    else
+        off = cpuAddr;
+
+    if (m_platform == CheatPlatform::BigEndian)
+        off ^= 1;                                            // 68000 빅엔디언 스왑
+    return off;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -197,8 +207,8 @@ bool CheatManager::parseIni(const QString& path) {
             uint8_t  val    = static_cast<uint8_t>(nums[j + 2]);
             if (offset != 0) continue;  // SYSTEM_RAM 이외 건너뜀
             CheatPatch patch;
-            patch.offset = cpuAddrToOffset(addr);
-            patch.value  = val;
+            patch.cpuAddr = addr;       // 원본 CPU 주소 저장 (오프셋은 apply 시 계산)
+            patch.value   = val;
             entry.patches.append(patch);
         }
 
@@ -223,8 +233,10 @@ void CheatManager::applyFrame(LibretroCore* core, int frameCount, int loadFrame)
     for (const CheatEntry& e : m_entries) {
         if (!e.active) continue;
         for (const CheatPatch& p : e.patches) {
-            if (p.offset < ramSize)
-                ramBytes[p.offset] = p.value;
+            // ★ 게임 로드 후 실제 ramSize 로 오프셋 계산 (마스킹 + 스왑)
+            uint32_t off = cpuAddrToOffset(p.cpuAddr, ramSize);
+            if (off < ramSize)
+                ramBytes[off] = p.value;
         }
     }
 }

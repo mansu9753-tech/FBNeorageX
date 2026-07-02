@@ -85,7 +85,10 @@ private:
     // DRC 미세조정이 이 위에 곱해짐
     double m_baseRatio = 1.0;
 
-    // DRC: SRC 기본비율 위에 ±maxAdj(0.5%) 미세 보정
-    DrcPid              m_pid  { 0.015, 0.00008, 0.003, 0.005 };
+    // DRC: SRC 기본비율 위에 ±maxAdj 미세 보정
+    // maxAdj=0.001 (±0.1%) — 인간 피치 감지 한계(±0.3%) 이하 → 울렁임/속도감 완전 제거
+    // 소프트웨어 에뮬레이터는 클럭 드리프트가 없으므로 큰 보정 불필요
+    // kp·ki·kd 모두 낮춰 PID 진동 억제
+    DrcPid              m_pid  { 0.008, 0.00003, 0.001, 0.001 };
     FractionalResampler m_resampler;
 };

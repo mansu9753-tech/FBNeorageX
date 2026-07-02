@@ -117,12 +117,16 @@ void AppSettings::load(const QString& path) {
     videoCrtMode    = jval(o, "video_crt_mode",      videoCrtMode);
     videoCrtIntensity = jval(o, "video_crt_intensity", videoCrtIntensity);
     videoFrameskip  = jval(o, "video_frameskip",    videoFrameskip);
+    videoFlashGuard    = jval(o, "video_flash_guard",    videoFlashGuard);
+    videoFlashStrength = jval(o, "video_flash_strength", videoFlashStrength);
     videoVsync      = jval(o, "video_vsync",         videoVsync);
     videoShaderPath = jval(o, "video_shader_path",  videoShaderPath);
 
-    region          = jval(o, "region",              region);
-    netplayPort     = jval(o, "netplay_port",        netplayPort);
-    turboPeriod     = jval(o, "turbo_period",        turboPeriod);
+    region            = jval(o, "region",               region);
+    netplayPort       = jval(o, "netplay_port",         netplayPort);
+    netplayInputDelay = jval(o, "netplay_input_delay",  netplayInputDelay);
+    netplayRelayUrl   = jval(o, "netplay_relay_url",    netplayRelayUrl);
+    turboPeriod       = jval(o, "turbo_period",         turboPeriod);
     turboButtons    = jval(o, "turbo_buttons",       turboButtons);
 
     // 즐겨찾기 (JSON 배열)
@@ -142,16 +146,44 @@ void AppSettings::load(const QString& path) {
     loadIntMap("winmm_mapping",    winmmMapping);
     loadIntMap("keyboard_mapping", keyboardMapping);
 
+    // 기종별/게임별 컨트롤 매핑: { scope: { key: idx } }
+    auto loadScoped = [&](const QString& key,
+                          QHash<QString,QHash<int,int>>& dst) {
+        dst.clear();
+        QJsonObject so = o[key].toObject();
+        for (auto it = so.begin(); it != so.end(); ++it) {
+            QHash<int,int> m;
+            QJsonObject mo = it.value().toObject();
+            for (auto jt = mo.begin(); jt != mo.end(); ++jt)
+                m[jt.key().toInt()] = jt.value().toInt();
+            dst[it.key()] = m;
+        }
+    };
+    loadScoped("kb_scoped", kbScoped);
+    loadScoped("xi_scoped", xiScoped);
+    loadScoped("wm_scoped", wmScoped);
+
     // 머신 세팅 (DIP/BIOS): { romName: { key: value } }
-    machineVars.clear();
-    QJsonObject mv = o["machine_vars"].toObject();
-    for (auto it = mv.begin(); it != mv.end(); ++it) {
-        QHash<QString,QString> vars;
-        QJsonObject rv = it.value().toObject();
-        for (auto jt = rv.begin(); jt != rv.end(); ++jt)
-            vars[jt.key()] = jt.value().toString();
-        machineVars[it.key()] = vars;
-    }
+    auto loadStrMap2 = [&](const QString& key,
+                           QHash<QString,QHash<QString,QString>>& dst) {
+        dst.clear();
+        QJsonObject mv = o[key].toObject();
+        for (auto it = mv.begin(); it != mv.end(); ++it) {
+            QHash<QString,QString> vars;
+            QJsonObject rv = it.value().toObject();
+            for (auto jt = rv.begin(); jt != rv.end(); ++jt)
+                vars[jt.key()] = jt.value().toString();
+            dst[it.key()] = vars;
+        }
+    };
+    loadStrMap2("machine_vars",             machineVars);
+    loadStrMap2("machine_vars_by_platform", machineVarsByPlatform);
+
+    // 핫키: { action: encodedInt }
+    hotkeyMap.clear();
+    QJsonObject hk = o["hotkey_map"].toObject();
+    for (auto it = hk.begin(); it != hk.end(); ++it)
+        hotkeyMap[it.key()] = it.value().toInt();
 
     // 경로 디렉터리 자동 생성
     for (const QString& dir : {romPath, previewPath, screenshotPath, savePath, cheatPath, recordPath})
@@ -190,12 +222,16 @@ void AppSettings::save(const QString& path) const {
     o["video_crt_mode"]     = videoCrtMode;
     o["video_crt_intensity"]= videoCrtIntensity;
     o["video_frameskip"]    = videoFrameskip;
+    o["video_flash_guard"]    = videoFlashGuard;
+    o["video_flash_strength"] = videoFlashStrength;
     o["video_vsync"]        = videoVsync;
     o["video_shader_path"]  = videoShaderPath;
 
-    o["region"]             = region;
-    o["netplay_port"]       = netplayPort;
-    o["turbo_period"]       = turboPeriod;
+    o["region"]               = region;
+    o["netplay_port"]         = netplayPort;
+    o["netplay_input_delay"]  = netplayInputDelay;
+    o["netplay_relay_url"]    = netplayRelayUrl;
+    o["turbo_period"]         = turboPeriod;
     o["turbo_buttons"]      = turboButtons;
 
     QJsonArray favArr;
@@ -213,15 +249,42 @@ void AppSettings::save(const QString& path) const {
     saveIntMap("winmm_mapping",    winmmMapping);
     saveIntMap("keyboard_mapping", keyboardMapping);
 
-    // 머신 세팅 (DIP/BIOS)
-    QJsonObject mv;
-    for (auto it = machineVars.begin(); it != machineVars.end(); ++it) {
-        QJsonObject rv;
-        for (auto jt = it.value().begin(); jt != it.value().end(); ++jt)
-            rv[jt.key()] = jt.value();
-        mv[it.key()] = rv;
-    }
-    o["machine_vars"] = mv;
+    // 기종별/게임별 컨트롤 매핑
+    auto saveScoped = [&](const QString& key,
+                          const QHash<QString,QHash<int,int>>& src) {
+        QJsonObject so;
+        for (auto it = src.begin(); it != src.end(); ++it) {
+            QJsonObject mo;
+            for (auto jt = it.value().begin(); jt != it.value().end(); ++jt)
+                mo[QString::number(jt.key())] = jt.value();
+            so[it.key()] = mo;
+        }
+        o[key] = so;
+    };
+    saveScoped("kb_scoped", kbScoped);
+    saveScoped("xi_scoped", xiScoped);
+    saveScoped("wm_scoped", wmScoped);
+
+    // 머신 세팅 (DIP/BIOS) — 게임별 + 기종별
+    auto saveStrMap2 = [&](const QString& key,
+                           const QHash<QString,QHash<QString,QString>>& src) {
+        QJsonObject mv;
+        for (auto it = src.begin(); it != src.end(); ++it) {
+            QJsonObject rv;
+            for (auto jt = it.value().begin(); jt != it.value().end(); ++jt)
+                rv[jt.key()] = jt.value();
+            mv[it.key()] = rv;
+        }
+        o[key] = mv;
+    };
+    saveStrMap2("machine_vars",             machineVars);
+    saveStrMap2("machine_vars_by_platform", machineVarsByPlatform);
+
+    // 핫키
+    QJsonObject hk;
+    for (auto it = hotkeyMap.begin(); it != hotkeyMap.end(); ++it)
+        hk[it.key()] = it.value();
+    o["hotkey_map"] = hk;
 
     QFile f(p);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

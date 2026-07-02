@@ -103,6 +103,8 @@ if command -v apt-get &>/dev/null; then
         libxcb-xinerama0-dev libxcb-cursor-dev libxcb-icccm4-dev
         libfontconfig1-dev libfreetype-dev
         libxkbcommon-dev libwayland-dev
+        # Qt6 Network + TLS (Fightcade 넷플레이 공개 IP 조회 / HTTPS)
+        libssl-dev ca-certificates
     )
     MISSING=()
     for pkg in "${PKGS[@]}"; do
@@ -120,17 +122,28 @@ else
 fi
 
 # Qt6 qmake 경로
+# Ubuntu 22.04/24.04 에서 qmake6 위치가 배포판마다 다름 → 다중 경로 탐색
 QMAKE6=""
-for q in /usr/lib/qt6/bin/qmake \
+for q in qmake6 \
+         /usr/lib/qt6/bin/qmake6 \
+         /usr/lib/qt6/bin/qmake \
+         /usr/lib/x86_64-linux-gnu/qt6/bin/qmake6 \
          /usr/lib/x86_64-linux-gnu/qt6/bin/qmake \
-         qmake6 qmake; do
-    if command -v "$q" &>/dev/null 2>&1 || [ -x "$q" ]; then
+         /usr/bin/qmake6 \
+         qmake; do
+    # command -v 로 PATH 탐색, [ -x ] 로 절대경로 확인
+    if command -v "$q" &>/dev/null || [ -x "$q" ]; then
         if "$q" --version 2>/dev/null | grep -qi "qt version 6"; then
             QMAKE6="$q"; break
         fi
     fi
 done
-[ -n "$QMAKE6" ] || die "Qt6 qmake 없음 — qt6-base-dev-tools 설치 필요"
+if [ -z "$QMAKE6" ]; then
+    warn "Qt6 qmake 를 못 찾았습니다."
+    warn "설치:  sudo apt-get install -y qt6-base-dev-tools qmake6"
+    warn "확인:  which qmake6 && qmake6 --version"
+    die  "Qt6 qmake 없음 — 위 패키지 설치 후 다시 실행하세요."
+fi
 info "Qt6 qmake: $QMAKE6"
 
 # Qt6 CMake prefix
@@ -289,9 +302,12 @@ open('$TMPAPPDIR/FBNeoRageX.png','wb').write(p)"
 fi
 
 # linuxdeploy: AppDir에 Qt 라이브러리 + 플러그인 배포
+# ★ EXTRA_PLATFORM_PLUGINS=wayland 은 linuxdeploy-plugin-qt 가
+#   "platforms/wayland" 를 파일로 오인해 하드 실패시키는 버그가 있음.
+#   → wayland 플랫폼 플러그인은 아래 수동 수집 블록(platforms 전체 복사)이
+#     처리하므로 여기서는 넘기지 않아 linuxdeploy 실패를 방지한다.
 export QMAKE="$QMAKE6"
-export EXTRA_QT_PLUGINS="multimedia;multimediawidgets;network"
-export EXTRA_PLATFORM_PLUGINS="wayland"
+export EXTRA_QT_PLUGINS="multimedia;multimediawidgets;network;tls"
 export DEPLOY_PLATFORM_THEMES=1
 export LD_LIBRARY_PATH="${QT6_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -328,6 +344,8 @@ else
         libQt6Multimedia libQt6MultimediaWidgets
         libQt6Network libQt6DBus libQt6XcbQpa
         libQt6WaylandClient libicudata libicui18n libicuuc
+        # TLS (Qt6 Network HTTPS — 공개 IP 조회, 넷플레이 룸 코드)
+        libQt6NetworkAuth libssl libcrypto
     )
     for lib in "${QT_LIBS[@]}"; do
         for f in "${QT6_PREFIX}/lib/${lib}"*.so* \
@@ -339,7 +357,7 @@ fi
 
 # Qt 플러그인 — 최소 필수 (없으면 수동 복사)
 if [ -n "$QT6_PLUGINS" ]; then
-    for ptype in platforms imageformats xcbglintegrations wayland-shell-integration wayland-graphics-integration-client wayland-decoration-client; do
+    for ptype in platforms imageformats xcbglintegrations tls wayland-shell-integration wayland-graphics-integration-client wayland-decoration-client; do
         if [ -d "$QT6_PLUGINS/$ptype" ]; then
             mkdir -p "$BUNDLE_ROOT/plugins/$ptype"
             cp "$QT6_PLUGINS/$ptype/"*.so \

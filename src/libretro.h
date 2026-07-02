@@ -72,6 +72,25 @@ enum retro_pixel_format {
 #define RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK 62
 #define RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY  63
 
+// ── 롤백 넷플레이 세이브스테이트 컨텍스트 ──────────────────────
+// FBNeo가 이 컨텍스트를 받으면 hiscore/NVRAM 등 비결정론적 데이터를
+// 세이브스테이트에서 제외 → rollback netplay 전용 결정론적 포맷 사용
+//
+// 실측값 (crash_log.txt로 확인):
+//   FBNeo v1.0.0.03 GIT2133aac40 → cmd = 65608 = 72 | 0x10000
+//   최신 libretro 스펙 (EXPERIMENTAL 비트 없음) → 127
+// LibretroCore.cpp에서 두 값 모두 처리함
+#define RETRO_ENVIRONMENT_EXPERIMENTAL              0x10000
+#define RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT     127
+// FBNeo v1.0.0.03 실측값: 72 | 0x10000 = 65608
+#define RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT_EX  (72 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+
+// retro_savestate_context 값 (data 포인터가 가리키는 int 에 기록)
+#define RETRO_SAVESTATE_CONTEXT_NORMAL              0
+#define RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE 1
+#define RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY   2
+#define RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY    3
+
 // ── 메모리 타입 (retro_get_memory_data 용) ─────────────────
 #define RETRO_MEMORY_MASK        0xff
 #define RETRO_MEMORY_SAVE_RAM    0
