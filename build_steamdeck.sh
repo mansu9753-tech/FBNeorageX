@@ -113,7 +113,16 @@ if command -v apt-get &>/dev/null; then
     )
     MISSING=()
     for pkg in "${PKGS[@]}"; do
-        dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || MISSING+=("$pkg")
+        # 이미 설치됨 → 건너뜀
+        dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" && continue
+        # ★ Ubuntu 버전에 따라 존재하지 않는 패키지명은 무시한다.
+        #   예: Ubuntu 24.04 에는 libqt6opengl6-dev 가 없고(OpenGL dev 는
+        #   qt6-base-dev 에 포함됨), 설치 후보가 없어 유령 누락으로 잡히던 문제.
+        #   ※ apt-cache show 는 유령 패키지에도 성공을 반환하므로 부적합.
+        #     apt-cache policy 의 "Candidate:" 가 (none) 이 아닌지로 판단.
+        if apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate: [^(]"; then
+            MISSING+=("$pkg")
+        fi
     done
     if [ "${#MISSING[@]}" -gt 0 ]; then
         # ★ 이 스크립트는 wsl --exec 로 "비대화형" 실행되므로 sudo 가
