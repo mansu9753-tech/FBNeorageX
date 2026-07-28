@@ -77,6 +77,8 @@ collect_deps() {
             libgcc_s*|libstdc++*|libgomp*) continue ;;
             libGL*|libEGL*|libGLdispatch*|libGLX*) continue ;;
             libdrm*|libgbm*) continue ;;
+            # VAAPI/VDPAU: 실행 시스템 GPU 드라이버와 짝이 맞아야 함 → 번들 금지
+            libva.so*|libva-*.so*|libvdpau*) continue ;;
             libX*|libxcb*|libxkb*) continue ;;
             libwayland*) continue ;;
             libffi*|libz.so*) continue ;;
@@ -110,17 +112,35 @@ if command -v apt-get &>/dev/null; then
         libxkbcommon-dev libwayland-dev
         # Qt6 Network + TLS (Fightcade 넷플레이 공개 IP 조회 / HTTPS)
         libssl-dev ca-certificates
+        # FFmpeg dev 헤더 — VideoRecorder(프리뷰/일반 녹화)에 필수.
+        #   이게 없으면 CMake 가 HAVE_FFMPEG=0 으로 빌드해 Linux 녹화가 통째로
+        #   비활성화된다(스샷만 되고 녹화 실패). 런타임 .so 는 시스템에 있어도
+        #   dev 헤더가 없으면 컴파일 단계에서 빠진다.
+        libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
     )
     MISSING=()
     for pkg in "${PKGS[@]}"; do
         # 이미 설치됨 → 건너뜀
-        dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" && continue
+        #   ※ `dpkg -l | grep -q` 는 쓰지 않는다. grep -q 가 매치 즉시 종료하며
+        #     dpkg 에 SIGPIPE 를 유발 → `set -o pipefail` 과 만나 오판정된다.
+        #     dpkg-query 로 상태만 직접 받아온다 (파이프 없음).
+        status=$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)
+        [ "$status" = "installed" ] && continue
         # ★ Ubuntu 버전에 따라 존재하지 않는 패키지명은 무시한다.
         #   예: Ubuntu 24.04 에는 libqt6opengl6-dev 가 없고(OpenGL dev 는
         #   qt6-base-dev 에 포함됨), 설치 후보가 없어 유령 누락으로 잡히던 문제.
         #   ※ apt-cache show 는 유령 패키지에도 성공을 반환하므로 부적합.
         #     apt-cache policy 의 "Candidate:" 가 (none) 이 아닌지로 판단.
-        if apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate: [^(]"; then
+        #   ※※ 파이프 + grep -q 조합 금지! grep -q 는 매치 즉시 종료하므로
+        #      apt-cache 가 SIGPIPE 로 죽고, 이 스크립트의 `set -o pipefail`
+        #      때문에 파이프라인이 '실패'로 판정된다 → 후보가 있어도 매번
+        #      거짓이 되어 모든 패키지가 누락 목록에서 빠지고 "모든 의존성
+        #      충족됨" 으로 넘어가 버렸다(FFmpeg dev 미설치 → 녹화 불가 원인).
+        #      → 명령치환으로 전체 출력을 받아 검사한다 (SIGPIPE 없음).
+        #   awk 에 exit 를 쓰지 않는다 — 조기 종료하면 apt-cache 가 SIGPIPE 로
+        #   죽어 pipefail 에 걸린다. 전체 입력을 읽게 두고 마지막 값을 취한다.
+        cand=$(apt-cache policy "$pkg" 2>/dev/null | awk -F': ' '/Candidate:/{v=$2} END{print v}' || true)
+        if [ -n "$cand" ] && [ "$cand" != "(none)" ]; then
             MISSING+=("$pkg")
         fi
     done
@@ -273,6 +293,14 @@ if [ -d "$SCRIPT_DIR/assets" ]; then
     info "assets 복사 완료"
 fi
 
+# ── 게임 이름 간편 변경 파일 (사용자가 편집) ─────────────────────
+# 번들 루트(= FBNeoRageX.sh 옆)에 두면 앱이 자동으로 읽는다.
+# 이미 있으면 덮어쓰지 않는다 — 사용자가 편집한 내용 보존.
+if [ -f "$SCRIPT_DIR/names.txt" ]; then
+    cp -n "$SCRIPT_DIR/names.txt" "$BUNDLE_ROOT/names.txt" 2>/dev/null || true
+    info "names.txt 포함 (게임 이름 간편 변경)"
+fi
+
 # ── libretro 코어 ────────────────────────────────────────────────
 if [ -f "$SCRIPT_DIR/fbneo_libretro.so" ]; then
     cp "$SCRIPT_DIR/fbneo_libretro.so" "$BUNDLE_ROOT/bin/"
@@ -394,6 +422,24 @@ if [ -n "$QT6_PLUGINS" ]; then
                "$BUNDLE_ROOT/plugins/$ptype/" 2>/dev/null || true
         fi
     done
+
+    # ── Qt Multimedia 백엔드 (프리뷰 영상 재생에 필수) ───────────────
+    # 런처가 QT_PLUGIN_PATH 를 번들로 고정하므로, 이 플러그인이 없으면
+    # QMediaPlayer 가 백엔드를 찾지 못해 영상 재생 시 프로그램이 죽는다.
+    #   · ffmpeg 백엔드만 넣는다 — 이미 FFmpeg 라이브러리를 번들하므로
+    #     일관되고, gstreamer 백엔드는 GStreamer 의존성 전체를 끌어온다.
+    if [ -d "$QT6_PLUGINS/multimedia" ]; then
+        mkdir -p "$BUNDLE_ROOT/plugins/multimedia"
+        cp "$QT6_PLUGINS/multimedia/"*ffmpeg*.so \
+           "$BUNDLE_ROOT/plugins/multimedia/" 2>/dev/null || true
+        if ls "$BUNDLE_ROOT/plugins/multimedia/"*.so >/dev/null 2>&1; then
+            info "Qt Multimedia 백엔드(ffmpeg) 번들 완료 — 프리뷰 영상 재생 가능"
+        else
+            warn "Qt Multimedia 백엔드 복사 실패 — 프리뷰 영상 재생 불가"
+        fi
+    else
+        warn "Qt multimedia 플러그인 폴더 없음 — 프리뷰 영상 재생 불가"
+    fi
 fi
 
 # ldd 기반 추가 의존성 수집
@@ -403,6 +449,19 @@ collect_deps "$BUILD_DIR/FBNeoRageX" "$BUNDLE_ROOT/lib"
 find "$BUNDLE_ROOT/plugins" -name "*.so" 2>/dev/null | while read -r plugin; do
     collect_deps "$plugin" "$BUNDLE_ROOT/lib"
 done
+
+# ── GPU 드라이버 결합 라이브러리 제거 (스팀덱 실행 불가 방지) ────────
+# FFmpeg(libavcodec)를 넣으면서 VAAPI/VDPAU 하드웨어 가속 라이브러리가
+# linuxdeploy 를 통해 함께 번들되는데, 이들은 실행 시스템의 GPU 드라이버
+# (SteamOS = Mesa)와 버전이 정확히 맞아야 한다. 우분투판을 번들해 스팀덱에서
+# 로드하면 드라이버 스택이 어긋나 실행 자체가 실패한다.
+#   · 본체/libavcodec/libavutil 모두 이들을 DT_NEEDED 로 요구하지 않는다(확인함)
+#     → 제거해도 로딩에 문제 없고, 필요 시 시스템 것이 쓰인다.
+#   · 녹화는 소프트웨어 인코딩이라 VAAPI 없이도 정상 동작한다.
+for risky in libva libva-drm libva-x11 libva-glx libvdpau; do
+    rm -f "$BUNDLE_ROOT/lib/${risky}.so"* 2>/dev/null || true
+done
+info "GPU 드라이버 결합 라이브러리 제외 완료 (libva/libvdpau → 시스템 것 사용)"
 
 info "라이브러리 수집 완료: $(ls "$BUNDLE_ROOT/lib" | wc -l) 개"
 info "플러그인 수집 완료: $(find "$BUNDLE_ROOT/plugins" -name '*.so' | wc -l) 개"
@@ -445,6 +504,12 @@ if [ -f "$HERE/plugins/multimedia/libQtMultimediaPlugin_ffmpeg.so" ] || \
 fi
 # GStreamer: 번들 내에 없으면 시스템 것을 그대로 사용 (SteamOS에 포함됨)
 # export GST_PLUGIN_SYSTEM_PATH_1_0=""  ← 의도적으로 비활성화하지 않음
+
+# 프리뷰 영상은 앱이 자체 소프트웨어 디코더(PreviewVideo)로 재생하므로
+# Qt 멀티미디어의 하드웨어 디코더 탐색 경로를 타지 않는다.
+#   → 예전처럼 VAAPI/VDPAU/Vulkan 을 환경변수로 막을 필요가 없다.
+#     (드라이버를 막으면 OpenGL 이 Vulkan 위에서 도는 환경(Zink)에서
+#      게임 화면 렌더링까지 깨질 수 있어 오히려 위험했다)
 
 # 플랫폼 자동 선택
 # - Gaming Mode(Gamescope): WAYLAND_DISPLAY 설정됨 → wayland 우선

@@ -6,6 +6,19 @@
 #include <QHash>
 
 struct AppSettings {
+    // ── 기준 폴더 (포터블) ──────────────────────────────
+    //  모든 사용자 데이터(roms/previews/screenshots/saves/cheats/recordings,
+    //  config.json)를 "프로그램이 있는 폴더" 아래 모은다. 폴더 하나만 옮기면
+    //  통째로 이동·백업·정리가 되고, 어디에 뭐가 쌓이는지 한눈에 보인다.
+    //  ★ 스팀덱(Linux) 번들은 실행파일이 <루트>/bin/ 안에 있으므로,
+    //    사용자가 보는 <루트>(FBNeoRageX.sh·names.txt 가 있는 곳)를 기준으로 삼는다.
+    static QString baseDir();
+
+    //  ★ 기본 경로 확정 — 반드시 QApplication 생성 후, load() 전에 호출.
+    //    gSettings 는 정적 초기화 시점(=QApplication 생성 전)에 만들어지는데
+    //    그때 applicationDirPath() 는 빈 문자열이라 경로가 "/roms" 처럼 깨진다.
+    void initDefaults();
+
     // ── 경로 ────────────────────────────────────────────
     QString romPath;
     QString previewPath;
@@ -32,7 +45,8 @@ struct AppSettings {
     double  videoCrtIntensity = 0.4;
     int     videoFrameskip  = 0;        // 0=OFF, -1=AUTO, 1~5
     bool    videoFlashGuard  = false;   // 플래시 감소 (눈 보호) on/off
-    int     videoFlashStrength = 80;    // 강도 0~100 (클수록 더 어둡게)
+    int     videoFlashStrength = 100;   // 보정 강도 0~100
+                                        // 100 = 번쩍임을 주변 밝기에 완전히 맞춤(완전 제거)
     // Linux(Steam Deck): GameScope가 VSync를 자체 처리 → swapInterval=0이 AFL과 충돌하지 않음
     // Windows: 컴포지터 없이 직접 출력 → VSync ON이 테어링 방지에 필요
 #ifdef Q_OS_LINUX
@@ -44,14 +58,21 @@ struct AppSettings {
 
     // ── 기타 ────────────────────────────────────────────
     QString region = "USA";
+    QString uiLanguage = "ko";          // GUI 표시 언어: "ko" / "en"
 
     // ── 넷플레이 ────────────────────────────────────────
     int     netplayPort       = 7845;
     int     netplayInputDelay = 2;   // 입력 지연 프레임 (0=없음, 1~8 / 해외플레이 권장 2~4)
-    QString netplayRelayUrl   = "https://fbneoragex-relay.mansu9753.workers.dev";  // Cloudflare Worker 릴레이 URL
+    // 내장 릴레이(Cloudflare Worker) 주소. 계정 ID 를 포함하므로 GUI 에는
+    // 절대 실제 값을 노출하지 않는다(육안·스크린샷 차단). builtinRelayUrl() 로 비교.
+    static QString builtinRelayUrl() { return "https://fbneoragex-relay.mansu9753.workers.dev"; }
+    QString netplayRelayUrl   = builtinRelayUrl();
 
     // ── 즐겨찾기 ────────────────────────────────────────
     QStringList favorites;
+    // 마지막으로 플레이한 게임(롬 이름). 다음 실행 때 그 게임을 선택된 상태로
+    // 복원해, 목록 맨 위로 초기화되지 않게 한다.
+    QString lastGame;
 
     // ── 터보 설정 ───────────────────────────────────────
     int     turboPeriod = 6;        // ON/OFF 주기 (프레임)

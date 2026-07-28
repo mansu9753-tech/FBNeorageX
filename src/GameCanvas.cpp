@@ -38,7 +38,7 @@ const char* GameCanvas::defaultFragSrc() {
         "uniform bool      uCrtMode;\n"
         "uniform float     uCrtIntensity;\n"
         "uniform float     uTexH;\n"        // 텍스처 픽셀 높이
-        "uniform float     uFlashInvert;\n" // 플래시 감소: 0=정상, >0=반전 강도
+        "uniform float     uFlashDim;\n"    // 플래시 감소: 1=정상, <1=어둡게
         "varying vec2      vUV;\n"
         "\n"
         "void main() {\n"
@@ -71,13 +71,11 @@ const char* GameCanvas::defaultFragSrc() {
         "        col.rgb = clamp(col.rgb, 0.0, 1.0);\n"
         "    }\n"
         "\n"
-        "    // ── 플래시 감소 (눈 보호): 밝은 픽셀을 색반전 ───────\n"
-        "    //   흰 번쩍임(밝음) → 검정. 어두운 배경은 거의 그대로 유지.\n"
-        "    if (uFlashInvert > 0.001) {\n"
-        "        float lum  = dot(col.rgb, vec3(0.299, 0.587, 0.114));\n"
-        "        float gate = smoothstep(0.45, 0.85, lum);\n"     // 밝을수록 강하게
-        "        col.rgb = mix(col.rgb, vec3(1.0) - col.rgb, uFlashInvert * gate);\n"
-        "    }\n"
+        "    // ── 플래시 감소 (눈 보호): 프레임 전체 균일 감쇠 ─────\n"
+        "    //   흰 번쩍임 프레임에는 스프라이트가 없으므로 전체를 그대로\n"
+        "    //   어둡게 눌러도 안전하다. 픽셀별 게이트/반전이 없으므로\n"
+        "    //   캐릭터 색이 뒤집히거나 뒤틀리지 않는다.\n"
+        "    col.rgb *= uFlashDim;\n"
         "\n"
         "    gl_FragColor = col;\n"
         "}\n";
@@ -129,18 +127,22 @@ void GameCanvas::setRecording(bool on) {
 void GameCanvas::setFlashGuard(bool on, float strength) {
     m_flashGuard    = on;
     m_flashStrength = std::clamp(strength, 0.0f, 1.0f);
-    m_prevBrightFrac= -1.0f;     // 재초기화
-    m_flashHold     = 0;
-    m_flashInvert   = 0.0f;
+    m_flashFrames   = 0;         // 재초기화
+    m_baseLuma      = -1.0f;
+    m_flashDim      = 1.0f;
 }
 
-// ── 플래시 감지 + 반전 강도 계산 ──────────────────────────────
-// 현재 프레임 평균 밝기를 베이스라인과 비교 → 급증(플래시)이면 반전 ON.
-// ★ 플래시 중에는 베이스라인을 동결(갱신 안 함) → 플래시 전체 구간을
-//   일정하게 억제하므로 "효과가 늦게 따라오는" 트레일링이 사라진다.
-// 다운샘플링으로 가볍게 측정 (~2000샘플). uploadFrame 에서 호출.
+// ── 플래시 감지 → 밝기 감쇠 계산 ─────────────────────────────
+// 판정은 "이 프레임이 거의 전부 하얀가?" 단 하나뿐이다.
+//   전체 번쩍임 프레임에는 배경/스프라이트가 그려지지 않아 화면이 균일한
+//   흰 채움이 된다. 반대로 일반 화면은 아무리 밝아도 스프라이트/배경 때문에
+//   흰 픽셀 비율이 이만큼 높아지지 않는다 → 이 하나로 충분히 구분된다.
+// ★ 예전의 "직전 프레임 대비 급증" 조건을 없앴다. 번쩍임이 여러 프레임에
+//   걸쳐 오르거나 연속 스트로브면 직전 프레임도 이미 밝아서 급증 조건이
+//   성립하지 않아 대부분의 번쩍임을 놓쳤다(간헐적 동작의 주원인).
+// 다운샘플링으로 가볍게 측정 (~2300샘플). uploadFrame 에서 호출.
 void GameCanvas::computeFlashGuard() {
-    if (!m_flashGuard) { m_flashInvert = 0.0f; return; }
+    if (!m_flashGuard) { m_flashDim = 1.0f; return; }
 
     const int w = static_cast<int>(gState.videoWidth);
     const int h = static_cast<int>(gState.videoHeight);
@@ -153,8 +155,9 @@ void GameCanvas::computeFlashGuard() {
     // 가로/세로 각각 ~48 지점만 샘플 (총 ~2300)
     const int stepX = std::max(1, w / 48);
     const int stepY = std::max(1, h / 48);
-    const int brightCut = 190;      // 밝은 픽셀 기준 (0~255, ~0.75)
+    const int brightCut = 200;      // "하얀" 픽셀 기준 (0~255, ~0.78)
     int bright = 0, n = 0;
+    long long lumaSum = 0;          // 평균 휘도용 누적
 
     for (int y = 0; y < h; y += stepY) {
         const uchar* row = buf + static_cast<size_t>(y) * pitch;
@@ -172,39 +175,45 @@ void GameCanvas::computeFlashGuard() {
             }
             int luma = (r * 77 + g * 150 + b * 29) >> 8;   // 0~255
             if (luma >= brightCut) ++bright;               // 밝은 픽셀 카운트
+            lumaSum += luma;
             ++n;
         }
     }
-    if (n == 0) { m_flashInvert = 0.0f; return; }
+    if (n == 0) { m_flashDim = 1.0f; return; }
 
-    // ── 밝은 픽셀 비율(brightFrac) 기반 "전체 번쩍임" 감지 ─────────
-    //   정상 화면: 밝은 요소(UI/글자)는 화면 일부 → 비율 낮음.
-    //   전체 번쩍임: 거의 모든 픽셀이 밝음 → 비율이 매우 높음.
-    float frac = static_cast<float>(bright) / static_cast<float>(n);   // 0~1
+    // 흰 픽셀 비율(전체 번쩍임이면 1.0 에 가깝다) + 이번 프레임 평균 휘도
+    const float frac     = static_cast<float>(bright) / static_cast<float>(n);   // 0~1
+    const float meanLuma = static_cast<float>(lumaSum) / (n * 255.0f);           // 0~1
 
-    if (m_prevBrightFrac < 0.0f) { m_prevBrightFrac = frac; m_flashInvert = 0.0f; return; }
+    const float wholeThresh  = 0.85f;   // 화면 85% 이상이 하얘야 "전체 번쩍임"
+    const int   sustainLimit = 90;      // 1.5초(60fps) 넘게 계속 하야면 번쩍임이
+                                        // 아니라 원래 밝은 장면
+    const float baseRate     = 1.0f / 15.0f;  // 베이스라인 EMA (최근 ~15프레임)
 
-    const float wholeThresh = 0.80f;   // 화면 80% 이상이 밝아야 "전체 번쩍임"
-    const float jumpThresh  = 0.25f;   // 직전 대비 비율이 급증해야 (밝은 스테이지 제외)
-    const int   maxHold     = 8;       // 안전 상한
+    const bool whiteFlash = (frac >= wholeThresh);
+    if (whiteFlash) ++m_flashFrames;
+    else            m_flashFrames = 0;
 
-    bool nearWhole = (frac > wholeThresh);
-    bool sudden    = (frac - m_prevBrightFrac > jumpThresh);
+    const bool isFlash = whiteFlash && (m_flashFrames <= sustainLimit);
 
-    // 새 번쩍임 시작: 화면 대부분이 갑자기 밝아짐
-    if (nearWhole && sudden && m_flashHold == 0)
-        m_flashHold = maxHold;
-
-    // 화면이 여전히 대부분 밝은(번쩍임 지속) 동안만 반전 유지
-    if (m_flashHold > 0 && nearWhole) {
-        m_flashInvert = m_flashStrength;
-        --m_flashHold;
-    } else {
-        m_flashHold   = 0;
-        m_flashInvert = 0.0f;
+    if (!isFlash) {
+        // ── 정상 프레임: 절대 손대지 않는다 (잔상 0) + 베이스라인 갱신 ──
+        //   지속적으로 하얀 장면(sustainLimit 초과)도 여기로 와서 베이스라인에
+        //   반영되므로, 원래 밝은 게임을 계속 어둡게 만들지 않는다.
+        if (m_baseLuma < 0.0f) m_baseLuma = meanLuma;
+        else                   m_baseLuma += (meanLuma - m_baseLuma) * baseRate;
+        m_flashDim = 1.0f;
+        return;
     }
 
-    m_prevBrightFrac = frac;
+    // ── 플래시 프레임: 최근 정상 프레임 평균 밝기에 맞춘다 ──────────
+    //   ratio = 베이스라인 / 현재밝기  → 이 배율을 곱하면 번쩍임 프레임이
+    //   주변 프레임과 같은 밝기가 되어 휘도 진동 자체가 사라진다.
+    //   (고정 배율로 검게 만들면 진동 방향만 바뀔 뿐 여전히 번쩍인다)
+    if (m_baseLuma < 0.0f || meanLuma <= 0.001f) { m_flashDim = 1.0f; return; }
+
+    const float ratio = std::clamp(m_baseLuma / meanLuma, 0.0f, 1.0f);  // 밝게는 안 함
+    m_flashDim = 1.0f - m_flashStrength * (1.0f - ratio);  // 강도 1.0 → ratio 그대로
 }
 void GameCanvas::setRotation(int rot) {
     m_rotation = rot;  // -1=auto, 0~3=manual
@@ -724,7 +733,7 @@ void GameCanvas::paintGL() {
         m_prog.setUniformValue("uCrtMode",      m_crtMode);
         m_prog.setUniformValue("uCrtIntensity", (float)m_crtIntensity);
         m_prog.setUniformValue("uTexH",         texLines);
-        m_prog.setUniformValue("uFlashInvert",  m_flashInvert);  // 플래시 감소(반전)
+        m_prog.setUniformValue("uFlashDim",     m_flashDim);     // 플래시 감소(밝기 감쇠)
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);

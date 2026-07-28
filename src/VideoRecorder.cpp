@@ -362,7 +362,12 @@ bool VideoRecorder::open(const QString& path, int width, int height, double fps,
     ret = av_image_alloc(VFRM->data, VFRM->linesize, width, height, AV_PIX_FMT_YUV420P, 32);
     if (ret < 0) { m_lastError = "av_image_alloc: " + avErr(ret); cleanupFFmpeg(); return false; }
 
-    AVPixelFormat srcFmt = (pixFmt == VPF_XRGB8888) ? AV_PIX_FMT_BGR32 : AV_PIX_FMT_RGB565LE;
+    // ★ 입력 픽셀 포맷 — 별칭(AV_PIX_FMT_BGR32 등)은 엔디언에 따라 의미가
+    //   뒤집혀 혼동을 부른다. 리틀엔디언에서 AV_PIX_FMT_BGR32 는 실제로 'rgba' 다.
+    //   libretro XRGB8888 은 메모리상 B,G,R,X 순서(= bgra) 이므로 AV_PIX_FMT_BGRA
+    //   를 명시해야 한다. 예전엔 BGR32(rgba)를 줘서 R↔B 가 뒤바뀐 영상이 저장됐다
+    //   (스크린샷은 Qt Format_RGB32=bgra 라 정상이었고 녹화 영상만 색이 틀어짐).
+    AVPixelFormat srcFmt = (pixFmt == VPF_XRGB8888) ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGB565LE;
     m_swsCtx = sws_getContext(width, height, srcFmt, width, height, AV_PIX_FMT_YUV420P,
                               SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!m_swsCtx) { m_lastError = "sws_getContext failed"; cleanupFFmpeg(); return false; }

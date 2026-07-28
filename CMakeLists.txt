@@ -35,6 +35,7 @@ set(SOURCES
     src/CheatManager.cpp
     src/GamepadManager.cpp
     src/VideoRecorder.cpp
+    src/PreviewVideo.cpp
     src/MainWindow.cpp
 )
 
@@ -54,6 +55,7 @@ set(HEADERS
     src/GamepadManager.h
     src/GameNamesDb.h
     src/VideoRecorder.h
+    src/PreviewVideo.h
     src/MainWindow.h
 )
 
@@ -223,6 +225,15 @@ add_custom_command(TARGET FBNeoRageX POST_BUILD
         "${CMAKE_SOURCE_DIR}/assets"
         "$<TARGET_FILE_DIR:FBNeoRageX>/assets"
     COMMENT "Copying assets..."
+)
+
+# names.txt (게임 이름 간편 변경) — 없을 때만 복사해 사용자 편집분을 보존
+add_custom_command(TARGET FBNeoRageX POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC=${CMAKE_SOURCE_DIR}/names.txt
+        -DDST=$<TARGET_FILE_DIR:FBNeoRageX>/names.txt
+        -P ${CMAKE_SOURCE_DIR}/cmake/CopyIfMissing.cmake
+    COMMENT "Copying names.txt (if missing)..."
 )
 
 

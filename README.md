@@ -10,6 +10,27 @@
 
 ## 📋 Update History / 업데이트 내역
 
+### v2.1 (2026-07)
+
+| | English | 한국어 |
+|---|---|---|
+| ✨ NEW | **Simple game-name file (`names.txt`)** — Rename list entries with one line each: `kof94 = 더 킹 오브 파이터즈 94`. Takes priority over `gamelist.xml`, so you can override just the titles you care about. UTF-8, `#`/`;` comments, `=` or Tab separator. | **게임 이름 간편 변경 (`names.txt`)** — `kof94 = 더 킹 오브 파이터즈 94` 처럼 한 줄로 이름 지정. `gamelist.xml` 보다 우선하므로 원하는 게임만 골라 덮어쓸 수 있음. UTF-8, `#`/`;` 주석, `=` 또는 탭 구분. |
+| ✨ NEW | **UI language toggle (KO / EN)** — 🌐 button in the Options panel switches menu text instantly; the choice is saved. | **메뉴 한/영 전환** — 옵션 패널의 🌐 버튼으로 즉시 전환되며 설정이 저장됨. |
+| ✨ NEW | **Dedicated Service (TEST) key** — Service input is now sent only by its own hotkey (default `` ` ``), fully separated from START-hold. Games that require holding START no longer trigger the operator menu. | **서비스(TEST) 전용 키 분리** — 전용 핫키(기본 `` ` ``)로만 서비스 입력 전송, START 길게 누르기와 완전 분리. START를 오래 눌러야 하는 게임에서 오작동 없음. |
+| ✨ NEW | **Portable folder layout** — All user data (`roms`, `previews`, `screenshots`, `saves`, `cheats`, `recordings`, `config.json`) now lives next to the program on both Windows and Steam Deck. Old Linux XDG settings are migrated automatically. | **포터블 폴더 구조** — 모든 사용자 데이터를 Windows·Steam Deck 모두 프로그램 폴더 아래로 통일. 기존 Linux XDG 설정은 자동 이관. |
+| ✨ NEW | **Game list remembers your place** — The last played game is restored on the next launch, and toggling a favorite no longer jumps the list back to the top. | **게임 목록 위치 기억** — 마지막 플레이 게임을 다음 실행 때 복원하고, 즐겨찾기해도 목록이 맨 위로 튀지 않음. |
+| 🔧 CHANGE | **Flash Reduction rebuilt** — Now matches a white-flash frame to the surrounding brightness instead of inverting colors, following Xbox XAG 118 / WCAG 2.3.1 guidance (reduce contrast, don't invert). No color distortion, no trailing. | **플래시 감소 재작성** — 색반전 대신 번쩍임 프레임을 주변 밝기에 맞추는 방식(Xbox XAG 118 / WCAG 2.3.1 권고 = 대비 감소). 캐릭터 색 뒤틀림·잔상 없음. |
+| 🐛 FIX | **Preview video on Steam Deck** — Preview playback used to crash the app. Replaced Qt Multimedia with a built-in software decoder (no VAAPI/Vulkan hardware path), with audio and audio-master A/V sync. Preview now cycles image → video → image. | **스팀덱 프리뷰 영상** — 재생 시 앱이 종료되던 문제 해결. Qt 멀티미디어 대신 자체 소프트웨어 디코더 사용(하드웨어 디코딩 경로 없음), 사운드 + 오디오 기준 싱크 적용. 이미지 → 영상 → 이미지 순환 표시. |
+| 🐛 FIX | **Recorded video colors (Linux)** — Recordings had red and blue swapped (`AV_PIX_FMT_BGR32` resolves to `rgba` on little-endian, but libretro XRGB8888 is `bgra`). Screenshots were unaffected. | **녹화 영상 색상 (Linux)** — 녹화본의 R/B가 뒤바뀌던 문제 수정(리틀엔디언에서 `AV_PIX_FMT_BGR32`는 실제로 `rgba`, libretro XRGB8888은 `bgra`). 스크린샷은 영향 없었음. |
+| 🐛 FIX | **Video recording on Steam Deck** — Recording was silently disabled because FFmpeg dev headers were missing from the build dependencies. | **스팀덱 녹화 기능** — FFmpeg 개발 헤더가 빌드 의존성에서 빠져 녹화가 비활성화되던 문제 수정. |
+| 🐛 FIX | **Stuck keys after Tab** — Returning from the GUI to the game could leave every key pressed. Input state is now cleared symmetrically on entering the game screen. | **탭 전환 후 키 고착** — GUI에서 게임으로 복귀 시 모든 키가 눌린 상태로 남던 문제 수정. 게임 화면 진입 시에도 입력 상태를 초기화. |
+| 🐛 FIX | **Netplay disconnect** — DISCONNECT left the relay polling loop alive, so re-hosting/re-joining failed until restart. | **넷플레이 디스커넥트** — 릴레이 폴링이 살아남아 재호스트·재조인이 안 되던 문제 수정. |
+| 🐛 FIX | **Relay address hidden** — The built-in relay URL is no longer shown anywhere, including error logs. | **릴레이 주소 비노출** — 내장 릴레이 주소가 오류 로그를 포함해 어디에도 표시되지 않음. |
+| 🐛 FIX | **GUI box sizes fixed** — Panels are sized purely by ratio (top:bottom 5:4, left:right 3:5) and no longer shift when the game list or event log fills up. Window resizing scales them proportionally. | **GUI 박스 크기 고정** — 패널 크기를 비율(위:아래 5:4, 좌:우 3:5)로만 결정해 목록·로그가 채워져도 변하지 않음. 창 크기 변경 시 비례 확대·축소. |
+| 🐛 FIX | **Options scrolling & key mapping** — The Controls page is now scrollable, so keyboard/gamepad/arcade-stick mapping tables are reachable. Combo boxes no longer swallow the mouse wheel (which blocked page scrolling and changed values by accident). | **옵션 스크롤·키 매핑** — 컨트롤 페이지 스크롤 적용으로 키보드/패드/아케이드 스틱 매핑 표 접근 가능. 콤보박스가 휠을 가로채 스크롤을 막고 값이 바뀌던 문제 수정. |
+| 🐛 FIX | **Cheats** — Cheat files are now handed to FBNeo's own cheat engine (`<system>/fbneo/cheats/`), so they behave exactly as in RetroArch instead of relying on address guessing. | **치트** — 치트 파일을 FBNeo 자체 치트 엔진(`<system>/fbneo/cheats/`)에 전달해 RetroArch와 동일하게 동작. 주소 추측 방식 제거. |
+| 🐛 FIX | **Preview save** — Preview shots/clips are saved as `{rom}.png` / `{rom}.mp4`, overwrite cleanly, and appear immediately without reselecting the game. | **프리뷰 저장** — `{rom}.png` / `{rom}.mp4` 로 저장·덮어쓰기되며, 게임을 다시 선택하지 않아도 즉시 반영. |
+
 ### v2.0 (2026-05)
 
 | | English | 한국어 |
@@ -54,10 +75,12 @@
   **4분할 UI** — 게임 목록 / 옵션 / 프리뷰 / 이벤트 로그
 - 🔍 **Game list** — ROM scan, search filter, favorites (★)  
   **게임 목록** — ROM 자동 검색, 필터, 즐겨찾기 (★)
-- 🌏 **Korean game names** — Supports `gamelist.xml` (라즈겜동 format) for Korean titles  
-  **한글 게임명** — `gamelist.xml` (라즈겜동 형식) 자동 인식으로 한글 게임명 표시
-- 🖼️ **Preview** — PNG preview image → auto-plays MP4 after 3 seconds  
-  **프리뷰** — PNG 미리보기 → 3초 후 MP4 자동 재생
+- 🌏 **Korean game names** — Supports `gamelist.xml` (라즈겜동 format), or edit `names.txt` one line at a time (`kof94 = 더 킹 오브 파이터즈 94`)  
+  **한글 게임명** — `gamelist.xml` (라즈겜동 형식) 자동 인식, 또는 `names.txt`에 한 줄씩 직접 지정 (`kof94 = 더 킹 오브 파이터즈 94`)
+- 🌐 **UI language toggle** — switch menus between Korean and English instantly (saved)  
+  **메뉴 한/영 전환** — 옵션 패널의 🌐 버튼으로 즉시 전환, 설정 저장
+- 🖼️ **Preview** — preview image → video → image, cycling automatically (with sound)  
+  **프리뷰** — 이미지 → 영상 → 이미지 자동 순환 표시 (사운드 포함)
 - 💾 **Save States** — 8 slots (F1–F8 load / Shift+F1–F8 save)  
   **세이브스테이트** — 8슬롯 (F1–F8 로드 / Shift+F1–F8 저장)
 - ⏩ **Fast Forward** — uncapped speed (F11)  
@@ -80,16 +103,18 @@
   **컨트롤러 지원** — XInput / WinMM (아케이드 스틱) / 키보드, 전역/기종별/게임별 저장
 - ⌨️ **Configurable hotkeys** — remap with modifiers, reset-to-default & save  
   **핫키 설정** — 모디파이어 포함 재배정, 기본값 복원·저장
-- 👁️ **Flash reduction** — inverts full-screen white flashes to dark (eye protection)  
-  **플래시 감소** — 전체 화면 흰 번쩍임을 검게 반전 (눈 보호)
+- 👁️ **Flash reduction** — matches full-screen white flashes to the surrounding brightness (eye protection, no color distortion)  
+  **플래시 감소** — 전체 화면 흰 번쩍임을 주변 밝기에 맞춰 억제 (눈 보호, 색 왜곡 없음)
 - 🕹️ **Turbo buttons** — per-button toggle  
   **터보 버튼** — 버튼별 독립 터보 설정
 - 📺 **CRT shader** — scanlines, RGB mask, vignette, bloom  
   **CRT 쉐이더** — 스캔라인, RGB 마스크, 비네트, 블룸
 - 🎛️ **Machine settings** — DIP switches, savable per-platform / per-game  
   **머신 세팅** — DIP 스위치, 기종별/게임별 저장
-- 🔒 **Service mode protection** — arcade test menu blocked by default  
-  **서비스 모드 보호** — 아케이드 테스트 메뉴 기본 차단
+- 🔒 **Service mode protection** — arcade test menu blocked by default; sent only by a dedicated hotkey (separate from START-hold)  
+  **서비스 모드 보호** — 아케이드 테스트 메뉴 기본 차단, 전용 핫키로만 진입 (START 길게 누르기와 분리)
+- 📁 **Portable layout** — all data (roms / previews / saves / cheats / recordings / config) sits next to the program  
+  **포터블 구조** — 모든 데이터(roms / previews / saves / cheats / recordings / config)가 프로그램 폴더 아래에 모임
 
 ---
 
@@ -299,18 +324,30 @@ Steam Deck에는 F키가 없으므로 **Steam Input**으로 매핑합니다.
 Arcade boards have an internal service/test menu.  
 아케이드 기판에는 내부 서비스 메뉴가 있습니다.
 
-| System / 기판 | Service Trigger / 서비스 트리거 | Protection / 보호 |
-|--------|----------------|------------|
-| CPS1 / CPS2 | L2 button | **Blocked by default / 기본 차단** |
-| NeoGeo MVS | START button hold | **Use AES mode / AES 모드 사용** |
+**v2.1 — Dedicated service key / 서비스 전용 키**
 
-**Intentional access / 의도적 접근:**  
-Press `` ` `` while a game is running → Service Mode activates for **5 seconds**.  
-게임 실행 중 `` ` `` 키 → **5초간** 서비스 모드 허용 (LT/L2 차단 해제).
+The service (TEST) input is now sent **only** by its own hotkey, and is blocked at all other times.
+It is completely separated from the gamepad L2 button and from holding START, so games that need a
+long START press no longer open the operator menu by accident.
 
-**NeoGeo fix / NeoGeo 해결:**  
-**Options → Machine → Neo-Geo Mode → `aes`**  
-AES 모드는 오퍼레이터 테스트 메뉴가 없으며 보스 선택 커맨드는 정상 동작합니다.
+서비스(TEST) 입력은 이제 **전용 핫키로만** 전송되며, 그 외에는 항상 차단됩니다.
+게임패드 L2 버튼이나 START 길게 누르기와 완전히 분리되어, START를 오래 눌러야 하는 게임에서
+오퍼레이터 메뉴가 실수로 열리지 않습니다.
+
+| | English | 한국어 |
+|---|---|---|
+| Key / 키 | `` ` `` (default, remappable in Options → Controls → Hotkeys) | `` ` `` (기본값, 옵션 → 컨트롤 → 핫키 설정에서 변경 가능) |
+| Behaviour / 동작 | One press = one service input sent to the board | 한 번 누르면 서비스 입력 1회 전송 |
+| Otherwise / 평소 | Service input is always blocked | 서비스 입력은 항상 차단 |
+
+**NeoGeo MVS note / NeoGeo 참고:**  
+The MVS BIOS itself watches for a long START press, which a frontend cannot intercept.  
+If it still bothers you: **Options → Machine → Neo-Geo Mode → `aes`** — AES has no operator test
+menu, and boss-select commands keep working.
+
+MVS BIOS 자체가 START 길게 누르기를 감지하므로 프론트엔드에서 가로챌 수 없습니다.  
+그래도 불편하면 **옵션 → 머신 → Neo-Geo Mode → `aes`** 로 바꾸세요. AES는 오퍼레이터 테스트
+메뉴가 없고 보스 선택 커맨드는 정상 동작합니다.
 
 ---
 
@@ -481,6 +518,8 @@ FBNeoRageX/
 ├── FBNeoRageX.exe          ← Main executable (Windows) / 실행 파일
 ├── fbneo_libretro.dll      ← FBNeo libretro core (required) / 코어 (필수, 미포함)
 ├── gamelist.xml            ← Korean game names (optional) / 한글 게임명 (선택, 미포함)
+├── names.txt               ← Simple name overrides / 게임 이름 간편 변경 (gamelist.xml 보다 우선)
+├── config.json             ← Settings (auto-created) / 설정 파일
 ├── assets/                 ← UI assets (fonts, shaders) / UI 에셋
 ├── roms/                   ← Place your ROM ZIPs here / ROM 파일 폴더
 ├── saves/                  ← Save states (auto-created) / 세이브스테이트
@@ -495,12 +534,54 @@ FBNeoRageX/
 ~/FBNeoRageX/
 ├── FBNeoRageX.sh           ← Launcher / 런처
 ├── gamelist.xml            ← Korean game names (optional) / 한글 게임명 (선택)
+├── names.txt               ← Simple name overrides / 게임 이름 간편 변경
+├── config.json             ← Settings / 설정 파일
+├── roms/                   ← ROM ZIPs / ROM 파일
+├── previews/               ← Preview images/videos / 프리뷰 이미지·영상
+├── screenshots/            ← Screenshots / 스크린샷
+├── recordings/             ← Video recordings / 녹화 영상
+├── saves/                  ← Save states / 세이브스테이트
+├── cheats/                 ← Cheat files (.ini) / 치트 파일
 ├── bin/
 │   ├── FBNeoRageX          ← Binary / 바이너리
 │   └── fbneo_libretro.so   ← Core / 코어
 ├── lib/                    ← Qt libraries / Qt 라이브러리
 └── plugins/                ← Qt plugins / Qt 플러그인
 ```
+
+> **v2.1 —** All user data now lives next to the program (portable). Settings from older Linux builds
+> (`~/.local/share/FBNeoRageX/…`) are migrated automatically; move your existing `previews`,
+> `saves` and `cheats` folders here if you want to keep them.
+>
+> **v2.1 —** 모든 사용자 데이터가 프로그램 폴더 아래로 모입니다(포터블). 이전 Linux 빌드의 설정
+> (`~/.local/share/FBNeoRageX/…`)은 자동 이관되며, 기존 `previews`·`saves`·`cheats` 폴더는
+> 직접 이 위치로 옮기시면 그대로 사용됩니다.
+
+---
+
+## 🏷️ Game Names (`names.txt`) / 게임 이름 간편 변경
+
+Rename entries in the game list with one line each — no XML editing required.  
+게임 목록에 표시될 이름을 한 줄씩 지정합니다. XML을 편집할 필요가 없습니다.
+
+```ini
+# names.txt  (UTF-8)
+kof94  = 더 킹 오브 파이터즈 94
+mslug3 = 메탈슬러그 3
+sfa3   = 스트리트 파이터 제로 3
+```
+
+| Rule | English | 한국어 |
+|---|---|---|
+| Location / 위치 | Next to `FBNeoRageX.exe` (Steam Deck: next to `FBNeoRageX.sh`) | `FBNeoRageX.exe` 와 같은 폴더 (스팀덱은 `FBNeoRageX.sh` 옆) |
+| Encoding / 인코딩 | Must be saved as **UTF-8** | 반드시 **UTF-8** 로 저장 |
+| Separator / 구분자 | `=` or Tab; surrounding spaces ignored | `=` 또는 탭, 앞뒤 공백 무시 |
+| Comments / 주석 | Lines starting with `#` or `;` | `#` 또는 `;` 로 시작하는 줄 |
+| Priority / 우선순위 | `names.txt` → `gamelist.xml` → built-in DB → ROM name | `names.txt` → `gamelist.xml` → 내장 DB → 롬 이름 |
+| Apply / 적용 | Restart the program | 프로그램 재시작 후 반영 |
+
+`.zip` may be included in the ROM name (`kof94.zip = …`). Games not listed here keep their existing names.  
+롬 이름에 `.zip` 을 붙여도 됩니다. 여기 없는 게임은 기존 이름을 그대로 씁니다.
 
 ---
 

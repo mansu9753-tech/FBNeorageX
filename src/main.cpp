@@ -102,6 +102,11 @@ int main(int argc, char* argv[])
     // ── 작업 디렉터리를 실행파일 위치로 고정 ──────────────
     QDir::setCurrent(QCoreApplication::applicationDirPath());
 
+    // ── 기본 경로 확정 (반드시 QApplication 이후, load() 이전) ───
+    //   gSettings 는 정적 초기화 시점에 생성되어 그때는 applicationDirPath()
+    //   가 비어 있다 → 여기서 프로그램 폴더 기준으로 다시 설정한다.
+    gSettings.initDefaults();
+
     // ── 크래시 진단 로그 파일 오픈 (실행파일 위치, 즉시 flush) ───
     // QApplication 생성 이후에 applicationDirPath()가 유효해짐.
     // C FILE* 사용 — QFile(QObject)을 전역 정적으로 쓰면 main() 전에
@@ -115,8 +120,8 @@ int main(int argc, char* argv[])
             (QCoreApplication::applicationDirPath() + "/crash_log.txt").toStdWString();
         g_logFp = _wfopen(logPath.c_str(), L"w");
 #else
-        QByteArray logPath =
-            (QCoreApplication::applicationDirPath() + "/crash_log.txt").toUtf8();
+        // 번들 루트(FBNeoRageX.sh 옆)에 남겨 사용자가 바로 찾을 수 있게 한다
+        QByteArray logPath = (AppSettings::baseDir() + "/crash_log.txt").toUtf8();
         g_logFp = fopen(logPath.constData(), "w");
 #endif
         if (g_logFp) {

@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QXmlStreamReader>
 #include <QCoreApplication>
+#include <QTextStream>      // names.txt 파싱
 
 inline const QHash<QString, QString>& gameNamesDb() {
     static const QHash<QString, QString> db = {
@@ -271,9 +272,65 @@ inline const QHash<QString, QString>& gamelistXmlDb() {
     return db;
 }
 
-// 표시명 반환: gamelist.xml → 내장 DB → 대문자 romName 순으로 조회
+// ════════════════════════════════════════════════════════════
+//  간편 이름 파일 (names.txt) — 사용자가 직접 편집하는 최우선 이름표
+//  형식 (한 줄에 하나, 아주 단순):
+//      kof94 = 더 킹 오브 파이터즈 94
+//      mslug3=메탈슬러그 3
+//      ; 또는 # 로 시작하면 주석
+//  · 구분자는 '=' 또는 탭. 앞뒤 공백은 무시.
+//  · gamelist.xml 보다 우선한다 → xml 을 건드리지 않고 원하는 것만 덮어쓸 수 있다.
+//  탐색: exe 폴더/names.txt → exe 폴더/../names.txt (스팀덱 bin/ 구조 대응)
+// ════════════════════════════════════════════════════════════
+inline const QHash<QString, QString>& userNamesDb() {
+    static QHash<QString, QString> db;
+    static bool loaded = false;
+    if (loaded) return db;
+    loaded = true;
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        appDir + "/names.txt",
+        QDir(appDir + "/..").absolutePath() + "/names.txt"
+    };
+    for (const QString& path : candidates) {
+        QFile f(path);
+        if (!f.exists() || !f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+
+        QTextStream ts(&f);
+        ts.setEncoding(QStringConverter::Utf8);   // 한글 = UTF-8
+        int n = 0;
+        while (!ts.atEnd()) {
+            QString line = ts.readLine().trimmed();
+            if (line.isEmpty() || line.startsWith('#') || line.startsWith(';')) continue;
+
+            int sep = line.indexOf('=');
+            if (sep < 0) sep = line.indexOf('\t');
+            if (sep <= 0) continue;                       // 구분자 없음 → 건너뜀
+
+            const QString rom  = line.left(sep).trimmed().toLower();
+            QString name = line.mid(sep + 1).trimmed();
+            if (rom.isEmpty() || name.isEmpty()) continue;
+            // "kof94.zip = ..." 처럼 확장자를 적어도 받아준다
+            QString key = rom;
+            if (key.endsWith(".zip", Qt::CaseInsensitive)) key.chop(4);
+            db.insert(key, name);
+            ++n;
+        }
+        qDebug() << "[names.txt] 로드:" << path << n << "개";
+        break;   // 먼저 찾은 것 하나만 사용
+    }
+    return db;
+}
+
+// 표시명 반환: names.txt → gamelist.xml → 내장 DB → 대문자 romName 순으로 조회
 inline QString getGameDisplayName(const QString& romName) {
     const QString key = romName.toLower();
+
+    // 0순위: 사용자 간편 이름 파일 (names.txt)
+    const auto& userDb = userNamesDb();
+    auto userIt = userDb.find(key);
+    if (userIt != userDb.end()) return userIt.value();
 
     // 1순위: 사용자 gamelist.xml (라즈겜동 한글화)
     const auto& xmlDb = gamelistXmlDb();

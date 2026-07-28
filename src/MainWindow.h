@@ -4,6 +4,8 @@
 #include <algorithm>
 
 #include <QMainWindow>
+#include <QPointer>
+#include <QVector>
 #include <QStackedWidget>
 #include <QListWidget>
 #include <QTableWidget>
@@ -17,6 +19,7 @@
 #include <QCheckBox>
 #include <QSlider>
 #include <QSpinBox>
+#include <QAbstractSpinBox>   // 휠 가드 (QSpinBox/QDoubleSpinBox 공통 기반)
 #include <QPushButton>
 #include <QScrollBar>
 #include <QScrollArea>
@@ -27,9 +30,11 @@
 #include <QMediaPlayer>
 #include <QVideoWidget>
 
+#include "AppSettings.h"   // gSettings (isEn() 인라인에서 사용)
 #include "BorderPanel.h"
 #include "GameCanvas.h"
 #include "VideoRecorder.h"
+#include "PreviewVideo.h"   // 프리뷰 영상 자체 디코더 (Linux/FFmpeg)
 #include "LibretroCore.h"
 #include "AudioManager.h"
 #include "NetplayManager.h"
@@ -122,9 +127,38 @@ private:
     void applySettings();
     void refreshSettingsUi();
 
+    // ── GUI 한/영 전환 ───────────────────────────────────
+    //   위젯을 다시 만들지 않고 텍스트만 갈아끼운다 → 레이아웃/시그널 연결에
+    //   전혀 영향을 주지 않으므로 기존 동작(멀티플레이 등)이 그대로 유지된다.
+    struct TrEntry {
+        QPointer<QWidget> w;
+        QString ko, en;
+        int kind;              // 0 = 표시 텍스트, 1 = 툴팁
+    };
+    QVector<TrEntry> m_trEntries;
+    QPushButton*     m_langBtn = nullptr;
+
+    void trText(QWidget* w, const QString& ko, const QString& en);  // 등록 + 즉시 적용
+    void trTip (QWidget* w, const QString& ko, const QString& en);
+    void trPlaceholder(QWidget* w, const QString& ko, const QString& en);
+    void applyTrEntry(const TrEntry& e);
+    void retranslateUi();      // 등록된 모든 위젯을 현재 언어로 갱신
+    void toggleLanguage();     // ko ↔ en 전환 + 저장
+    static bool isEn() { return gSettings.uiLanguage == "en"; }
+
     // ── 즐겨찾기 ────────────────────────────────────────
     void toggleFavorite(const QString& romName);
     bool isFavorite(const QString& romName) const;
+
+    // 옵션 패널의 콤보/스핀/슬라이더가 휠을 가로채 스크롤을 막는 것 방지.
+    //   동적으로 다시 만들어지는 페이지(머신세팅/치트)는 갱신 후 다시 호출해야 한다.
+    void applyWheelGuard(QWidget* root);
+    QObject* m_wheelGuard = nullptr;
+
+    // FBNeo 네이티브 치트 엔진 연동: <system_dir>/fbneo/cheats/ 로 ini 복사
+    void syncCheatsToSystemDir(const QString& romName);
+    // 코어가 치트를 옵션으로 등록했는가 → true 면 수동 RAM 쓰기 엔진을 끈다
+    bool m_nativeCheatsActive = false;
 
     // ── 치트 UI 갱신 ─────────────────────────────────────
     void refreshCheatList();
@@ -175,7 +209,7 @@ private:
     QString m_hotkeyCapture;       // 핫키 캡처 중인 action (빈 문자열=비캡처)
 
     // 핫키 정의 테이블
-    struct HotkeyDef { const char* action; const char* label; int key; int mods; };
+    struct HotkeyDef { const char* action; const char* label; const char* labelEn; int key; int mods; };
     static const HotkeyDef* hotkeyDefs(int* count);
 
     // ════════════════════════════════════════════════════
@@ -207,7 +241,8 @@ private:
     QStackedWidget*  m_previewStack   = nullptr;
     QLabel*          m_previewLabel   = nullptr;
     QVideoWidget*    m_videoWidget    = nullptr;
-    QMediaPlayer*    m_mediaPlayer    = nullptr;
+    QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
+    PreviewVideo*    m_previewVideo   = nullptr;   // Linux: 자체 소프트웨어 디코더
     QTimer*          m_previewVidTimer= nullptr;
 
     QTextEdit*       m_logEdit        = nullptr;
@@ -304,6 +339,11 @@ private:
     // START 연속 홀드 프레임 카운터 (서비스 메뉴 우발 진입 방지)
     // serviceMode=false 상태에서 90프레임 초과 → keys[3]=0 강제
     int  m_startHoldFrames = 0;
+    // ── 전용 서비스(TEST) 입력 펄스 ──────────────────────
+    //   전용 핫키를 누르면 이 카운터가 세팅되고, 그 프레임 수만큼 코어에
+    //   서비스/테스트 입력(L2, index 12)을 직접 assert 한다. START 홀드·게임패드
+    //   L2 와 완전히 분리된 "마메식 전용 서비스 키"를 모든 기종에 제공.
+    int  m_serviceHoldFrames = 0;
 
     // ── 코어 / 오디오 / 치트 / 게임패드 ─────────────────
     LibretroCore*    m_core    = nullptr;
@@ -316,7 +356,13 @@ private:
     void relayRegister(const QString& code, const QString& role,
                        const QString& ip, int port);
     void relayPollPeer(const QString& code, const QString& myRole, int tries = 0);
+    static QString redactRelayUrl(const QString& s);   // 로그에서 릴레이 주소 마스킹
     QTimer* m_relayPollTimer = nullptr;
+    // 릴레이 폴링 '세대' — 새 HOST/JOIN 또는 DISCONNECT 마다 증가시킨다.
+    // 진행 중인 폴링 루프(1초 재시도 + in-flight GET 응답)는 자신이 시작될 때의
+    // 세대를 기억했다가, 현재 세대와 다르면 스스로 종료한다. 이렇게 해야
+    // 디스커넥트 후에도 옛 루프가 살아남아 재연결을 방해하는 일이 없다.
+    int  m_relayPollGen = 0;
     // 피어 발견 처리 중복 방지: relayRegister(POST) 와 relayPollPeer(GET) 가
     // 둘 다 워커에서 피어를 받아 clientStartHandshake/probe 를 이중 실행하던 문제 차단.
     bool m_relayPeerHandled = false;
