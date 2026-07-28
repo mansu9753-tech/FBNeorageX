@@ -1,0 +1,25 @@
+title: FBNeoRageX
+description: >-
+  FinalBurn Neo (libretro) arcade emulator frontend for Windows and Steam Deck.
+  Qt6 · GGPO netplay · Korean game names ·
+  윈도우/스팀덱용 아케이드 에뮬레이터 프론트엔드 (한글 게임명 지원)
+url: "https://mansu9753-tech.github.io"
+baseurl: "/FBNeorageX"
+
+theme: jekyll-theme-cayman
+lang: ko
+
+# sitemap.xml 자동 생성 → 구글 서치 콘솔 / 네이버 서치어드바이저에 제출
+plugins:
+  - jekyll-sitemap
+
+# 저장소 파일이 사이트로 딸려 들어가지 않게 제외
+exclude:
+  - src/
+  - build_static/
+  - build_linux/
+  - assets/
+  - cmake/
+  - names.txt
+  - "*.sh"
+  - "*.bat"
