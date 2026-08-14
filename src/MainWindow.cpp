@@ -36,6 +36,7 @@
 #include <QUrl>
 #include <QAudioBuffer>
 #include <QAudioFormat>
+#include <QMediaDevices>   // 클릭음 출력 장치
 #include <QAudioOutput>
 #include <QVideoFrame>
 #include <QMediaFormat>
@@ -576,11 +577,7 @@ MainWindow::MainWindow(QWidget* parent)
     qApp->installEventFilter(this);
 
     // ── 마우스 클릭음 (원본 NeoRageX 느낌) ────────────────────
-    //   리소스에 내장 → 윈도우 단일 exe 에서도 파일 없이 동작한다.
-    //   짧은 UI 효과음이라 QSoundEffect 가 적합(디코딩 없이 즉시 재생).
-    m_clickSfx = new QSoundEffect(this);
-    m_clickSfx->setSource(QUrl("qrc:/assets/clik.wav"));
-    m_clickSfx->setVolume(0.35);
+    loadClickSound();
 
     // 마우스 커서 자동 숨김 타이머 (3초 비입력 시 숨김)
     m_cursorTimer = new QTimer(this);
@@ -1059,6 +1056,8 @@ void MainWindow::buildMainTab() {
     // 배경색은 영상 미재생 시(placeholder 대체 직전)에만 영향. 검정 유지.
     m_videoWidget->setStyleSheet("background:#000008;");
     m_videoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    // 레터박스 없이 영역을 꽉 채운다 (넘치는 부분은 잘림) — Windows 재생 경로
+    m_videoWidget->setAspectRatioMode(Qt::KeepAspectRatioByExpanding);
     m_previewStack = new QStackedWidget;
     // QStackedWidget 도 palette 색 자동 채움이 활성화되어 있어
     // BorderPanel 의 반투명 내부 오버레이를 가려버린다. 명시적 해제.
@@ -1075,8 +1074,8 @@ void MainWindow::buildMainTab() {
     m_previewVideo = new PreviewVideo(this);
     connect(m_previewVideo, &PreviewVideo::frameReady, this, [this](const QImage& img){
         if (!m_previewLabel || img.isNull()) return;
-        m_previewLabel->setPixmap(QPixmap::fromImage(img).scaled(
-            m_previewLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        // 이미지와 동일하게 레터박스 없이 꽉 채운다
+        m_previewLabel->setPixmap(fitPreviewPixmap(QPixmap::fromImage(img)));
     });
     connect(m_previewVideo, &PreviewVideo::failed, this, [this](const QString& why){
         log("⚠ 프리뷰 영상 재생 불가: " + why);
@@ -1111,7 +1110,8 @@ void MainWindow::buildMainTab() {
     connect(m_previewVidTimer, &QTimer::timeout, this, [this]{ loadPreviewVideo(m_selectedGame); });
     // 좌측 패널: 오른쪽 코너는 EVENTS 와 맞닿으므로 직각
     m_previewPanel->setRoundedCorners(BorderPanel::CornerTL | BorderPanel::CornerBL);
-    hBot->addWidget(m_previewPanel, 3);
+    // 프리뷰 : 이벤트 = 4 : 5 (기존 3:5 → 프리뷰 박스를 더 크게)
+    hBot->addWidget(m_previewPanel, 4);
 
     m_eventsPanel = new BorderPanel("EVENTS");
     m_logEdit = new QTextEdit;
@@ -3253,6 +3253,23 @@ void MainWindow::selectGame(const QString& romName) {
     loadPreview(romName);
 }
 
+// 프리뷰 영역을 레터박스 없이 꽉 채운다.
+//   비율을 유지한 채 영역보다 크게 확대한 뒤 가운데를 잘라낸다.
+//   (KeepAspectRatio 는 남는 쪽에 검은 띠가 생겨 화면이 작아 보였다)
+QPixmap MainWindow::fitPreviewPixmap(const QPixmap& src) const {
+    if (src.isNull() || !m_previewLabel) return src;
+    const QSize target = m_previewLabel->size();
+    if (target.width() < 4 || target.height() < 4) return src;
+
+    const QPixmap big = src.scaled(target, Qt::KeepAspectRatioByExpanding,
+                                   Qt::SmoothTransformation);
+    const int x = (big.width()  - target.width())  / 2;
+    const int y = (big.height() - target.height()) / 2;
+    return big.copy(QRect(qMax(0, x), qMax(0, y),
+                          qMin(target.width(),  big.width()),
+                          qMin(target.height(), big.height())));
+}
+
 void MainWindow::loadPreview(const QString& romName) {
     // 이전 영상 정지 + 이미지 모드로 복귀
 #if HAVE_FFMPEG
@@ -3268,9 +3285,7 @@ void MainWindow::loadPreview(const QString& romName) {
         if (QFile::exists(path)) {
             QPixmap px(path);
             if (!px.isNull()) {
-                m_previewLabel->setPixmap(
-                    px.scaled(m_previewLabel->size(),
-                              Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                m_previewLabel->setPixmap(fitPreviewPixmap(px));
                 // 3초 후 영상 자동재생 시작
                 if (m_previewVidTimer) m_previewVidTimer->start();
                 return;
@@ -4340,6 +4355,71 @@ void MainWindow::stopRecording() {
     }
 }
 
+// ════════════════════════════════════════════════════════════
+//  마우스 클릭음 — WAV(PCM) 직접 재생
+//  · QSoundEffect 는 두어 번 재생하면 소리가 끊기는 문제가 있어 쓰지 않는다.
+//    (백엔드 스트림이 재시작되지 않아 이후 play() 가 무음이 됨)
+//  · 리소스에서 PCM 을 한 번 읽어 두고, 클릭마다 sink 를 재시작한다.
+// ════════════════════════════════════════════════════════════
+void MainWindow::loadClickSound() {
+    QFile f(":/assets/clik.wav");
+    if (!f.open(QIODevice::ReadOnly)) { qWarning("클릭음 리소스 없음"); return; }
+    const QByteArray wav = f.readAll();
+    f.close();
+    if (wav.size() < 44 || !wav.startsWith("RIFF") || wav.mid(8, 4) != "WAVE") {
+        qWarning("클릭음: WAV 형식 아님"); return;
+    }
+
+    // 청크를 순회해 fmt/data 를 찾는다 (LIST 등 부가 청크가 있어도 안전)
+    auto u16 = [&](int o){ return quint16(quint8(wav[o])) | (quint16(quint8(wav[o+1])) << 8); };
+    auto u32 = [&](int o){ return quint32(quint8(wav[o]))        | (quint32(quint8(wav[o+1])) << 8)
+                                | (quint32(quint8(wav[o+2])) << 16) | (quint32(quint8(wav[o+3])) << 24); };
+
+    int rate = 0, ch = 0, bits = 0;
+    QByteArray pcm;
+    for (int pos = 12; pos + 8 <= wav.size(); ) {
+        const QByteArray id = wav.mid(pos, 4);
+        const int sz = int(u32(pos + 4));
+        const int body = pos + 8;
+        if (sz < 0 || body + sz > wav.size()) break;
+
+        if (id == "fmt " && sz >= 16) {
+            ch   = u16(body + 2);
+            rate = int(u32(body + 4));
+            bits = u16(body + 14);
+        } else if (id == "data") {
+            pcm = wav.mid(body, sz);
+        }
+        pos = body + sz + (sz & 1);        // 청크는 짝수 정렬
+    }
+    if (pcm.isEmpty() || rate <= 0 || ch <= 0 || bits != 16) {
+        qWarning("클릭음: 지원하지 않는 WAV (16bit PCM 필요)"); return;
+    }
+
+    QAudioFormat fmt;
+    fmt.setSampleRate(rate);
+    fmt.setChannelCount(ch);
+    fmt.setSampleFormat(QAudioFormat::Int16);
+
+    const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+    if (dev.isNull()) { qWarning("클릭음: 오디오 출력 장치 없음"); return; }
+
+    m_sfxPcm  = pcm;
+    m_sfxSink = new QAudioSink(dev, fmt, this);
+    m_sfxSink->setVolume(0.35);
+    // ★ push 모드로 한 번만 연다. 클릭마다 stop/start 하면 재생이 누락된다.
+    m_sfxIo = m_sfxSink->start();
+    if (!m_sfxIo) { qWarning("클릭음: 오디오 출력 시작 실패"); return; }
+    qDebug("클릭음 준비: %d Hz, %dch, %d bytes", rate, ch, pcm.size());
+}
+
+void MainWindow::playClickSound() {
+    if (!m_sfxIo || !m_sfxSink || m_sfxPcm.isEmpty()) return;
+    // 연타로 큐가 밀리지 않게 여유가 있을 때만 넣는다 (지연 누적 방지)
+    if (m_sfxSink->bytesFree() < m_sfxPcm.size()) return;
+    m_sfxIo->write(m_sfxPcm);
+}
+
 // 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.
 void MainWindow::applyWheelGuard(QWidget* root) {
     if (!root) return;
@@ -4633,10 +4713,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
     // ── 마우스 좌클릭 → 클릭음 재생 (원본 NeoRageX 느낌) ──────
     //   ※ 좌클릭에만 반응한다. 우클릭(컨텍스트 메뉴)·휠·더블클릭은 제외.
     //     더블클릭 시 소리가 두 번 겹치지 않도록 Press 만 사용.
-    if (ev->type() == QEvent::MouseButtonPress && m_clickSfx) {
+    if (ev->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(ev);
-        if (me->button() == Qt::LeftButton)
-            m_clickSfx->play();
+        if (me->button() == Qt::LeftButton) playClickSound();
     }
 
     // ── 마우스 이동 / 클릭 → 커서 타이머 리셋 ─────────────────

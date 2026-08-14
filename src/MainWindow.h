@@ -29,7 +29,8 @@
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMediaPlayer>
-#include <QSoundEffect>
+#include <QAudioSink>
+#include <QBuffer>
 #include <QVideoWidget>
 
 #include "AppSettings.h"   // gSettings (isEn() 인라인에서 사용)
@@ -175,6 +176,8 @@ private:
 
     // ── 프리뷰 ──────────────────────────────────────────
     void loadPreview(const QString& romName);
+    // 프리뷰 영역을 레터박스 없이 꽉 채우도록 스케일+중앙 크롭
+    QPixmap fitPreviewPixmap(const QPixmap& src) const;
     void loadPreviewVideo(const QString& romName);
 
     // ── 마우스 커서 자동 숨김 ───────────────────────────
@@ -251,7 +254,16 @@ private:
     QStackedWidget*  m_previewStack   = nullptr;
     QLabel*          m_previewLabel   = nullptr;
     QVideoWidget*    m_videoWidget    = nullptr;
-    QSoundEffect*    m_clickSfx       = nullptr;   // 마우스 좌클릭 효과음
+    // ── 마우스 좌클릭 효과음 ─────────────────────────────
+    //   QSoundEffect 는 두어 번 재생하면 무음이 되는 문제가 있었다.
+    //   클릭마다 sink 를 stop/start 하는 방식도 불안정했다(10회 중 7회만 재생).
+    //   → push 모드: sink 를 한 번만 열어두고 클릭할 때마다 PCM 을 write 한다.
+    //     (검증: 10회 중 10회 재생, 총 541ms ≈ 57ms × 10)
+    QByteArray       m_sfxPcm;                     // WAV 본문 PCM
+    QAudioSink*      m_sfxSink        = nullptr;
+    QIODevice*       m_sfxIo          = nullptr;   // push 모드 기록 대상
+    void             loadClickSound();
+    void             playClickSound();
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
     PreviewVideo*    m_previewVideo   = nullptr;   // Linux: 자체 소프트웨어 디코더
     QTimer*          m_previewVidTimer= nullptr;

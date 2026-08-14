@@ -18,7 +18,9 @@
 | 🗂️ NEW | **Game list platform tabs** — `NEOGEO` / `CPS` / `ETC` tabs next to `ALL` / `FAV` / `NOFAV`, each showing how many ROMs you own. `FAV` always lists favorites regardless of platform. | **게임 목록 기종 탭** — `ALL` / `FAV` / `NOFAV` 에 더해 `NEOGEO` / `CPS` / `ETC` 탭 추가, 보유 개수 표시. `FAV` 는 기종과 무관하게 즐겨찾기 전체를 보여줍니다. |
 | 🔊 NEW | **Mouse click sound** — Left click plays the classic UI click, embedded in the executable. | **마우스 클릭음** — 좌클릭 시 클래식 UI 클릭음 재생. 실행 파일에 내장되어 별도 파일이 필요 없습니다. |
 | 🖥️ CHANGE | **Steam Deck always fullscreen** — The Linux build starts fullscreen and the FULLSCREEN button is hidden (windowed mode has no use there). | **스팀덱 항상 전체화면** — Linux 빌드는 전체화면으로 시작하고 FULLSCREEN 버튼을 숨깁니다(창모드가 의미 없음). |
+| 🖼️ CHANGE | **Bigger preview, no letterbox** — The preview box is wider (4:5 against the event log), and preview images/videos now fill it edge to edge instead of leaving black bars. Vertical (TATE) games benefit the most. | **프리뷰 확대 + 레터박스 제거** — 프리뷰 박스를 넓히고(이벤트 로그 대비 4:5), 이미지·영상이 검은 띠 없이 꽉 차게 표시. 세로형(TATE) 게임에서 효과가 가장 큽니다. |
 | 🐛 FIX | **Broken star glyphs** — `★` / `☆` had no glyph in Courier New and rendered as garbage (`*B2`). Favorite markers and filter labels now use ASCII. | **깨진 별표 표시** — `★`/`☆` 가 Courier New 에 글리프가 없어 `*B2` 처럼 깨져 보이던 문제. 즐겨찾기 표시와 필터 라벨을 ASCII 로 변경. |
+| 🐛 FIX | **Click sound stopped after a few clicks** — `QSoundEffect` went silent once its backend stream stalled. The sound is now driven directly from PCM through a persistent audio stream (measured: 10/10 clicks played, versus 7/10 with stop/start). | **클릭음이 몇 번 뒤 안 나던 문제** — `QSoundEffect` 백엔드 스트림이 멈추면 무음이 되던 문제. PCM 을 직접 상시 스트림으로 재생하도록 변경(실측: 10회 중 10회 재생, stop/start 방식은 7회). |
 
 ### v2.1 (2026-07)
 
@@ -89,8 +91,8 @@
   **한글 게임명** — `gamelist.xml` (라즈겜동 형식) 자동 인식, 또는 `names.txt`에 한 줄씩 직접 지정 (`kof94 = 더 킹 오브 파이터즈 94`)
 - 🌐 **UI language toggle** — switch menus between Korean and English instantly (saved)  
   **메뉴 한/영 전환** — 옵션 패널의 🌐 버튼으로 즉시 전환, 설정 저장
-- 🖼️ **Preview** — preview image → video → image, cycling automatically (with sound)  
-  **프리뷰** — 이미지 → 영상 → 이미지 자동 순환 표시 (사운드 포함)
+- 🖼️ **Preview** — image → video → image, cycling automatically (with sound), filling the box with no letterboxing  
+  **프리뷰** — 이미지 → 영상 → 이미지 자동 순환 (사운드 포함), 레터박스 없이 꽉 차게 표시
 - 💾 **Save States** — 8 slots (F1–F8 load / Shift+F1–F8 save)  
   **세이브스테이트** — 8슬롯 (F1–F8 로드 / Shift+F1–F8 저장)
 - ⏩ **Fast Forward** — uncapped speed (F11)  
