@@ -39,6 +39,12 @@ public:
 
     void setRoundedCorners(int cornerFlags);
 
+    // ── 클래식(NeoRageX 0.6b) 스타일 ────────────────────────
+    //  원본처럼 "각진 얇은 파란 테두리 + 좌상단 제목" 으로 그린다.
+    //  기존 3D 파이프 스타일 코드는 그대로 두고 분기만 추가했다(되돌리기 쉽게).
+    void setClassicStyle(bool on);
+    bool classicStyle() const { return m_classic; }
+
     // CSS 기준 수치 (기본값 — 스케일링 전)
     static constexpr int BASE_BW     = 18;  // 파이프 두께
     static constexpr int BASE_OUTER_R = 28; // 외곽 라운드
@@ -57,6 +63,7 @@ private:
     QTimer*      m_timer  = nullptr;
     QVBoxLayout* m_layout = nullptr;
     int          m_roundedCorners = CornerAll;
+    bool         m_classic = false;      // NeoRageX 0.6b 스타일 여부
 
     // 현재 해상도에 맞게 스케일된 값 업데이트
     void updateMargins();

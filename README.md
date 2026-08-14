@@ -10,6 +10,16 @@
 
 ## 📋 Update History / 업데이트 내역
 
+### v2.2 (2026-07)
+
+| | English | 한국어 |
+|---|---|---|
+| 🎨 UI | **Classic NeoRageX look** — Rebuilt the frame styling after the original NeoRageX 0.6b: square bright-blue borders with the title at the top-left, centered plain-text option menu, filled blue buttons, and a `Ver` / name footer. Panels stay translucent so your own background image shows through. | **클래식 NeoRageX 디자인** — 원본 NeoRageX 0.6b 스타일로 재구성: 각진 파란 테두리 + 좌상단 제목, 가운데 정렬 텍스트 메뉴, 파란 채움 버튼, 하단 `Ver`·이름 푸터. 패널이 반투명이라 직접 만든 배경 이미지가 그대로 비쳐 보입니다. |
+| 🗂️ NEW | **Game list platform tabs** — `NEOGEO` / `CPS` / `ETC` tabs next to `ALL` / `FAV` / `NOFAV`, each showing how many ROMs you own. `FAV` always lists favorites regardless of platform. | **게임 목록 기종 탭** — `ALL` / `FAV` / `NOFAV` 에 더해 `NEOGEO` / `CPS` / `ETC` 탭 추가, 보유 개수 표시. `FAV` 는 기종과 무관하게 즐겨찾기 전체를 보여줍니다. |
+| 🔊 NEW | **Mouse click sound** — Left click plays the classic UI click, embedded in the executable. | **마우스 클릭음** — 좌클릭 시 클래식 UI 클릭음 재생. 실행 파일에 내장되어 별도 파일이 필요 없습니다. |
+| 🖥️ CHANGE | **Steam Deck always fullscreen** — The Linux build starts fullscreen and the FULLSCREEN button is hidden (windowed mode has no use there). | **스팀덱 항상 전체화면** — Linux 빌드는 전체화면으로 시작하고 FULLSCREEN 버튼을 숨깁니다(창모드가 의미 없음). |
+| 🐛 FIX | **Broken star glyphs** — `★` / `☆` had no glyph in Courier New and rendered as garbage (`*B2`). Favorite markers and filter labels now use ASCII. | **깨진 별표 표시** — `★`/`☆` 가 Courier New 에 글리프가 없어 `*B2` 처럼 깨져 보이던 문제. 즐겨찾기 표시와 필터 라벨을 ASCII 로 변경. |
+
 ### v2.1 (2026-07)
 
 | | English | 한국어 |
@@ -73,8 +83,8 @@
   **libretro 코어 지원** — `fbneo_libretro.dll/.so`로 정확한 아케이드 에뮬레이션
 - 🖥️ **4-panel UI** — Game List / Options / Preview / Events log  
   **4분할 UI** — 게임 목록 / 옵션 / 프리뷰 / 이벤트 로그
-- 🔍 **Game list** — ROM scan, search filter, favorites (★)  
-  **게임 목록** — ROM 자동 검색, 필터, 즐겨찾기 (★)
+- 🔍 **Game list** — ROM scan, search, favorites, and platform tabs (`ALL` / `FAV` / `NOFAV` / `NEOGEO` / `CPS` / `ETC`) with per-tab counts  
+  **게임 목록** — ROM 자동 검색, 검색창, 즐겨찾기, 기종 탭(`ALL`/`FAV`/`NOFAV`/`NEOGEO`/`CPS`/`ETC`) 및 개수 표시
 - 🌏 **Korean game names** — Supports `gamelist.xml` (라즈겜동 format), or edit `names.txt` one line at a time (`kof94 = 더 킹 오브 파이터즈 94`)  
   **한글 게임명** — `gamelist.xml` (라즈겜동 형식) 자동 인식, 또는 `names.txt`에 한 줄씩 직접 지정 (`kof94 = 더 킹 오브 파이터즈 94`)
 - 🌐 **UI language toggle** — switch menus between Korean and English instantly (saved)  
@@ -115,6 +125,8 @@
   **서비스 모드 보호** — 아케이드 테스트 메뉴 기본 차단, 전용 핫키로만 진입 (START 길게 누르기와 분리)
 - 📁 **Portable layout** — all data (roms / previews / saves / cheats / recordings / config) sits next to the program  
   **포터블 구조** — 모든 데이터(roms / previews / saves / cheats / recordings / config)가 프로그램 폴더 아래에 모임
+- 🎨 **Classic NeoRageX styling** — square blue frames, centered text menu, click sound; your own background image shows through  
+  **클래식 NeoRageX 디자인** — 각진 파란 테두리, 가운데 정렬 메뉴, 클릭음. 배경 이미지가 그대로 비쳐 보임
 
 ---
 

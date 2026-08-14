@@ -106,9 +106,40 @@ void BorderPanel::resizeEvent(QResizeEvent* event) {
     update();
 }
 
+void BorderPanel::setClassicStyle(bool on) {
+    if (m_classic == on) return;
+    m_classic = on;
+    m_prog = 1.0;              // 클래식은 등장 애니메이션 없이 바로 표시
+    if (m_timer) m_timer->stop();
+    updateMargins();
+    update();
+}
+
+// ── 클래식(NeoRageX 0.6b) 수치 ───────────────────────────────
+//   원본은 640x480 기준 2px 테두리 + 좌상단 제목이다.
+//   해상도가 커져도 같은 인상을 주도록 살짝만 스케일한다.
+static int classicBorderW(int w, int h) {
+    const double scale = qMax(1.0, qMin(w, h) / 480.0);
+    // 기본 4px (기존 2px 의 2배) — 원본보다 굵게 해서 박스가 또렷하게 보이도록
+    return qBound(4, qRound(4.0 * scale), 8);
+}
+static int classicTitleH(int w, int h) {
+    const double scale = qMax(1.0, qMin(w, h) / 480.0);
+    return qBound(14, qRound(15.0 * scale), 26);
+}
+
 // 현재 해상도에 맞춰 레이아웃 마진 재계산
 void BorderPanel::updateMargins() {
     if (!m_layout) return;
+
+    if (m_classic) {
+        // 얇은 테두리 + 제목 줄만큼만 여백 (원본처럼 내용이 넓게 쓰이도록)
+        const int bw = classicBorderW(width(), height());
+        const int th = m_title.isEmpty() ? 0 : classicTitleH(width(), height());
+        m_layout->setContentsMargins(bw + 3, bw + th, bw + 3, bw + 3);
+        return;
+    }
+
     const double scale    = qMax(0.3, qMin(width(), height()) / 720.0);
     const int    bw       = qMax(4, qRound(BASE_BW * scale));
     const int    topMargin = m_title.isEmpty()
@@ -130,6 +161,44 @@ void BorderPanel::paintEvent(QPaintEvent* event)
     const int W = width();
     const int H = height();
     if (W < 10 || H < 10) return;
+
+    // ════════════════════════════════════════════════════════
+    //  클래식 스타일 — NeoRageX 0.6b
+    //   · 각진 얇은 파란 테두리 (라운드 없음)
+    //   · 좌상단에 제목, 그 자리만 테두리를 비워 라벨처럼 보이게
+    //   · 안쪽은 칠하지 않는다 → 배경 이미지가 그대로 비쳐 보임
+    // ════════════════════════════════════════════════════════
+    if (m_classic) {
+        const int bw = classicBorderW(W, H);
+        const int th = m_title.isEmpty() ? 0 : classicTitleH(W, H);
+
+        p.setRenderHint(QPainter::Antialiasing, false);   // 각진 픽셀 느낌 유지
+
+        // 내부를 살짝 어둡게 깔아 글자 가독성 확보 (배경은 여전히 비쳐 보임)
+        p.fillRect(QRect(bw, bw, W - 2*bw, H - 2*bw), QColor(0, 0, 16, 120));
+
+        // 테두리 — 원본의 선명한 파랑
+        const QColor line(0x20, 0x50, 0xff);
+        p.setPen(Qt::NoPen);
+        p.setBrush(line);
+        p.drawRect(0, 0, W, bw);              // 위
+        p.drawRect(0, H - bw, W, bw);         // 아래
+        p.drawRect(0, 0, bw, H);              // 좌
+        p.drawRect(W - bw, 0, bw, H);         // 우
+
+        // 제목 — 좌상단, 테두리 바로 안쪽에 배치
+        //   (테두리를 굵게 했으므로 시작 위치를 테두리 두께만큼 더 띄운다)
+        if (th > 0) {
+            QFont f("Courier New", qMax(8, qRound(th * 0.60)), QFont::Bold);
+            p.setFont(f);
+            const QRect tr(bw + 6, bw + 1, W - 2*bw - 12, th);
+            // 글자 뒤를 살짝 눌러 테두리와 겹쳐도 읽히게
+            p.fillRect(tr.adjusted(-4, 0, 0, 0), QColor(0, 0, 24, 190));
+            p.setPen(QColor(0xcc, 0xdd, 0xff));
+            p.drawText(tr, Qt::AlignLeft | Qt::AlignVCenter, m_title);
+        }
+        return;
+    }
 
     // ── 스케일 계산 (720p 기준 비례) ──────────────────────
     const double scale  = qMax(0.3, qMin(W, H) / 720.0);

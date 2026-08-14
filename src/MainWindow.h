@@ -24,10 +24,12 @@
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHeaderView>
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMediaPlayer>
+#include <QSoundEffect>
 #include <QVideoWidget>
 
 #include "AppSettings.h"   // gSettings (isEn() 인라인에서 사용)
@@ -150,6 +152,14 @@ private:
     void toggleFavorite(const QString& romName);
     bool isFavorite(const QString& romName) const;
 
+    // ── 게임목록 필터 바 (ALL / ★FAV / ☆ + 기종별 탭) ────
+    //   기종 탭은 실제로 가지고 있는 ROM 기준으로만 만들어진다.
+    //   (없는 기종 버튼이 자리만 차지하지 않도록)
+    void rebuildFilterBar();
+    QWidget*     m_filterBar   = nullptr;   // 버튼 컨테이너 (동적 재생성)
+    QGridLayout* m_filterGrid  = nullptr;
+    QString      m_hwFilter;                // 선택된 기종 id (빈 값 = 전체)
+
     // 옵션 패널의 콤보/스핀/슬라이더가 휠을 가로채 스크롤을 막는 것 방지.
     //   동적으로 다시 만들어지는 페이지(머신세팅/치트)는 갱신 후 다시 호출해야 한다.
     void applyWheelGuard(QWidget* root);
@@ -241,6 +251,7 @@ private:
     QStackedWidget*  m_previewStack   = nullptr;
     QLabel*          m_previewLabel   = nullptr;
     QVideoWidget*    m_videoWidget    = nullptr;
+    QSoundEffect*    m_clickSfx       = nullptr;   // 마우스 좌클릭 효과음
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
     PreviewVideo*    m_previewVideo   = nullptr;   // Linux: 자체 소프트웨어 디코더
     QTimer*          m_previewVidTimer= nullptr;

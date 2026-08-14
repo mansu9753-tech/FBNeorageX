@@ -4,6 +4,7 @@
 #include "AppSettings.h"
 #include "EmulatorState.h"
 #include "GameNamesDb.h"
+#include "GameHardware.h"   // 게임목록 기종별 탭 분류
 
 #include <QApplication>
 #include <QEvent>
@@ -231,18 +232,21 @@ protected:
 };
 
 // ── 공통 스타일 ───────────────────────────────────────────
+// NeoRageX 0.6b 스타일 버튼 — 파란 채움 + 흰 글씨 + 각진 얇은 테두리
 QString MainWindow::btnStyle(bool accent) {
     if (accent)
-        return "QPushButton{background:#002266;color:#66aaff;border:2px solid #0055ff;"
-               "padding:7px 10px;font-family:'Courier New';font-size:11px;}"
-               "QPushButton:hover{background:#003399;color:#ffffff;}"
-               "QPushButton:pressed{background:#0044cc;}"
-               "QPushButton:disabled{background:#111122;color:#334466;border-color:#223355;}";
-    return "QPushButton{background:#000055;color:#aaccff;border:2px solid #4466ff;"
-           "padding:7px 10px;font-family:'Courier New';font-size:11px;}"
-           "QPushButton:hover{background:#0000aa;color:#ffffff;}"
-           "QPushButton:pressed{background:#0000dd;}"
-           "QPushButton:disabled{background:#111122;color:#446688;border-color:#223355;}";
+        return "QPushButton{background:#2b4fd8;color:#ffffff;border:1px solid #86a6ff;"
+               "padding:6px 10px;font-family:'Courier New';font-size:11px;"
+               "font-weight:bold;letter-spacing:1px;}"
+               "QPushButton:hover{background:#3d63ee;}"
+               "QPushButton:pressed{background:#1e3bb0;}"
+               "QPushButton:disabled{background:#1a1f3a;color:#4a5a80;border-color:#2b3a66;}";
+    return "QPushButton{background:#14287a;color:#cfe0ff;border:1px solid #4a6ad0;"
+           "padding:6px 10px;font-family:'Courier New';font-size:11px;"
+           "font-weight:bold;letter-spacing:1px;}"
+           "QPushButton:hover{background:#1e3bb0;color:#ffffff;}"
+           "QPushButton:pressed{background:#0e1c58;}"
+           "QPushButton:disabled{background:#1a1f3a;color:#4a5a80;border-color:#2b3a66;}";
 }
 QString MainWindow::editStyle() {
     return "QLineEdit,QSpinBox,QComboBox{"
@@ -299,7 +303,16 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle("FBNEORAGEX Core Edition 1.9");
     m_windowedSize = QSize(1360, 840);
     resize(m_windowedSize);
+#ifdef _WIN32
     setMinimumSize(900, 640);
+#else
+    // 스팀덱: 창모드가 의미 없으므로 항상 전체화면으로 시작한다.
+    //   (게임 모드는 gamescope 가 어차피 전체화면으로 띄우고,
+    //    데스크톱 모드에서도 창 테두리 없이 바로 쓰도록)
+    //   최소 크기는 두지 않는다 — 전체화면 크기를 그대로 따르게.
+    m_isFullscreen = true;
+    QTimer::singleShot(0, this, [this]{ showFullScreen(); });
+#endif
 
     // 아이콘 — 탐색기/작업표시줄/타이틀바 모두 동일한 아이콘 적용
     // icon.ico : ICO 파일 내부에 16~256px 다중 해상도가 내장되어 있어 품질 최적
@@ -559,8 +572,15 @@ MainWindow::MainWindow(QWidget* parent)
     // 게임패드 시작
     m_gamepad->start();
 
-    // 앱 전역 이벤트 필터 (탭키 전환 등)
+    // 앱 전역 이벤트 필터 (탭키 전환, 마우스 클릭음 등)
     qApp->installEventFilter(this);
+
+    // ── 마우스 클릭음 (원본 NeoRageX 느낌) ────────────────────
+    //   리소스에 내장 → 윈도우 단일 exe 에서도 파일 없이 동작한다.
+    //   짧은 UI 효과음이라 QSoundEffect 가 적합(디코딩 없이 즉시 재생).
+    m_clickSfx = new QSoundEffect(this);
+    m_clickSfx->setSource(QUrl("qrc:/assets/clik.wav"));
+    m_clickSfx->setVolume(0.35);
 
     // 마우스 커서 자동 숨김 타이머 (3초 비입력 시 숨김)
     m_cursorTimer = new QTimer(this);
@@ -665,26 +685,13 @@ void MainWindow::buildMainTab() {
     // ── 좌: GAMELIST ─────────────────────────────────
     m_gamelistPanel = new BorderPanel("GAMELIST");
 
-    // 즐겨찾기 필터 버튼
-    QHBoxLayout* filterH = new QHBoxLayout;
-    filterH->setSpacing(3);
-    auto makeFilterBtn = [&](const QString& label) {
-        QPushButton* b = new QPushButton(label);
-        b->setCheckable(true);
-        b->setStyleSheet(
-            "QPushButton{background:#000033;color:#6688bb;border:1px solid #224488;"
-            "padding:3px 10px;font-family:'Courier New';font-size:10px;font-weight:bold;}"
-            "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}"
-            "QPushButton:hover{background:#00004d;color:#99ccff;}");
-        return b;
-    };
-    auto* btnAll  = makeFilterBtn("ALL");
-    auto* btnFav  = makeFilterBtn("★ FAV");
-    auto* btnStar = makeFilterBtn("☆");
-    btnAll->setChecked(true);
-    filterH->addWidget(btnAll); filterH->addWidget(btnFav); filterH->addWidget(btnStar);
-    filterH->addStretch();
-    m_gamelistPanel->innerLayout()->addLayout(filterH);
+    // 필터 바 — ALL / ★FAV / ☆ + 기종별 탭 (ROM 스캔 후 동적 생성)
+    m_filterBar  = new QWidget;
+    m_filterBar->setStyleSheet("background:transparent;");
+    m_filterGrid = new QGridLayout(m_filterBar);
+    m_filterGrid->setContentsMargins(0, 0, 0, 0);
+    m_filterGrid->setSpacing(3);
+    m_gamelistPanel->innerLayout()->addWidget(m_filterBar);
 
     m_searchEdit = new QLineEdit;
     m_searchEdit->setPlaceholderText("Search...");
@@ -716,29 +723,6 @@ void MainWindow::buildMainTab() {
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
         "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}");
     m_gameList->setContextMenuPolicy(Qt::CustomContextMenu);
-
-    connect(btnAll,  &QPushButton::clicked, this, [this, btnAll, btnFav, btnStar]{
-        m_glFilter = 0;
-        btnAll->setChecked(true); btnFav->setChecked(false); btnStar->setChecked(false);
-        log(QString("필터: ALL (총 %1개)").arg(m_allRoms.size()));
-        filterRoms(m_searchEdit->text());
-    });
-    connect(btnFav,  &QPushButton::clicked, this, [this, btnAll, btnFav, btnStar]{
-        m_glFilter = 1;
-        btnFav->setChecked(true); btnAll->setChecked(false); btnStar->setChecked(false);
-        int cnt = 0;
-        for (const auto& [d, r] : m_allRoms) if (isFavorite(r)) ++cnt;
-        log(QString("필터: ★FAV (%1개)").arg(cnt));
-        filterRoms(m_searchEdit->text());
-    });
-    connect(btnStar, &QPushButton::clicked, this, [this, btnAll, btnFav, btnStar]{
-        m_glFilter = 2;
-        btnStar->setChecked(true); btnAll->setChecked(false); btnFav->setChecked(false);
-        int cnt = 0;
-        for (const auto& [d, r] : m_allRoms) if (!isFavorite(r)) ++cnt;
-        log(QString("필터: ☆ (%1개)").arg(cnt));
-        filterRoms(m_searchEdit->text());
-    });
 
     connect(m_gameList, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos){
         QListWidgetItem* item = m_gameList->itemAt(pos);
@@ -835,11 +819,20 @@ void MainWindow::buildMainTab() {
             {"CHEATS",           7},
             {"MULTIPLAYER",      8},
         };
+        // NeoRageX 0.6b 스타일: 장식 없는 가운데 정렬 텍스트 메뉴
+        const QString menuCss =
+            "QPushButton{background:transparent;border:none;color:#dde6ff;"
+            "font-family:'Courier New';font-size:15px;font-weight:bold;"
+            "letter-spacing:3px;padding:2px;}"
+            "QPushButton:hover{color:#ffffff;background:rgba(32,80,255,70);}"
+            "QPushButton:pressed{color:#ffffff;background:rgba(32,80,255,120);}"
+            "QPushButton:disabled{color:#667799;}";
         for (const auto& mi : menuItems) {
-            QPushButton* b = new QPushButton(
-                QString("▸  %1").arg(mi.label));
+            QPushButton* b = new QPushButton(QString::fromLatin1(mi.label));
             b->setFlat(true);
-            b->setFixedHeight(38);
+            b->setStyleSheet(menuCss);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setFixedHeight(34);
             int pageIdx = mi.page;
             connect(b, &QPushButton::clicked, this, [this, pageIdx]{
                 m_optionsStack->setCurrentIndex(pageIdx);
@@ -1041,7 +1034,10 @@ void MainWindow::buildMainTab() {
     connect(m_tateBtn, &QPushButton::clicked, this, [this]{ toggleTate(); });
     btnBar->addWidget(m_tateBtn);
 
+#ifdef _WIN32
+    // 스팀덱(Linux)은 항상 전체화면으로 동작하므로 이 버튼이 의미가 없다 → Windows 전용
     makeBarBtn("⛶  FULLSCREEN",false, [this]{ toggleFullscreen(); });
+#endif
     makeBarBtn("✖  EXIT",       false, [this]{ close(); });
     vRoot->addLayout(btnBar);
 
@@ -1137,6 +1133,23 @@ void MainWindow::buildMainTab() {
     // 아래(프리뷰+이벤트) : 위 = 4 : 5 (프리뷰/이벤트 박스를 더 크게)
     vRoot->addLayout(hBot, 4);
 
+    // ── 하단 푸터 (원본 NeoRageX 의 "Ver 0.6b … NeoRAGE ©1999" 자리) ──
+    {
+        QHBoxLayout* footer = new QHBoxLayout;
+        footer->setContentsMargins(6, 2, 6, 2);
+        const QString css = "color:#5577bb;font-family:'Courier New';"
+                            "font-size:10px;background:transparent;";
+        QLabel* verLbl = new QLabel("Ver 2.1");
+        verLbl->setStyleSheet(css);
+        QLabel* brandLbl = new QLabel("FBNeoRageX");
+        brandLbl->setStyleSheet(css);
+        brandLbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        footer->addWidget(verLbl);
+        footer->addStretch();
+        footer->addWidget(brandLbl);
+        vRoot->addLayout(footer, 0);
+    }
+
     // ════════════════════════════════════════════════
     //  박스 크기 고정 — 오직 스트레치 비율로만 결정
     // ════════════════════════════════════════════════
@@ -1155,6 +1168,8 @@ void MainWindow::buildMainTab() {
         if (!p) continue;
         p->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
         p->setMinimumSize(0, 0);
+        // NeoRageX 0.6b 스타일 (각진 얇은 파란 테두리 + 좌상단 제목)
+        p->setClassicStyle(true);
     }
     // 내용물(목록/로그/옵션 스택/프리뷰)도 자기 크기를 주장하지 않도록
     for (QWidget* w : { static_cast<QWidget*>(m_gameList),
@@ -3085,6 +3100,7 @@ void MainWindow::scanRoms() {
         }
     }
 
+    rebuildFilterBar();   // 보유 기종 기준으로 탭 재구성 (개수 포함)
     filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
 
     // 복원된 게임의 프리뷰도 함께 표시 (선택 상태와 화면을 일치시킴)
@@ -3095,6 +3111,71 @@ void MainWindow::scanRoms() {
     }
 
     log(QString("ROM %1개 검색됨 (%2)").arg(m_allRoms.size()).arg(gSettings.romPath));
+}
+
+// ════════════════════════════════════════════════════════════
+//  게임목록 필터 바 — ALL / ★FAV / ☆ + 기종별 탭
+//  · 기종 탭은 실제 보유 ROM 에 존재하는 기종만 만든다 (개수도 함께 표시)
+//  · ★FAV 는 기종과 무관하게 즐겨찾기 전체를 보여준다
+// ════════════════════════════════════════════════════════════
+void MainWindow::rebuildFilterBar() {
+    if (!m_filterGrid) return;
+
+    // 기존 버튼 제거
+    while (QLayoutItem* it = m_filterGrid->takeAt(0)) {
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
+    // 기종별 보유 개수 집계
+    QHash<QString, int> hwCount;
+    int favCount = 0;
+    for (const auto& [disp, rom] : m_allRoms) {
+        ++hwCount[gameHardwareGroup(gameHardwareOf(rom))];
+        if (isFavorite(rom)) ++favCount;
+    }
+
+    const QString btnCss =
+        "QPushButton{background:#000033;color:#6688bb;border:1px solid #224488;"
+        "padding:2px 4px;font-family:'Courier New';font-size:9px;font-weight:bold;}"
+        "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}"
+        "QPushButton:hover{background:#00004d;color:#99ccff;}";
+
+    int col = 0, row = 0;
+    const int kCols = 4;                       // 좁은 패널에 맞춰 4열로 줄바꿈
+    auto addBtn = [&](const QString& label, int glFilter, const QString& hwId) {
+        QPushButton* b = new QPushButton(label);
+        b->setCheckable(true);
+        b->setStyleSheet(btnCss);
+        b->setFixedHeight(22);
+        // 현재 선택 상태 반영
+        b->setChecked(m_glFilter == glFilter && m_hwFilter == hwId);
+        connect(b, &QPushButton::clicked, this, [this, glFilter, hwId]{
+            m_glFilter = glFilter;
+            m_hwFilter = hwId;
+            rebuildFilterBar();                // 체크 상태 갱신
+            filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
+            log("필터: " + (hwId.isEmpty()
+                    ? (glFilter == 1 ? QString("★FAV") : glFilter == 2 ? QString("☆") : QString("ALL"))
+                    : gameHardwareLabel(hwId)));
+        });
+        m_filterGrid->addWidget(b, row, col);
+        if (++col >= kCols) { col = 0; ++row; }
+    };
+
+    // ※ 라벨은 ASCII 로만 쓴다. ★/☆ 는 Courier New 에 글리프가 없어
+    //    폰트 대체가 일어나며 "*B2" 처럼 깨져 보였다.
+    addBtn(QString("ALL %1").arg(m_allRoms.size()), 0, QString());
+    addBtn(QString("FAV %1").arg(favCount),         1, QString());
+    addBtn(QStringLiteral("NOFAV"),                 2, QString());
+
+    // 보유한 기종만 정의된 순서대로
+    for (const auto& d : gameHardwareList()) {
+        const QString id = QString::fromLatin1(d.id);
+        const int n = hwCount.value(id, 0);
+        if (n <= 0) continue;
+        addBtn(QString("%1 %2").arg(QString::fromLatin1(d.label)).arg(n), 0, id);
+    }
 }
 
 void MainWindow::filterRoms(const QString& text) {
@@ -3109,6 +3190,11 @@ void MainWindow::filterRoms(const QString& text) {
         if (m_glFilter == 1 && !fav) continue;  // ★ FAV: 즐겨찾기만
         if (m_glFilter == 2 &&  fav) continue;  // ☆: 미즐겨찾기만
 
+        // ── 기종 필터 ────────────────────────────────────
+        //   ★FAV 탭에서는 기종을 무시한다 (즐겨찾기는 기종 상관없이 전부 표시)
+        if (m_glFilter != 1 && !m_hwFilter.isEmpty()
+            && gameHardwareGroup(gameHardwareOf(rom)) != m_hwFilter) continue;
+
         // ── 검색어 필터 ───────────────────────────────────
         if (!filter.isEmpty()
             && !disp.toLower().contains(filter)
@@ -3116,7 +3202,8 @@ void MainWindow::filterRoms(const QString& text) {
 
         bool running = (rom == m_selectedGame);
 
-        QString label = (fav ? "★ " : "  ") + disp;
+        // 즐겨찾기 표시도 ASCII 로 (Courier New 에 ★ 글리프가 없어 깨짐)
+        QString label = (fav ? "* " : "  ") + disp;
         auto* item = new QListWidgetItem(label);
         item->setData(Qt::UserRole, rom);
         item->setData(Qt::UserRole + 1, fav);
@@ -3130,9 +3217,14 @@ void MainWindow::filterRoms(const QString& text) {
         m_gameList->addItem(item);
         ++shown;
     }
-    // 로그: FAV/☆ 필터 적용 시 결과 확인용
-    if (m_glFilter != 0)
-        log(QString("[필터=%1] %2개 표시").arg(m_glFilter).arg(shown));
+    // 원본 NeoRageX 처럼 제목에 "표시개수/전체개수" 를 보여준다
+    if (m_gamelistPanel)
+        m_gamelistPanel->setTitle(QString("GAMELIST (%1/%2)")
+                                  .arg(shown).arg(m_allRoms.size()));
+
+    // 로그: 필터 적용 시 결과 개수 확인용
+    if (m_glFilter != 0 || !m_hwFilter.isEmpty())
+        log(QString("  → %1개 표시").arg(shown));
 
     // 필터 후 선택 복원: 이전에 선택된 게임 항목 유지, 없으면 첫 번째 행 선택
     bool selRestored = false;
@@ -4026,8 +4118,8 @@ void MainWindow::toggleFavorite(const QString& romName) {
             if (it->data(Qt::UserRole).toString() != romName) continue;
 
             QString disp = it->text();
-            if (disp.startsWith("★ ") || disp.startsWith("  ")) disp = disp.mid(2);
-            it->setText((fav ? "★ " : "  ") + disp);
+            if (disp.startsWith("* ") || disp.startsWith("  ")) disp = disp.mid(2);
+            it->setText((fav ? "* " : "  ") + disp);
             it->setData(Qt::UserRole + 1, fav);
 
             if (romName == m_selectedGame)
@@ -4536,6 +4628,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
                 12);
         };
         reposition();
+    }
+
+    // ── 마우스 좌클릭 → 클릭음 재생 (원본 NeoRageX 느낌) ──────
+    //   ※ 좌클릭에만 반응한다. 우클릭(컨텍스트 메뉴)·휠·더블클릭은 제외.
+    //     더블클릭 시 소리가 두 번 겹치지 않도록 Press 만 사용.
+    if (ev->type() == QEvent::MouseButtonPress && m_clickSfx) {
+        auto* me = static_cast<QMouseEvent*>(ev);
+        if (me->button() == Qt::LeftButton)
+            m_clickSfx->play();
     }
 
     // ── 마우스 이동 / 클릭 → 커서 타이머 리셋 ─────────────────

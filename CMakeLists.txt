@@ -54,6 +54,7 @@ set(HEADERS
     src/CheatManager.h
     src/GamepadManager.h
     src/GameNamesDb.h
+    src/GameHardware.h
     src/VideoRecorder.h
     src/PreviewVideo.h
     src/MainWindow.h
