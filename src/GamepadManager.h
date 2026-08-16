@@ -38,6 +38,16 @@ public:
     // 현재 활성 입력 소스 이름
     QString activeSource() const;
 
+    // ── 게임패드 핫키 (게임 입력과 분리) ─────────────────────
+    //   L3 / R3 / L트리거 / R트리거 는 게임에 전달하지 않고
+    //   메뉴 전환·게임종료·서비스·패스트포워드로 쓴다.
+    //   매핑 테이블을 거치지 않으므로 게임 버튼과 섞이지 않는다.
+    static constexpr uint8_t HK_L3 = 0x1;   // 게임 ↔ 메뉴 전환
+    static constexpr uint8_t HK_R3 = 0x2;   // 게임 종료
+    static constexpr uint8_t HK_LT = 0x4;   // 서비스(TEST) 입력
+    static constexpr uint8_t HK_RT = 0x8;   // 패스트포워드
+    uint8_t hotkeyBits() const { return m_hotkeyBits; }
+
     // 버튼 캡처 다이얼로그용 — 현재 눌린 버튼의 raw 상태를 반환
     // XInput: wButtons | (LT→bit16) | (RT→bit17) 값, 없으면 -1
     // WinMM : dwButtons 비트마스크, 없으면 -1
@@ -63,6 +73,7 @@ private:
     QTimer*         m_pollTimer    = nullptr;
     bool            m_connected    = false;
     int             m_ctrlIdx      = 0;
+    uint8_t         m_hotkeyBits   = 0;   // 위 HK_* 조합 (플랫폼 공통)
 
     QHash<int,int>  m_xinputMapping;
     QHash<int,int>  m_winmmMapping;

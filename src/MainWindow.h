@@ -268,6 +268,7 @@ private:
     QAudioFormat     m_sfxFmt;                     // 클릭음 포맷
     quint64          m_lastClickTs    = 0;         // 같은 클릭 중복 처리 방지
     qint64           m_sfxLastPlay    = 0;         // 연타 제한
+    double           m_sfxBytesPerMs  = 0.0;       // 재생 길이 계산용
     void             loadClickSound();
     void             playClickSound();
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
@@ -373,6 +374,8 @@ private:
     //   서비스/테스트 입력(L2, index 12)을 직접 assert 한다. START 홀드·게임패드
     //   L2 와 완전히 분리된 "마메식 전용 서비스 키"를 모든 기종에 제공.
     int  m_serviceHoldFrames = 0;
+    // 게임패드 핫키(L3/R3/트리거) 눌림 상태 — 눌린 순간만 처리하기 위한 이전 값
+    uint8_t m_padHotkeyPrev = 0;
 
     // ── 코어 / 오디오 / 치트 / 게임패드 ─────────────────
     LibretroCore*    m_core    = nullptr;

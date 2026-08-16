@@ -225,22 +225,41 @@ QString GamepadManager::activeSource() const {
 //     A(아래)=약발B   B(오른쪽)=강발D
 void GamepadManager::resetDefaultMapping() {
     m_xinputMapping.clear();
+#ifdef _WIN32
+    // Windows 는 기존 배치 유지 (사용자 요청)
     m_xinputMapping[XI_X]          = 0;   // X → Button A (약손)
     m_xinputMapping[XI_A]          = 8;   // A → Button B (약발)
     m_xinputMapping[XI_Y]          = 1;   // Y → Button C (강손)
     m_xinputMapping[XI_B]          = 9;   // B → Button D (강발)
     m_xinputMapping[XI_BACK]       = 2;   // SELECT
     m_xinputMapping[XI_START]      = 3;   // START
-    m_xinputMapping[XI_DPAD_UP]    = 4;   // UP
-    m_xinputMapping[XI_DPAD_DOWN]  = 5;   // DOWN
-    m_xinputMapping[XI_DPAD_LEFT]  = 6;   // LEFT
-    m_xinputMapping[XI_DPAD_RIGHT] = 7;   // RIGHT
     m_xinputMapping[XI_LB]         = 10;  // L
     m_xinputMapping[XI_RB]         = 11;  // R
     m_xinputMapping[0x10000]       = 12;  // L2 (트리거)
     m_xinputMapping[0x20000]       = 13;  // R2
     m_xinputMapping[XI_L3]         = 14;
     m_xinputMapping[XI_R3]         = 15;
+#else
+    // ── 스팀덱 기본 배치 (사용자 지정) ────────────────────────
+    //   코어 정의: 0=A(약손) 1=C(강손) 8=B(약발) 9=D(강발)
+    //              11=AB, 13=ABC, 3=Start, 14=Select
+    //     X(왼쪽) = A 약손      Y(위)     = B 약발
+    //     A(아래) = C 강손      B(오른쪽) = D 강발
+    //     L = ABC(13)           R = AB(11)
+    //   ※ L3/R3/트리거는 게임 입력이 아니라 핫키로 쓰므로 여기서 매핑하지 않는다.
+    m_xinputMapping[XI_X]          = 0;   // X → Button A (약손)
+    m_xinputMapping[XI_A]          = 1;   // A → Button C (강손)
+    m_xinputMapping[XI_Y]          = 8;   // Y → Button B (약발)
+    m_xinputMapping[XI_B]          = 9;   // B → Button D (강발)
+    m_xinputMapping[XI_LB]         = 13;  // L → ABC 동시입력
+    m_xinputMapping[XI_RB]         = 11;  // R → AB 동시입력
+    m_xinputMapping[XI_START]      = 3;   // Start
+    m_xinputMapping[XI_BACK]       = 14;  // Select (코인)
+#endif
+    m_xinputMapping[XI_DPAD_UP]    = 4;   // UP
+    m_xinputMapping[XI_DPAD_DOWN]  = 5;   // DOWN
+    m_xinputMapping[XI_DPAD_LEFT]  = 6;   // LEFT
+    m_xinputMapping[XI_DPAD_RIGHT] = 7;   // RIGHT
 #ifndef _WIN32
     // Linux: 왼쪽 스틱도 방향키로 (D-패드와 동일하게 동작하도록)
     //   Windows 는 readXInput 에서 스틱을 D-패드 비트에 합쳐 처리한다.
@@ -373,6 +392,13 @@ uint16_t GamepadManager::readXInput() {
         int bits32 = btns;
         if (state.Gamepad.bLeftTrigger  > XI_TRIG_DEAD) bits32 |= 0x10000;
         if (state.Gamepad.bRightTrigger > XI_TRIG_DEAD) bits32 |= 0x20000;
+
+        // 핫키 비트 (게임 입력과 분리)
+        m_hotkeyBits = 0;
+        if (btns & XI_L3)      m_hotkeyBits |= HK_L3;
+        if (btns & XI_R3)      m_hotkeyBits |= HK_R3;
+        if (bits32 & 0x10000)  m_hotkeyBits |= HK_LT;
+        if (bits32 & 0x20000)  m_hotkeyBits |= HK_RT;
 
         uint16_t result = 0;
         for (auto it = m_xinputMapping.begin(); it != m_xinputMapping.end(); ++it)
@@ -554,6 +580,13 @@ uint16_t GamepadManager::readJoystick() {
     for (auto it = m_xinputMapping.constBegin(); it != m_xinputMapping.constEnd(); ++it)
         if ((m_rawBits & uint32_t(it.key())) && it.value() < 16)
             result |= (1u << it.value());
+
+    // 핫키 비트 (게임 입력과 분리 — 매핑 테이블을 거치지 않는다)
+    m_hotkeyBits = 0;
+    if (m_rawBits & XI_L3)  m_hotkeyBits |= HK_L3;
+    if (m_rawBits & XI_R3)  m_hotkeyBits |= HK_R3;
+    if (m_rawBits & RAW_L2) m_hotkeyBits |= HK_LT;
+    if (m_rawBits & RAW_R2) m_hotkeyBits |= HK_RT;
 
     // UI 네비게이션용 방향 비트 (D-패드 + 스틱 모두 인정)
     m_dpadBits = 0;

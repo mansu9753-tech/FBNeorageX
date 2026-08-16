@@ -360,6 +360,46 @@ MainWindow::MainWindow(QWidget* parent)
         refreshCheatList();
     });
 
+    // ── 게임패드 핫키 (L3/R3/트리거) ─────────────────────────
+    //   게임 입력과 분리된 경로라 게임에 그대로 전달되지 않는다.
+    //   L3=메뉴전환, R3=게임종료, L트리거=서비스, R트리거=패스트포워드
+    {
+        auto* hk = new QTimer(this);
+        hk->setInterval(33);                       // ~30Hz 로 눌림 변화만 감시
+        connect(hk, &QTimer::timeout, this, [this]{
+            if (!m_gamepad) return;
+            const uint8_t now  = m_gamepad->hotkeyBits();
+            const uint8_t down = uint8_t(now & ~m_padHotkeyPrev);   // 새로 눌린 것만
+            m_padHotkeyPrev = now;
+            if (!down) return;
+
+            if (down & GamepadManager::HK_L3) {         // 게임 ↔ 메뉴
+                if (gState.gameLoaded) togglePause();
+            }
+            if (down & GamepadManager::HK_R3) {         // 게임 종료
+                if (gState.gameLoaded || gState.isPaused) {
+                    m_timer->stop();
+                    gState.isPaused = false;
+                    if (m_core) m_core->unloadGame();
+                    m_loadedGame.clear();
+                    leaveGameScreen();
+                    log("■ 게임 종료 (패드 R3)");
+                }
+            }
+            if (down & GamepadManager::HK_LT) {         // 서비스(TEST)
+                if (gState.gameLoaded && !gState.isPaused) {
+                    m_serviceHoldFrames = 12;
+                    log("🔧 서비스(TEST) 입력 — 패드 L트리거");
+                }
+            }
+            if (down & GamepadManager::HK_RT) {         // 패스트포워드 토글
+                if (gState.gameLoaded && !gState.isPaused)
+                    toggleFastForward(!gState.fastForward);
+            }
+        });
+        hk->start();
+    }
+
     // 게임패드 시그널
     connect(m_gamepad, &GamepadManager::connected,    this, [this](int idx){
         log(QString("🎮 게임패드 %1 연결됨").arg(idx));
@@ -4427,8 +4467,9 @@ void MainWindow::loadClickSound() {
     //   그 상태에서 프리뷰 영상이 오디오를 열면 프로그램이 멈췄다.
     //   → 클릭할 때만 짧게 열고 재생이 끝나면 닫는다. 장치를 붙잡지 않으므로
     //     프리뷰 영상/에뮬 오디오와 충돌하지 않는다.
-    m_sfxFmt   = fmt;
-    m_sfxPcm   = pcm;
+    m_sfxFmt       = fmt;
+    m_sfxPcm       = pcm;
+    m_sfxBytesPerMs = double(rate) * ch * 2 / 1000.0;   // 재생 길이 계산용
     qDebug("클릭음 준비: %d Hz, %dch, %d bytes", rate, ch, pcm.size());
 }
 
@@ -4452,11 +4493,16 @@ void MainWindow::playClickSound() {
 
     m_sfxSink = new QAudioSink(dev, m_sfxFmt, this);
     m_sfxSink->setVolume(0.35);
-    // 재생이 끝나면(버퍼 소진) 곧바로 장치를 놓아준다
-    connect(m_sfxSink, &QAudioSink::stateChanged, this, [this](QAudio::State s){
-        if (s == QAudio::IdleState && m_sfxSink) m_sfxSink->stop();
-    });
-    m_sfxSink->start(m_sfxBuf);      // pull 모드 — 버퍼를 다 읽으면 Idle
+    m_sfxSink->start(m_sfxBuf);      // pull 모드 — 버퍼에서 읽어간다
+
+    // ★ IdleState 를 보고 정지시키면 안 된다.
+    //   QAudioSink 는 start 직후 데이터를 읽기 전에 잠깐 Idle 로 보고하는데,
+    //   그때 stop() 하면 한 번도 울리지 않는다(실측: 3회 중 0회 재생).
+    //   → 재생 길이만큼 기다린 뒤 정지해 장치를 놓아준다.
+    const int clipMs = m_sfxBytesPerMs > 0
+                       ? int(m_sfxPcm.size() / m_sfxBytesPerMs) + 150 : 400;
+    QPointer<QAudioSink> guard(m_sfxSink);
+    QTimer::singleShot(clipMs, this, [guard]{ if (guard) guard->stop(); });
 }
 
 // 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.
