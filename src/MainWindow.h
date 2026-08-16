@@ -266,6 +266,8 @@ private:
     QAudioSink*      m_sfxSink        = nullptr;
     QIODevice*       m_sfxIo          = nullptr;   // push 모드 기록 대상
     quint64          m_lastClickTs    = 0;         // 같은 클릭 중복 처리 방지
+    QTimer*          m_sfxKeepAlive   = nullptr;   // 무음 공급 → 스트림 유지
+    int              m_sfxBytesPerSec = 0;         // 무음 유지량 계산용
     void             loadClickSound();
     void             playClickSound();
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용

@@ -62,23 +62,35 @@ static constexpr DWORD JOY_RETURNALL_FLAGS = 0x000000FF;
 static constexpr DWORD JOY_POV_CENTERED    = 0xFFFF;  // JOY_POVCENTERED
 
 #else
-// ── Linux joystick 버튼 번호 (표준 Xbox 호환 패드 / Steam Deck) ─
-// /dev/input/js0 button number → libretro 인덱스 매핑에 사용
-// resetDefaultMapping() 이 이 상수들을 Windows/Linux 공통으로 사용
-static constexpr uint16_t XI_A          =  0;  // A  / Cross
-static constexpr uint16_t XI_B          =  1;  // B  / Circle
-static constexpr uint16_t XI_X          =  2;  // X  / Square
-static constexpr uint16_t XI_Y          =  3;  // Y  / Triangle
-static constexpr uint16_t XI_LB         =  4;  // L1
-static constexpr uint16_t XI_RB         =  5;  // R1
-static constexpr uint16_t XI_BACK       =  6;  // Back / Select
-static constexpr uint16_t XI_START      =  7;  // Start / Menu
-static constexpr uint16_t XI_L3         =  9;  // L3 (left stick click)
-static constexpr uint16_t XI_R3         = 10;  // R3 (right stick click)
-static constexpr uint16_t XI_DPAD_UP    = 13;  // D-pad Up
-static constexpr uint16_t XI_DPAD_DOWN  = 14;  // D-pad Down
-static constexpr uint16_t XI_DPAD_LEFT  = 11;  // D-pad Left
-static constexpr uint16_t XI_DPAD_RIGHT = 12;  // D-pad Right
+// ── Linux 원시 컨트롤 비트 (Windows XInput 과 동일한 "비트마스크 키" 방식) ──
+//   매핑 테이블의 key 가 이 비트값이다. 캡처도 같은 값을 돌려주므로
+//   D-패드/스틱까지 전부 리매핑할 수 있다.
+static constexpr uint32_t RAW_L2       = 1u << 16;
+static constexpr uint32_t RAW_R2       = 1u << 17;
+static constexpr uint32_t RAW_DP_UP    = 1u << 20;
+static constexpr uint32_t RAW_DP_DOWN  = 1u << 21;
+static constexpr uint32_t RAW_DP_LEFT  = 1u << 22;
+static constexpr uint32_t RAW_DP_RIGHT = 1u << 23;
+static constexpr uint32_t RAW_ST_UP    = 1u << 24;
+static constexpr uint32_t RAW_ST_DOWN  = 1u << 25;
+static constexpr uint32_t RAW_ST_LEFT  = 1u << 26;
+static constexpr uint32_t RAW_ST_RIGHT = 1u << 27;
+
+// 조이스틱 버튼 번호(xpad 표준) → 비트
+static constexpr uint32_t XI_A          = 1u << 0;   // A / Cross
+static constexpr uint32_t XI_B          = 1u << 1;   // B / Circle
+static constexpr uint32_t XI_X          = 1u << 2;   // X / Square
+static constexpr uint32_t XI_Y          = 1u << 3;   // Y / Triangle
+static constexpr uint32_t XI_LB         = 1u << 4;   // L1
+static constexpr uint32_t XI_RB         = 1u << 5;   // R1
+static constexpr uint32_t XI_BACK       = 1u << 6;   // Back / Select
+static constexpr uint32_t XI_START      = 1u << 7;   // Start / Menu
+static constexpr uint32_t XI_L3         = 1u << 9;   // L3
+static constexpr uint32_t XI_R3         = 1u << 10;  // R3
+static constexpr uint32_t XI_DPAD_UP    = RAW_DP_UP;
+static constexpr uint32_t XI_DPAD_DOWN  = RAW_DP_DOWN;
+static constexpr uint32_t XI_DPAD_LEFT  = RAW_DP_LEFT;
+static constexpr uint32_t XI_DPAD_RIGHT = RAW_DP_RIGHT;
 
 #  include <fcntl.h>
 #  include <unistd.h>
@@ -181,7 +193,11 @@ int GamepadManager::pollRawForCapture(bool winmm) {
     }
 #else
     Q_UNUSED(winmm)
-    return (m_jsFd >= 0) ? static_cast<int>(m_buttonBits | m_stickBits | m_dpadBits) : -1;
+    // 매핑 키와 같은 도메인(원시 비트)을 돌려줘야 캡처 결과가 그대로 키가 된다.
+    //   예전에는 libretro 비트를 돌려줘서 매핑이 어긋났고 D-패드는 잡히지도 않았다.
+    if (m_jsFd < 0) return -1;
+    readJoystick();                 // 최신 상태 반영
+    return static_cast<int>(m_rawBits);
 #endif
 }
 
@@ -198,12 +214,21 @@ QString GamepadManager::activeSource() const {
 }
 
 // ── 기본 매핑 (XInput — Xbox/표준 게임패드) ───────────────────
+// FBNeo 코어가 알려준 실제 버튼 정의 (게임 실행 중 확인):
+//     id 0 = Button A,  id 8 = Button B,  id 1 = Button C,  id 9 = Button D
+//     id 3 = Start, 14 = Select, 4/5/6/7 = 위/아래/왼쪽/오른쪽
+//     id 11 = AB, 10 = CD, 13 = ABC, 12 = BCD (동시입력 매크로)
+// NeoGeo 격투게임(KOF 등) 기준 배치:
+//     A = 약손, B = 약발, C = 강손, D = 강발
+// 패드 얼굴 버튼에는 격투게임 표준대로 얹는다 (Fightcade/아케이드 배치와 동일):
+//     X(왼쪽)=약손A   Y(위)=강손C
+//     A(아래)=약발B   B(오른쪽)=강발D
 void GamepadManager::resetDefaultMapping() {
     m_xinputMapping.clear();
-    m_xinputMapping[XI_A]          = 0;   // B  (NeoGeo A)
-    m_xinputMapping[XI_B]          = 8;   // A  (NeoGeo B)
-    m_xinputMapping[XI_X]          = 1;   // Y  (NeoGeo C)
-    m_xinputMapping[XI_Y]          = 9;   // X  (NeoGeo D)
+    m_xinputMapping[XI_X]          = 0;   // X → Button A (약손)
+    m_xinputMapping[XI_A]          = 8;   // A → Button B (약발)
+    m_xinputMapping[XI_Y]          = 1;   // Y → Button C (강손)
+    m_xinputMapping[XI_B]          = 9;   // B → Button D (강발)
     m_xinputMapping[XI_BACK]       = 2;   // SELECT
     m_xinputMapping[XI_START]      = 3;   // START
     m_xinputMapping[XI_DPAD_UP]    = 4;   // UP
@@ -216,6 +241,14 @@ void GamepadManager::resetDefaultMapping() {
     m_xinputMapping[0x20000]       = 13;  // R2
     m_xinputMapping[XI_L3]         = 14;
     m_xinputMapping[XI_R3]         = 15;
+#ifndef _WIN32
+    // Linux: 왼쪽 스틱도 방향키로 (D-패드와 동일하게 동작하도록)
+    //   Windows 는 readXInput 에서 스틱을 D-패드 비트에 합쳐 처리한다.
+    m_xinputMapping[RAW_ST_UP]     = 4;
+    m_xinputMapping[RAW_ST_DOWN]   = 5;
+    m_xinputMapping[RAW_ST_LEFT]   = 6;
+    m_xinputMapping[RAW_ST_RIGHT]  = 7;
+#endif
 }
 
 // ── 기본 매핑 (WinMM — 아케이드 스틱 / 일반 HID 패드) ─────────
@@ -223,11 +256,12 @@ void GamepadManager::resetDefaultMapping() {
 // NeoGeo 아케이드 스틱 표준 레이아웃 기준
 void GamepadManager::resetDefaultWinMM() {
     m_winmmMapping.clear();
-    // 버튼 1~4: 주 공격 버튼 (NeoGeo A/B/C/D)
-    m_winmmMapping[0]  = 0;   // 버튼 1 → JOYPAD_B  (NeoGeo A)
-    m_winmmMapping[1]  = 8;   // 버튼 2 → JOYPAD_A  (NeoGeo B)
-    m_winmmMapping[2]  = 1;   // 버튼 3 → JOYPAD_Y  (NeoGeo C)
-    m_winmmMapping[3]  = 9;   // 버튼 4 → JOYPAD_X  (NeoGeo D)
+    // 버튼 1~4 = 네오지오 A/B/C/D (아케이드 스틱은 왼쪽부터 A B C D 순서)
+    //   코어 정의: 0=A(약손), 8=B(약발), 1=C(강손), 9=D(강발)
+    m_winmmMapping[0]  = 0;   // 버튼 1 → Button A (약손)
+    m_winmmMapping[1]  = 8;   // 버튼 2 → Button B (약발)
+    m_winmmMapping[2]  = 1;   // 버튼 3 → Button C (강손)
+    m_winmmMapping[3]  = 9;   // 버튼 4 → Button D (강발)
     // 버튼 5~8: 숄더/추가 버튼
     m_winmmMapping[4]  = 10;  // 버튼 5 → L
     m_winmmMapping[5]  = 11;  // 버튼 6 → R
@@ -480,64 +514,53 @@ uint16_t GamepadManager::readJoystick() {
         if (ev.type & JS_EVENT_INIT) continue;
 
         if (ev.type == JS_EVENT_BUTTON) {
-            // 버튼 이벤트 → m_buttonBits 만 수정 (방향 비트와 분리)
-            auto it = m_xinputMapping.find(ev.number);
-            if (it != m_xinputMapping.end() && it.value() < 16) {
-                if (ev.value) m_buttonBits |=  (1u << it.value());
-                else          m_buttonBits &= ~(1u << it.value());
+            // 원시 비트만 갱신한다 (해석은 아래에서 매핑 테이블이 담당)
+            if (ev.number < 16) {
+                if (ev.value) m_rawBits |=  (1u << ev.number);
+                else          m_rawBits &= ~(1u << ev.number);
             }
 
         } else if (ev.type == JS_EVENT_AXIS) {
             int   axis = ev.number;
             short val  = ev.value;
 
-            if (axis == 0) {
-                // 왼쪽 스틱 X → m_stickBits (LEFT/RIGHT) — D-패드 비트 불간섭
-                m_stickBits &= ~((1u << LR_LT) | (1u << LR_RT));
-                if (val < -DEAD) m_stickBits |= (1u << LR_LT);
-                if (val >  DEAD) m_stickBits |= (1u << LR_RT);
-
-            } else if (axis == 1) {
-                // 왼쪽 스틱 Y → m_stickBits (UP/DOWN) — D-패드 비트 불간섭
-                m_stickBits &= ~((1u << LR_UP) | (1u << LR_DN));
-                if (val < -DEAD) m_stickBits |= (1u << LR_UP);
-                if (val >  DEAD) m_stickBits |= (1u << LR_DN);
-
-            } else if (axis == 6) {
-                // D-패드 X → m_dpadBits (LEFT/RIGHT) — 스틱 비트 불간섭
-                m_dpadBits &= ~((1u << LR_LT) | (1u << LR_RT));
-                if (val < -DEAD) m_dpadBits |= (1u << LR_LT);
-                if (val >  DEAD) m_dpadBits |= (1u << LR_RT);
-
-            } else if (axis == 7) {
-                // D-패드 Y → m_dpadBits (UP/DOWN)
-                m_dpadBits &= ~((1u << LR_UP) | (1u << LR_DN));
-                if (val < -DEAD) m_dpadBits |= (1u << LR_UP);
-                if (val >  DEAD) m_dpadBits |= (1u << LR_DN);
-
-            } else if (axis == 2) {
-                // LT 트리거 → L2
-                if (val > 0) m_buttonBits |=  (1u << LR_L2);
-                else         m_buttonBits &= ~(1u << LR_L2);
-
-            } else if (axis == 5) {
-                // RT 트리거 → R2
-                if (val > 0) m_buttonBits |=  (1u << LR_R2);
-                else         m_buttonBits &= ~(1u << LR_R2);
-            }
+            // 축도 "원시 비트"로 바꿔 둔다 → 매핑 테이블로 리매핑 가능해진다
+            auto setDir = [&](uint32_t negBit, uint32_t posBit) {
+                m_rawBits &= ~(negBit | posBit);
+                if (val < -DEAD) m_rawBits |= negBit;
+                if (val >  DEAD) m_rawBits |= posBit;
+            };
+            if      (axis == 0) setDir(RAW_ST_LEFT, RAW_ST_RIGHT);  // 왼쪽 스틱 X
+            else if (axis == 1) setDir(RAW_ST_UP,   RAW_ST_DOWN);   // 왼쪽 스틱 Y
+            else if (axis == 6) setDir(RAW_DP_LEFT, RAW_DP_RIGHT);  // D-패드 X
+            else if (axis == 7) setDir(RAW_DP_UP,   RAW_DP_DOWN);   // D-패드 Y
+            else if (axis == 2) { if (val > 0) m_rawBits |= RAW_L2; else m_rawBits &= ~RAW_L2; }
+            else if (axis == 5) { if (val > 0) m_rawBits |= RAW_R2; else m_rawBits &= ~RAW_R2; }
         }
     }
 
     if (errno == ENODEV) {
         ::close(m_jsFd);
         m_jsFd = -1;
-        m_buttonBits = 0; m_stickBits = 0; m_dpadBits = 0;
+        m_rawBits = 0; m_buttonBits = 0; m_stickBits = 0; m_dpadBits = 0;
         if (m_connected) { m_connected = false; emit disconnected(); }
         return 0;
     }
 
-    // 최종값: 버튼 + 스틱 + D-패드 OR 합산 (소스별 독립 → 간섭 없음)
-    return m_buttonBits | m_stickBits | m_dpadBits;
+    // ── 원시 비트를 매핑 테이블로 해석 (Windows XInput 과 동일한 흐름) ──
+    uint16_t result = 0;
+    for (auto it = m_xinputMapping.constBegin(); it != m_xinputMapping.constEnd(); ++it)
+        if ((m_rawBits & uint32_t(it.key())) && it.value() < 16)
+            result |= (1u << it.value());
+
+    // UI 네비게이션용 방향 비트 (D-패드 + 스틱 모두 인정)
+    m_dpadBits = 0;
+    if (m_rawBits & (RAW_DP_UP    | RAW_ST_UP))    m_dpadBits |= (1u << LR_UP);
+    if (m_rawBits & (RAW_DP_DOWN  | RAW_ST_DOWN))  m_dpadBits |= (1u << LR_DN);
+    if (m_rawBits & (RAW_DP_LEFT  | RAW_ST_LEFT))  m_dpadBits |= (1u << LR_LT);
+    if (m_rawBits & (RAW_DP_RIGHT | RAW_ST_RIGHT)) m_dpadBits |= (1u << LR_RT);
+
+    return result;
 }
 
 uint16_t GamepadManager::dpadBits() const {
@@ -554,6 +577,7 @@ uint16_t GamepadManager::dpadBits() const {
 // 이전 게임의 잔류 버튼/스틱 상태 제거 + Linux: fd 보류 이벤트 드레인
 void GamepadManager::clearState() {
 #ifndef _WIN32
+    m_rawBits    = 0;
     m_buttonBits = 0;
     m_stickBits  = 0;
     m_dpadBits   = 0;

@@ -92,9 +92,19 @@ private:
 
     int      m_jsFd       = -1;
     // ── 입력 누산기 (비트 간섭 방지를 위해 소스별 분리) ──────
-    // readJoystick() 반환 = m_buttonBits | m_stickBits | m_dpadBits
-    uint16_t m_buttonBits = 0;  // JS_EVENT_BUTTON → libretro 비트
-    uint16_t m_stickBits  = 0;  // axis 0/1 (왼쪽 스틱) → 방향 비트
-    uint16_t m_dpadBits   = 0;  // axis 6/7 (D-패드 hat) → 방향 비트 (UI 네비용)
+    // ── Linux 원시 입력 비트 ────────────────────────────────
+    //  ★ Windows(XInput) 와 같은 방식으로 통일했다.
+    //    예전에는 버튼만 매핑을 거치고 D-패드/스틱은 축(axis)이라 매핑을 건너뛰어
+    //      · 리매핑 화면에서 십자키가 아예 잡히지 않고
+    //      · 캡처가 돌려주는 값의 의미가 매핑 키와 달라 매핑이 어긋났다.
+    //    이제 "원시 컨트롤 비트" 하나로 모아 두고 매핑 테이블로 해석한다.
+    //      비트 0~15 : 조이스틱 버튼 번호
+    //      16/17     : L2 / R2 트리거
+    //      20~23     : D-패드 상/하/좌/우
+    //      24~27     : 왼쪽 스틱 상/하/좌/우
+    uint32_t m_rawBits    = 0;
+    uint16_t m_buttonBits = 0;  // (호환 유지용, 미사용)
+    uint16_t m_stickBits  = 0;
+    uint16_t m_dpadBits   = 0;  // UI 네비게이션용 방향 비트
 #endif
 };

@@ -1056,8 +1056,8 @@ void MainWindow::buildMainTab() {
     // 배경색은 영상 미재생 시(placeholder 대체 직전)에만 영향. 검정 유지.
     m_videoWidget->setStyleSheet("background:#000008;");
     m_videoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // 박스를 원본 비율에 맞추므로 잘라내지 않는다 (Windows 재생 경로)
-    m_videoWidget->setAspectRatioMode(Qt::KeepAspectRatio);
+    // 박스 고정 + 영상을 박스에 맞춰 늘림 (레터박스·잘림 없음) — Windows 경로
+    m_videoWidget->setAspectRatioMode(Qt::IgnoreAspectRatio);
     m_previewStack = new QStackedWidget;
     // QStackedWidget 도 palette 색 자동 채움이 활성화되어 있어
     // BorderPanel 의 반투명 내부 오버레이를 가려버린다. 명시적 해제.
@@ -3263,35 +3263,16 @@ QPixmap MainWindow::fitPreviewPixmap(const QPixmap& src) const {
     if (src.isNull() || !m_previewLabel) return src;
     const QSize target = m_previewLabel->size();
     if (target.width() < 4 || target.height() < 4) return src;
-    return src.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    // 박스는 고정, 이미지를 박스 크기에 맞춰 늘리거나 줄인다.
+    //   잘리는 부분도 남는 여백도 없다. (원본 비율과 다르면 약간 늘어난다)
+    return src.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
-// 프리뷰 박스의 가로폭을 원본(이미지/영상) 비율에 맞춘다.
-//   박스 높이는 레이아웃이 정하므로, 그 높이에서 원본 비율이 되는 가로폭을
-//   계산해 패널 폭을 고정한다 → 이미지가 잘리지도, 여백이 생기지도 않는다.
-//   남는 가로 공간은 EVENTS 박스가 가져간다.
+// 프리뷰 박스는 레이아웃이 정한 크기로 고정한다.
+//   (박스가 원본 비율을 따라 폭이 변하면 하단 레이아웃이 계속 흔들려 어색했다)
+//   이미지/영상은 fitPreviewPixmap 이 박스 크기에 맞춰 늘려 채운다.
 void MainWindow::applyPreviewAspect(const QSize& mediaSize) {
-    if (!m_previewPanel || !m_previewLabel) return;
-    if (mediaSize.width() <= 0 || mediaSize.height() <= 0) return;
-
-    m_previewMedia = mediaSize;                 // 리사이즈 때 다시 쓰려고 보관
-
-    const int panelH = m_previewPanel->height();
-    const int labelH = m_previewLabel->height();
-    if (panelH < 8 || labelH < 8) return;
-
-    // 패널 - 라벨 차이 = 테두리/제목 여백
-    const int padW = m_previewPanel->width() - m_previewLabel->width();
-    const double aspect = double(mediaSize.width()) / mediaSize.height();
-    int want = int(std::lround(labelH * aspect)) + qMax(0, padW);
-
-    // 하단 행 전체를 잡아먹지 않도록 제한 (EVENTS 가 최소한 남도록)
-    const int rowW = m_previewPanel->parentWidget()
-                     ? m_previewPanel->parentWidget()->width() : want * 2;
-    want = qBound(int(rowW * 0.20), want, int(rowW * 0.72));
-
-    if (qAbs(m_previewPanel->width() - want) > 2)
-        m_previewPanel->setFixedWidth(want);
+    m_previewMedia = mediaSize;
 }
 
 void MainWindow::loadPreview(const QString& romName) {
@@ -3316,11 +3297,6 @@ void MainWindow::loadPreview(const QString& romName) {
                 return;
             }
         }
-    }
-    // 표시할 것이 없으면 폭 고정을 풀어 기본 비율로 되돌린다
-    if (m_previewPanel) {
-        m_previewPanel->setMinimumWidth(0);
-        m_previewPanel->setMaximumWidth(QWIDGETSIZE_MAX);
     }
     m_previewMedia = QSize();
     m_previewLabel->setPixmap(QPixmap());
@@ -4446,11 +4422,37 @@ void MainWindow::loadClickSound() {
     if (dev.isNull()) { qWarning("클릭음: 오디오 출력 장치 없음"); return; }
 
     m_sfxPcm  = pcm;
+    m_sfxBytesPerSec = rate * ch * 2;       // 16bit = 2바이트
     m_sfxSink = new QAudioSink(dev, fmt, this);
     m_sfxSink->setVolume(0.35);
-    // ★ push 모드로 한 번만 연다. 클릭마다 stop/start 하면 재생이 누락된다.
-    m_sfxIo = m_sfxSink->start();
+    m_sfxIo = m_sfxSink->start();          // push 모드
     if (!m_sfxIo) { qWarning("클릭음: 오디오 출력 시작 실패"); return; }
+
+    // ★ 스트림을 무음으로 계속 먹여 살려둔다.
+    //   클릭 간격이 길면 버퍼가 비어 백엔드가 스트림을 정리해 버리고,
+    //   그 뒤로는 write 해도 소리가 나지 않았다(스팀덱에서 한 번만 들리던 원인).
+    //   일정 주기로 무음을 채워 스트림이 죽지 않게 한다. 데이터량은
+    //   초당 약 44KB(모노 22kHz 16bit)라 부담이 없다.
+    m_sfxKeepAlive = new QTimer(this);
+    m_sfxKeepAlive->setInterval(40);
+    connect(m_sfxKeepAlive, &QTimer::timeout, this, [this]{
+        if (!m_sfxSink) return;
+        if (m_sfxSink->state() == QAudio::StoppedState || !m_sfxIo) {
+            m_sfxIo = m_sfxSink->start();     // 그래도 멈췄다면 되살린다
+            if (!m_sfxIo) return;
+        }
+        // ★ 무음을 조금만 유지한다.
+        //   많이 쌓아두면 클릭음이 그 무음 뒤에 붙어 늦게 들린다.
+        //   약 50ms 분량만 유지 → 스트림은 살아있고 지연은 체감되지 않는다.
+        const int queued = m_sfxSink->bufferSize() - m_sfxSink->bytesFree();
+        const int target = m_sfxBytesPerSec / 20;          // 50ms
+        if (queued >= target) return;
+        const int need = qMin(target - queued, m_sfxSink->bytesFree());
+        if (need < 128) return;
+        m_sfxIo->write(QByteArray(need, char(0)));
+    });
+    m_sfxKeepAlive->start();
+
     qDebug("클릭음 준비: %d Hz, %dch, %d bytes", rate, ch, pcm.size());
 }
 
