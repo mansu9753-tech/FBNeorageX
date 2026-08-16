@@ -4421,62 +4421,42 @@ void MainWindow::loadClickSound() {
     const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
     if (dev.isNull()) { qWarning("클릭음: 오디오 출력 장치 없음"); return; }
 
-    m_sfxPcm  = pcm;
-    m_sfxBytesPerSec = rate * ch * 2;       // 16bit = 2바이트
-    m_sfxSink = new QAudioSink(dev, fmt, this);
-    m_sfxSink->setVolume(0.35);
-    m_sfxIo = m_sfxSink->start();          // push 모드
-    if (!m_sfxIo) { qWarning("클릭음: 오디오 출력 시작 실패"); return; }
-
-    // ★ 스트림을 무음으로 계속 먹여 살려둔다.
-    //   클릭 간격이 길면 버퍼가 비어 백엔드가 스트림을 정리해 버리고,
-    //   그 뒤로는 write 해도 소리가 나지 않았다(스팀덱에서 한 번만 들리던 원인).
-    //   일정 주기로 무음을 채워 스트림이 죽지 않게 한다. 데이터량은
-    //   초당 약 44KB(모노 22kHz 16bit)라 부담이 없다.
-    m_sfxKeepAlive = new QTimer(this);
-    m_sfxKeepAlive->setInterval(40);
-    connect(m_sfxKeepAlive, &QTimer::timeout, this, [this]{
-        if (!m_sfxSink) return;
-        if (m_sfxSink->state() == QAudio::StoppedState || !m_sfxIo) {
-            m_sfxIo = m_sfxSink->start();     // 그래도 멈췄다면 되살린다
-            if (!m_sfxIo) return;
-        }
-        // ★ 무음을 조금만 유지한다.
-        //   많이 쌓아두면 클릭음이 그 무음 뒤에 붙어 늦게 들린다.
-        //   약 50ms 분량만 유지 → 스트림은 살아있고 지연은 체감되지 않는다.
-        const int queued = m_sfxSink->bufferSize() - m_sfxSink->bytesFree();
-        const int target = m_sfxBytesPerSec / 20;          // 50ms
-        if (queued >= target) return;
-        const int need = qMin(target - queued, m_sfxSink->bytesFree());
-        if (need < 128) return;
-        m_sfxIo->write(QByteArray(need, char(0)));
-    });
-    m_sfxKeepAlive->start();
-
+    // ★ 오디오 장치를 미리 열어두지 않는다.
+    //   상시 스트림을 유지하면 PulseAudio 가 write 를 거부해
+    //   ("pa_stream_write error: Invalid argument") 40ms 마다 오류가 쏟아지고,
+    //   그 상태에서 프리뷰 영상이 오디오를 열면 프로그램이 멈췄다.
+    //   → 클릭할 때만 짧게 열고 재생이 끝나면 닫는다. 장치를 붙잡지 않으므로
+    //     프리뷰 영상/에뮬 오디오와 충돌하지 않는다.
+    m_sfxFmt   = fmt;
+    m_sfxPcm   = pcm;
     qDebug("클릭음 준비: %d Hz, %dch, %d bytes", rate, ch, pcm.size());
 }
 
 void MainWindow::playClickSound() {
-    if (!m_sfxSink || m_sfxPcm.isEmpty()) return;
+    if (m_sfxPcm.isEmpty()) return;
 
-    // ★ 스트림이 멈춰 있으면 다시 연다.
-    //   클릭 간격이 길면(수 초) 백엔드가 스트림을 정지시켜 이후 write 가
-    //   무시되고 소리가 영영 안 나던 문제 → 매번 상태를 확인해 되살린다.
-    const QAudio::State st = m_sfxSink->state();
-    if (!m_sfxIo || st == QAudio::StoppedState) {
-        m_sfxIo = m_sfxSink->start();
-        if (!m_sfxIo) return;
-    } else if (st == QAudio::SuspendedState) {
-        m_sfxSink->resume();
-    }
+    // 연타 제한 — 소리가 겹쳐 뭉치는 것과 장치 재열기 부담을 막는다
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_sfxLastPlay < 90) return;
+    m_sfxLastPlay = now;
 
-    // 연타로 큐가 밀리지 않게 여유가 있을 때만 넣는다 (지연 누적 방지)
-    if (m_sfxSink->bytesFree() < m_sfxPcm.size()) return;
-    if (m_sfxIo->write(m_sfxPcm) <= 0) {
-        // 기록 실패 → 스트림을 재생성해 다음 클릭부터 살아나게 한다
-        m_sfxSink->stop();
-        m_sfxIo = m_sfxSink->start();
-    }
+    // 이전 재생 정리 (장치를 붙잡고 있지 않도록 확실히 닫는다)
+    if (m_sfxSink) { m_sfxSink->stop(); m_sfxSink->deleteLater(); m_sfxSink = nullptr; }
+    if (m_sfxBuf)  { m_sfxBuf->close();  m_sfxBuf->deleteLater();  m_sfxBuf  = nullptr; }
+
+    const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+    if (dev.isNull()) return;
+
+    m_sfxBuf = new QBuffer(&m_sfxPcm, this);
+    if (!m_sfxBuf->open(QIODevice::ReadOnly)) return;
+
+    m_sfxSink = new QAudioSink(dev, m_sfxFmt, this);
+    m_sfxSink->setVolume(0.35);
+    // 재생이 끝나면(버퍼 소진) 곧바로 장치를 놓아준다
+    connect(m_sfxSink, &QAudioSink::stateChanged, this, [this](QAudio::State s){
+        if (s == QAudio::IdleState && m_sfxSink) m_sfxSink->stop();
+    });
+    m_sfxSink->start(m_sfxBuf);      // pull 모드 — 버퍼를 다 읽으면 Idle
 }
 
 // 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.

@@ -489,7 +489,9 @@ bool GamepadManager::openJoystick() {
             return true;
         }
     }
-    qWarning() << "GamepadManager: 조이스틱 없음";
+    // 폴링마다 찍히면 로그가 도배되어 정작 필요한 메시지가 묻힌다 → 한 번만
+    static bool warned = false;
+    if (!warned) { warned = true; qWarning() << "GamepadManager: 조이스틱 없음"; }
     return false;
 }
 

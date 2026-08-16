@@ -264,10 +264,10 @@ private:
     //     (검증: 10회 중 10회 재생, 총 541ms ≈ 57ms × 10)
     QByteArray       m_sfxPcm;                     // WAV 본문 PCM
     QAudioSink*      m_sfxSink        = nullptr;
-    QIODevice*       m_sfxIo          = nullptr;   // push 모드 기록 대상
+    QBuffer*         m_sfxBuf         = nullptr;   // 재생용 PCM 리더
+    QAudioFormat     m_sfxFmt;                     // 클릭음 포맷
     quint64          m_lastClickTs    = 0;         // 같은 클릭 중복 처리 방지
-    QTimer*          m_sfxKeepAlive   = nullptr;   // 무음 공급 → 스트림 유지
-    int              m_sfxBytesPerSec = 0;         // 무음 유지량 계산용
+    qint64           m_sfxLastPlay    = 0;         // 연타 제한
     void             loadClickSound();
     void             playClickSound();
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
