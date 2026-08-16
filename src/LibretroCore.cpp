@@ -267,6 +267,21 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data) {
         *static_cast<const char**>(data) = gState.saveDir.constData();
         return !gState.saveDir.isEmpty();
 
+    case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS: {
+        // 코어가 현재 게임의 버튼 의미를 알려준다.
+        //   예) NeoGeo → id 1 = "Button A", id 0 = "Button B" ...
+        //   이 정보가 있어야 "네오지오 A=약손" 같은 배치를 추측 없이 맞출 수 있다.
+        gState.inputDesc.clear();
+        auto d = static_cast<const retro_input_descriptor*>(data);
+        while (d && d->description) {
+            if (d->port == 0 && d->device == RETRO_DEVICE_JOYPAD && d->id < 16)
+                gState.inputDesc.insert(int(d->id),
+                                        QString::fromUtf8(d->description).trimmed());
+            ++d;
+        }
+        qDebug() << "[core] 입력 설명" << gState.inputDesc.size() << "개 수신";
+        return true;
+    }
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: {
         auto cb = static_cast<retro_log_callback*>(data);
         cb->log = logCb;

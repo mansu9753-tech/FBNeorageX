@@ -1056,8 +1056,8 @@ void MainWindow::buildMainTab() {
     // 배경색은 영상 미재생 시(placeholder 대체 직전)에만 영향. 검정 유지.
     m_videoWidget->setStyleSheet("background:#000008;");
     m_videoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // 레터박스 없이 영역을 꽉 채운다 (넘치는 부분은 잘림) — Windows 재생 경로
-    m_videoWidget->setAspectRatioMode(Qt::KeepAspectRatioByExpanding);
+    // 박스를 원본 비율에 맞추므로 잘라내지 않는다 (Windows 재생 경로)
+    m_videoWidget->setAspectRatioMode(Qt::KeepAspectRatio);
     m_previewStack = new QStackedWidget;
     // QStackedWidget 도 palette 색 자동 채움이 활성화되어 있어
     // BorderPanel 의 반투명 내부 오버레이를 가려버린다. 명시적 해제.
@@ -1074,7 +1074,8 @@ void MainWindow::buildMainTab() {
     m_previewVideo = new PreviewVideo(this);
     connect(m_previewVideo, &PreviewVideo::frameReady, this, [this](const QImage& img){
         if (!m_previewLabel || img.isNull()) return;
-        // 이미지와 동일하게 레터박스 없이 꽉 채운다
+        // 영상도 박스를 원본 비율에 맞춘 뒤 잘림 없이 표시
+        if (img.size() != m_previewMedia) applyPreviewAspect(img.size());
         m_previewLabel->setPixmap(fitPreviewPixmap(QPixmap::fromImage(img)));
     });
     connect(m_previewVideo, &PreviewVideo::failed, this, [this](const QString& why){
@@ -3253,21 +3254,44 @@ void MainWindow::selectGame(const QString& romName) {
     loadPreview(romName);
 }
 
-// 프리뷰 영역을 레터박스 없이 꽉 채운다.
-//   비율을 유지한 채 영역보다 크게 확대한 뒤 가운데를 잘라낸다.
-//   (KeepAspectRatio 는 남는 쪽에 검은 띠가 생겨 화면이 작아 보였다)
+// 프리뷰 표시 — 잘라내지 않는다.
+//   박스 자체를 원본 비율에 맞춰 놓았으므로(applyPreviewAspect) 비율을 유지한
+//   채 키우기만 하면 남는 여백 없이 꽉 찬다.
+//   ※ 예전에는 확대 후 중앙을 잘라내(KeepAspectRatioByExpanding) 위아래가
+//     날아가 어색했다 → 크롭 제거.
 QPixmap MainWindow::fitPreviewPixmap(const QPixmap& src) const {
     if (src.isNull() || !m_previewLabel) return src;
     const QSize target = m_previewLabel->size();
     if (target.width() < 4 || target.height() < 4) return src;
+    return src.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
 
-    const QPixmap big = src.scaled(target, Qt::KeepAspectRatioByExpanding,
-                                   Qt::SmoothTransformation);
-    const int x = (big.width()  - target.width())  / 2;
-    const int y = (big.height() - target.height()) / 2;
-    return big.copy(QRect(qMax(0, x), qMax(0, y),
-                          qMin(target.width(),  big.width()),
-                          qMin(target.height(), big.height())));
+// 프리뷰 박스의 가로폭을 원본(이미지/영상) 비율에 맞춘다.
+//   박스 높이는 레이아웃이 정하므로, 그 높이에서 원본 비율이 되는 가로폭을
+//   계산해 패널 폭을 고정한다 → 이미지가 잘리지도, 여백이 생기지도 않는다.
+//   남는 가로 공간은 EVENTS 박스가 가져간다.
+void MainWindow::applyPreviewAspect(const QSize& mediaSize) {
+    if (!m_previewPanel || !m_previewLabel) return;
+    if (mediaSize.width() <= 0 || mediaSize.height() <= 0) return;
+
+    m_previewMedia = mediaSize;                 // 리사이즈 때 다시 쓰려고 보관
+
+    const int panelH = m_previewPanel->height();
+    const int labelH = m_previewLabel->height();
+    if (panelH < 8 || labelH < 8) return;
+
+    // 패널 - 라벨 차이 = 테두리/제목 여백
+    const int padW = m_previewPanel->width() - m_previewLabel->width();
+    const double aspect = double(mediaSize.width()) / mediaSize.height();
+    int want = int(std::lround(labelH * aspect)) + qMax(0, padW);
+
+    // 하단 행 전체를 잡아먹지 않도록 제한 (EVENTS 가 최소한 남도록)
+    const int rowW = m_previewPanel->parentWidget()
+                     ? m_previewPanel->parentWidget()->width() : want * 2;
+    want = qBound(int(rowW * 0.20), want, int(rowW * 0.72));
+
+    if (qAbs(m_previewPanel->width() - want) > 2)
+        m_previewPanel->setFixedWidth(want);
 }
 
 void MainWindow::loadPreview(const QString& romName) {
@@ -3285,6 +3309,7 @@ void MainWindow::loadPreview(const QString& romName) {
         if (QFile::exists(path)) {
             QPixmap px(path);
             if (!px.isNull()) {
+                applyPreviewAspect(px.size());      // 박스를 이미지 비율로
                 m_previewLabel->setPixmap(fitPreviewPixmap(px));
                 // 3초 후 영상 자동재생 시작
                 if (m_previewVidTimer) m_previewVidTimer->start();
@@ -3292,6 +3317,12 @@ void MainWindow::loadPreview(const QString& romName) {
             }
         }
     }
+    // 표시할 것이 없으면 폭 고정을 풀어 기본 비율로 되돌린다
+    if (m_previewPanel) {
+        m_previewPanel->setMinimumWidth(0);
+        m_previewPanel->setMaximumWidth(QWIDGETSIZE_MAX);
+    }
+    m_previewMedia = QSize();
     m_previewLabel->setPixmap(QPixmap());
     m_previewLabel->setText("NO PREVIEW\n" + romName.toUpper());
     m_previewLabel->setStyleSheet(
@@ -3501,6 +3532,16 @@ void MainWindow::startEmu() {
     QTimer::singleShot(300, this, &MainWindow::rebuildMachineSettings);
     // 같은 시점에 치트 목록도 갱신 — 코어가 등록한 네이티브 치트 옵션을 표시
     QTimer::singleShot(300, this, &MainWindow::refreshCheatList);
+
+    // 코어가 알려준 버튼 의미를 남긴다 (기종별 기본 배치를 맞추는 근거)
+    QTimer::singleShot(320, this, [this]{
+        if (gState.inputDesc.isEmpty()) return;
+        QStringList parts;
+        QList<int> ids = gState.inputDesc.keys();
+        std::sort(ids.begin(), ids.end());
+        for (int id : ids) parts << QString("%1=%2").arg(id).arg(gState.inputDesc.value(id));
+        log("🎮 코어 버튼 정의: " + parts.join(", "));
+    });
     log(QString("▶ 에뮬 시작 (%1 FPS)").arg(gState.coreFps, 0, 'f', 2));
 }
 
@@ -4414,10 +4455,26 @@ void MainWindow::loadClickSound() {
 }
 
 void MainWindow::playClickSound() {
-    if (!m_sfxIo || !m_sfxSink || m_sfxPcm.isEmpty()) return;
+    if (!m_sfxSink || m_sfxPcm.isEmpty()) return;
+
+    // ★ 스트림이 멈춰 있으면 다시 연다.
+    //   클릭 간격이 길면(수 초) 백엔드가 스트림을 정지시켜 이후 write 가
+    //   무시되고 소리가 영영 안 나던 문제 → 매번 상태를 확인해 되살린다.
+    const QAudio::State st = m_sfxSink->state();
+    if (!m_sfxIo || st == QAudio::StoppedState) {
+        m_sfxIo = m_sfxSink->start();
+        if (!m_sfxIo) return;
+    } else if (st == QAudio::SuspendedState) {
+        m_sfxSink->resume();
+    }
+
     // 연타로 큐가 밀리지 않게 여유가 있을 때만 넣는다 (지연 누적 방지)
     if (m_sfxSink->bytesFree() < m_sfxPcm.size()) return;
-    m_sfxIo->write(m_sfxPcm);
+    if (m_sfxIo->write(m_sfxPcm) <= 0) {
+        // 기록 실패 → 스트림을 재생성해 다음 클릭부터 살아나게 한다
+        m_sfxSink->stop();
+        m_sfxIo = m_sfxSink->start();
+    }
 }
 
 // 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.
@@ -4715,7 +4772,14 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
     //     더블클릭 시 소리가 두 번 겹치지 않도록 Press 만 사용.
     if (ev->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(ev);
-        if (me->button() == Qt::LeftButton) playClickSound();
+        // ★ qApp 필터는 같은 클릭을 위젯용/윈도우용으로 두 번 본다.
+        //   그대로 두면 클릭 한 번에 소리가 두 번 났다.
+        //   → 위젯 이벤트만 받고, 같은 타임스탬프는 한 번만 처리한다.
+        if (me->button() == Qt::LeftButton && obj && obj->isWidgetType()
+            && me->timestamp() != m_lastClickTs) {
+            m_lastClickTs = me->timestamp();
+            playClickSound();
+        }
     }
 
     // ── 마우스 이동 / 클릭 → 커서 타이머 리셋 ─────────────────

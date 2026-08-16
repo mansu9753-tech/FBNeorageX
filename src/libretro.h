@@ -132,6 +132,17 @@ struct retro_system_info {
     bool        block_extract;
 };
 
+// 코어가 "이 버튼 id 는 이 게임에서 무슨 역할인지" 알려주는 구조체.
+//   NeoGeo 라면 id 별로 "Button A" / "Button B" ... 같은 이름이 온다.
+//   description 이 NULL 인 항목이 배열의 끝.
+struct retro_input_descriptor {
+    unsigned    port;
+    unsigned    device;
+    unsigned    index;
+    unsigned    id;
+    const char* description;
+};
+
 struct retro_variable {
     const char* key;
     const char* value;

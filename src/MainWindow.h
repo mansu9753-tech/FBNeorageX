@@ -176,8 +176,11 @@ private:
 
     // ── 프리뷰 ──────────────────────────────────────────
     void loadPreview(const QString& romName);
-    // 프리뷰 영역을 레터박스 없이 꽉 채우도록 스케일+중앙 크롭
+    // 프리뷰 표시 (비율 유지, 크롭 없음)
     QPixmap fitPreviewPixmap(const QPixmap& src) const;
+    // 프리뷰 박스 폭을 원본 비율에 맞춰 조정 → 잘림도 여백도 없게
+    void    applyPreviewAspect(const QSize& mediaSize);
+    QSize   m_previewMedia;      // 현재 표시 중인 원본 크기 (리사이즈 대응)
     void loadPreviewVideo(const QString& romName);
 
     // ── 마우스 커서 자동 숨김 ───────────────────────────
@@ -262,6 +265,7 @@ private:
     QByteArray       m_sfxPcm;                     // WAV 본문 PCM
     QAudioSink*      m_sfxSink        = nullptr;
     QIODevice*       m_sfxIo          = nullptr;   // push 모드 기록 대상
+    quint64          m_lastClickTs    = 0;         // 같은 클릭 중복 처리 방지
     void             loadClickSound();
     void             playClickSound();
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용

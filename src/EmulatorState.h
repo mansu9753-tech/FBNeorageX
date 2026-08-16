@@ -94,6 +94,11 @@ struct EmulatorState {
     QHash<QString, QString>     variables;          // key → 현재 값
     QHash<QString, QStringList> variableOptions;    // key → ["opt1","opt2",...]
     QHash<QString, QString>     variableDescriptions; // key → 설명 텍스트
+
+    // 코어가 알려준 버튼 의미 (port 0 기준): libretro 버튼 id → 이름
+    //   예) NeoGeo: 1="Button A", 0="Button B", 9="Button C", 8="Button D"
+    //   컨트롤 매핑 UI 표시와 기종별 기본 배치 계산에 사용.
+    QHash<int, QString>         inputDesc;
     std::atomic<bool>           variablesUpdated = false; // SET_VARIABLE 후 true
 
     // ── 녹화 ──────────────────────────────────────────────
