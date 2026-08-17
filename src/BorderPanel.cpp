@@ -109,8 +109,7 @@ void BorderPanel::resizeEvent(QResizeEvent* event) {
 void BorderPanel::setClassicStyle(bool on) {
     if (m_classic == on) return;
     m_classic = on;
-    m_prog = 1.0;              // 클래식은 등장 애니메이션 없이 바로 표시
-    if (m_timer) m_timer->stop();
+    // ★ 애니메이션은 그대로 둔다 — 클래식에서도 선이 그려지는 연출을 쓴다.
     updateMargins();
     update();
 }
@@ -177,14 +176,55 @@ void BorderPanel::paintEvent(QPaintEvent* event)
         // 내부를 살짝 어둡게 깔아 글자 가독성 확보 (배경은 여전히 비쳐 보임)
         p.fillRect(QRect(bw, bw, W - 2*bw, H - 2*bw), QColor(0, 0, 16, 120));
 
-        // 테두리 — 원본의 선명한 파랑
-        const QColor line(0x20, 0x50, 0xff);
+        // ── 등장 애니메이션 ──────────────────────────────────
+        //   한쪽 모서리에서 선이 뻗어나가 사각형을 그려 나간다.
+        //   (원본 NeoRageX 의 박스가 그려지는 느낌)
+        const bool full  = (m_prog >= 1.0);
+        const int  perim = 2 * (W + H);
+        const int  drawn = full ? perim : int(perim * m_prog);
+        auto seg = [&](int start, int len) {
+            if (full) return len;
+            const int rem = drawn - start;
+            return (rem <= 0) ? 0 : std::min(rem, len);
+        };
+        const int dTop   = seg(0,         W);
+        const int dRight = seg(W,         H);
+        const int dBot   = seg(W + H,     W);
+        const int dLeft  = seg(W + H + W, H);
+
+        // ── 입체 파이프 테두리 ───────────────────────────────
+        //   위/왼쪽은 밝게, 아래/오른쪽은 어둡게 칠해 볼록한 관처럼 보이게 한다.
+        //   (단색 한 겹이면 평평해 보여 원본의 다이렉트 느낌이 나지 않는다)
+        auto pipe = [&](const QRect& r, bool vertical, bool darkSide) {
+            if (r.width() <= 0 || r.height() <= 0) return;
+            QLinearGradient g(r.topLeft(), vertical ? r.topRight() : r.bottomLeft());
+            if (darkSide) {   // 아래/오른쪽 변 — 어두운 쪽이 바깥
+                g.setColorAt(0.00, QColor(0x4a, 0x7a, 0xff));
+                g.setColorAt(0.45, QColor(0x22, 0x4e, 0xe0));
+                g.setColorAt(1.00, QColor(0x08, 0x1c, 0x78));
+            } else {          // 위/왼쪽 변 — 밝은 쪽이 바깥 (하이라이트)
+                g.setColorAt(0.00, QColor(0xbf, 0xd6, 0xff));
+                g.setColorAt(0.35, QColor(0x53, 0x86, 0xff));
+                g.setColorAt(1.00, QColor(0x14, 0x33, 0xa8));
+            }
+            p.fillRect(r, g);
+        };
         p.setPen(Qt::NoPen);
-        p.setBrush(line);
-        p.drawRect(0, 0, W, bw);              // 위
-        p.drawRect(0, H - bw, W, bw);         // 아래
-        p.drawRect(0, 0, bw, H);              // 좌
-        p.drawRect(W - bw, 0, bw, H);         // 우
+        // 위 (왼→오), 오른쪽 (위→아래), 아래 (오→왼), 왼쪽 (아래→위) 순서로 그려진다
+        pipe(QRect(0, 0, dTop, bw), false, false);                       // 위
+        pipe(QRect(W - bw, 0, bw, dRight), true, true);                  // 오른쪽
+        pipe(QRect(W - dBot, H - bw, dBot, bw), false, true);            // 아래
+        pipe(QRect(0, H - dLeft, bw, dLeft), true, false);               // 왼쪽
+
+        // 안쪽 모서리에 얇은 그림자/하이라이트 → 파이프가 도드라져 보인다
+        if (full && bw >= 3) {
+            p.setPen(QPen(QColor(0, 0, 0, 120), 1));
+            p.drawLine(bw, bw, W - bw - 1, bw);                 // 안쪽 위
+            p.drawLine(bw, bw, bw, H - bw - 1);                 // 안쪽 왼쪽
+            p.setPen(QPen(QColor(255, 255, 255, 60), 1));
+            p.drawLine(bw, H - bw - 1, W - bw - 1, H - bw - 1); // 안쪽 아래
+            p.drawLine(W - bw - 1, bw, W - bw - 1, H - bw - 1); // 안쪽 오른쪽
+        }
 
         // 제목 — 좌상단, 테두리 바로 안쪽에 배치
         //   (테두리를 굵게 했으므로 시작 위치를 테두리 두께만큼 더 띄운다)

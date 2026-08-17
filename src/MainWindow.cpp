@@ -1568,22 +1568,39 @@ void MainWindow::buildControlsPage(QWidget* page) {
     }
 
     // ── 하단 리셋 버튼 ───────────────────────────────────────
+    //  ★ 전역만 지우면 게임별/기종별로 저장해 둔 설정이 그대로 남아 우선 적용되어
+    //    "리셋했는데 그대로"가 된다. 지금 보고 있는 게임의 스코프도 함께 지운다.
+    auto clearScopesFor = [this](QHash<QString, QHash<int,int>>& scoped) {
+        const QString rom = !m_loadedGame.isEmpty() ? m_loadedGame : m_selectedGame;
+        if (rom.isEmpty()) return QString();
+        const QString gk = "game:" + rom;
+        const QString pk = "plat:" + gamePlatform(rom);
+        QStringList removed;
+        if (scoped.remove(gk) > 0) removed << "게임별";
+        if (scoped.remove(pk) > 0) removed << "기종별";
+        return removed.join("+");
+    };
+
     QPushButton* resetKbBtn = new QPushButton("RESET KEYBOARD");
     resetKbBtn->setStyleSheet(btnStyle(false)); resetKbBtn->setFixedHeight(26);
-    connect(resetKbBtn, &QPushButton::clicked, this, [this]{
+    connect(resetKbBtn, &QPushButton::clicked, this, [this, clearScopesFor]{
         m_keymap = buildDefaultKeymap();
         gSettings.keyboardMapping.clear();
+        const QString cleared = clearScopesFor(gSettings.kbScoped);
         gSettings.save(); refreshControlsTable();
-        log("키보드 매핑 기본값으로 초기화됨");
+        log("키보드 매핑 기본값으로 초기화됨"
+            + (cleared.isEmpty() ? QString() : QString(" (%1 설정도 삭제)").arg(cleared)));
     });
 
     QPushButton* resetPadBtn = new QPushButton("RESET GAMEPAD");
     resetPadBtn->setStyleSheet(btnStyle(false)); resetPadBtn->setFixedHeight(26);
-    connect(resetPadBtn, &QPushButton::clicked, this, [this]{
+    connect(resetPadBtn, &QPushButton::clicked, this, [this, clearScopesFor]{
         m_gamepad->resetDefaultMapping();
         gSettings.xinputMapping.clear();
+        const QString cleared = clearScopesFor(gSettings.xiScoped);
         gSettings.save(); refreshPadTable();
-        log("게임패드(XInput) 매핑 기본값으로 초기화됨");
+        log("게임패드 매핑 기본값으로 초기화됨"
+            + (cleared.isEmpty() ? QString() : QString(" (%1 설정도 삭제)").arg(cleared)));
     });
 
     QPushButton* resetArcBtn = new QPushButton("RESET ARCADE");
@@ -3291,6 +3308,12 @@ void MainWindow::selectGame(const QString& romName) {
     QString displayName = getGameDisplayName(romName);
     log(QString("선택: %1 (%2)").arg(displayName).arg(romName));
 
+    // 선택이 바뀌면 그 게임에 맞는 컨트롤 매핑을 불러온다 (게임 실행 중이 아닐 때만).
+    //   예전에는 게임을 "실행"할 때만 해석해서, 메뉴에서 게임을 바꿔도 컨트롤
+    //   화면이 이전 게임 설정을 계속 보여줬다.
+    if (!gState.gameLoaded && !gState.isPaused)
+        resolveAndApplyControls(romName);
+
     loadPreview(romName);
 }
 
@@ -4918,6 +4941,13 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
+    // ESC — 게임 중이 아니면 프로그램 종료
+    //   (게임 중에는 위에서 "게임 종료"로 먼저 처리된다)
+    if (hotkeyMatch("exit", k, mods) && !gState.gameLoaded && !gState.isPaused) {
+        close();
+        return;
+    }
+
     // 전체화면
     if (hotkeyMatch("fullscreen", k, mods)) { toggleFullscreen(); return; }
 
@@ -5161,7 +5191,12 @@ void MainWindow::resolveAndApplyControls(const QString& rom) {
 // 현재 테이블(m_keymap 등) 상태를 지정 스코프로 저장
 //   scope: "global"(전역) / "plat"(기종별) / "game"(게임별)
 void MainWindow::saveControlsToScope(const QString& scope) {
-    const QString rom = m_ctrlScopeRom.isEmpty() ? m_selectedGame : m_ctrlScopeRom;
+    // ★ 저장 대상은 "지금 보고 있는 게임" 이어야 한다.
+    //   예전에는 m_ctrlScopeRom(마지막으로 실행한 게임)을 우선 썼는데, 이 값은
+    //   게임을 실행할 때만 갱신되어서 메뉴에서 다른 게임을 고른 뒤 저장하면
+    //   엉뚱하게 이전 게임에 저장됐다.
+    //   → 실행 중이면 그 게임, 아니면 목록에서 선택한 게임.
+    const QString rom = !m_loadedGame.isEmpty() ? m_loadedGame : m_selectedGame;
 
     QHash<int,int> xi = m_gamepad ? m_gamepad->getXInputMapping() : QHash<int,int>();
     QHash<int,int> wm = m_gamepad ? m_gamepad->getWinMMMapping()  : QHash<int,int>();
@@ -5177,7 +5212,8 @@ void MainWindow::saveControlsToScope(const QString& scope) {
         gSettings.kbScoped[pk] = m_keymap;
         gSettings.xiScoped[pk] = xi;
         gSettings.wmScoped[pk] = wm;
-        log(QString("🎮 컨트롤 → 기종별 저장 (%1)").arg(gamePlatform(rom)));
+        log(QString("🎮 컨트롤 → 기종별 저장 [%1] (기준 게임: %2)")
+            .arg(gamePlatform(rom), rom));
     } else { // game
         if (rom.isEmpty()) { log("⚠ 게임별 저장: 게임을 먼저 선택하세요"); return; }
         QString gk = "game:" + rom;
