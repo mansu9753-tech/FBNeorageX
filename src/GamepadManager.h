@@ -114,6 +114,11 @@ private:
     //      20~23     : D-패드 상/하/좌/우
     //      24~27     : 왼쪽 스틱 상/하/좌/우
     uint32_t m_rawBits    = 0;
+    // 연결된 조이스틱을 전부 연다 (내장 + 블루투스 등). 하나만 열면 나중에
+    // 연결한 패드가 무시되고, 먼저 잡힌 패드가 다른 패드를 막아버린다.
+    static constexpr int kMaxPads = 4;
+    int      m_jsFds[kMaxPads] = { -1, -1, -1, -1 };
+    int      m_rescanTick = 0;      // 주기적 재탐색(핫플러그) 카운터
     uint16_t m_buttonBits = 0;  // (호환 유지용, 미사용)
     uint16_t m_stickBits  = 0;
     uint16_t m_dpadBits   = 0;  // UI 네비게이션용 방향 비트

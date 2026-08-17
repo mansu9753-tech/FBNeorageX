@@ -119,8 +119,8 @@ void BorderPanel::setClassicStyle(bool on) {
 //   해상도가 커져도 같은 인상을 주도록 살짝만 스케일한다.
 static int classicBorderW(int w, int h) {
     const double scale = qMax(1.0, qMin(w, h) / 480.0);
-    // 기본 4px (기존 2px 의 2배) — 원본보다 굵게 해서 박스가 또렷하게 보이도록
-    return qBound(4, qRound(4.0 * scale), 8);
+    // 기본 12px — 얇아서 티가 안 난다고 하여 기존(4px)의 3배로 키움
+    return qBound(10, qRound(12.0 * scale), 26);
 }
 static int classicTitleH(int w, int h) {
     const double scale = qMax(1.0, qMin(w, h) / 480.0);
@@ -193,37 +193,54 @@ void BorderPanel::paintEvent(QPaintEvent* event)
         const int dLeft  = seg(W + H + W, H);
 
         // ── 입체 파이프 테두리 ───────────────────────────────
-        //   위/왼쪽은 밝게, 아래/오른쪽은 어둡게 칠해 볼록한 관처럼 보이게 한다.
-        //   (단색 한 겹이면 평평해 보여 원본의 다이렉트 느낌이 나지 않는다)
-        auto pipe = [&](const QRect& r, bool vertical, bool darkSide) {
-            if (r.width() <= 0 || r.height() <= 0) return;
-            QLinearGradient g(r.topLeft(), vertical ? r.topRight() : r.bottomLeft());
-            if (darkSide) {   // 아래/오른쪽 변 — 어두운 쪽이 바깥
-                g.setColorAt(0.00, QColor(0x4a, 0x7a, 0xff));
-                g.setColorAt(0.45, QColor(0x22, 0x4e, 0xe0));
-                g.setColorAt(1.00, QColor(0x08, 0x1c, 0x78));
-            } else {          // 위/왼쪽 변 — 밝은 쪽이 바깥 (하이라이트)
-                g.setColorAt(0.00, QColor(0xbf, 0xd6, 0xff));
-                g.setColorAt(0.35, QColor(0x53, 0x86, 0xff));
-                g.setColorAt(1.00, QColor(0x14, 0x33, 0xa8));
-            }
-            p.fillRect(r, g);
-        };
-        p.setPen(Qt::NoPen);
-        // 위 (왼→오), 오른쪽 (위→아래), 아래 (오→왼), 왼쪽 (아래→위) 순서로 그려진다
-        pipe(QRect(0, 0, dTop, bw), false, false);                       // 위
-        pipe(QRect(W - bw, 0, bw, dRight), true, true);                  // 오른쪽
-        pipe(QRect(W - dBot, H - bw, dBot, bw), false, true);            // 아래
-        pipe(QRect(0, H - dLeft, bw, dLeft), true, false);               // 왼쪽
+        //   ★ 변마다 따로 칠하면 모서리에서 그라디언트가 끊겨 이어지지 않아
+        //     보였다. 사각 링(바깥-안쪽) 하나를 만들어 대각선 그라디언트로
+        //     한 번에 칠한다 → 네 모서리가 자연스럽게 연결된다.
+        //   애니메이션은 "그려진 구간"만 클리핑해서 보여주는 방식으로 처리.
+        QRegion drawnRegion;
+        if (full) {
+            drawnRegion = QRegion(0, 0, W, H);
+        } else {
+            if (dTop   > 0) drawnRegion += QRect(0, 0, dTop, bw);
+            if (dRight > 0) drawnRegion += QRect(W - bw, 0, bw, dRight);
+            if (dBot   > 0) drawnRegion += QRect(W - dBot, H - bw, dBot, bw);
+            if (dLeft  > 0) drawnRegion += QRect(0, H - dLeft, bw, dLeft);
+        }
 
-        // 안쪽 모서리에 얇은 그림자/하이라이트 → 파이프가 도드라져 보인다
-        if (full && bw >= 3) {
-            p.setPen(QPen(QColor(0, 0, 0, 120), 1));
-            p.drawLine(bw, bw, W - bw - 1, bw);                 // 안쪽 위
-            p.drawLine(bw, bw, bw, H - bw - 1);                 // 안쪽 왼쪽
-            p.setPen(QPen(QColor(255, 255, 255, 60), 1));
-            p.drawLine(bw, H - bw - 1, W - bw - 1, H - bw - 1); // 안쪽 아래
-            p.drawLine(W - bw - 1, bw, W - bw - 1, H - bw - 1); // 안쪽 오른쪽
+        if (!drawnRegion.isEmpty()) {
+            p.save();
+            p.setClipRegion(drawnRegion);
+
+            QPainterPath ring;
+            ring.addRect(0, 0, W, H);
+            ring.addRect(bw, bw, W - 2*bw, H - 2*bw);   // 안쪽을 빼서 링으로
+            ring.setFillRule(Qt::OddEvenFill);
+
+            // 좌상단은 밝게, 우하단은 어둡게 — 빛이 왼쪽 위에서 오는 관 느낌
+            QLinearGradient g(0, 0, W, H);
+            g.setColorAt(0.00, QColor(0xd6, 0xe6, 0xff));
+            g.setColorAt(0.18, QColor(0x7d, 0xa8, 0xff));
+            g.setColorAt(0.50, QColor(0x2b, 0x57, 0xee));
+            g.setColorAt(0.82, QColor(0x14, 0x30, 0xa4));
+            g.setColorAt(1.00, QColor(0x06, 0x14, 0x5e));
+            p.fillPath(ring, g);
+
+            // 바깥/안쪽 가장자리에 얇은 선 → 관의 둥근 느낌을 강조
+            p.setPen(QPen(QColor(255, 255, 255, 90), 1));
+            p.drawLine(0, 0, W - 1, 0);                        // 바깥 위
+            p.drawLine(0, 0, 0, H - 1);                        // 바깥 왼쪽
+            p.setPen(QPen(QColor(0, 0, 0, 140), 1));
+            p.drawLine(0, H - 1, W - 1, H - 1);                // 바깥 아래
+            p.drawLine(W - 1, 0, W - 1, H - 1);                // 바깥 오른쪽
+            if (bw >= 4) {
+                p.setPen(QPen(QColor(0, 0, 0, 130), 1));
+                p.drawLine(bw, bw, W - bw - 1, bw);                 // 안쪽 위
+                p.drawLine(bw, bw, bw, H - bw - 1);                 // 안쪽 왼쪽
+                p.setPen(QPen(QColor(255, 255, 255, 70), 1));
+                p.drawLine(bw, H - bw - 1, W - bw - 1, H - bw - 1); // 안쪽 아래
+                p.drawLine(W - bw - 1, bw, W - bw - 1, H - bw - 1); // 안쪽 오른쪽
+            }
+            p.restore();
         }
 
         // 제목 — 좌상단, 테두리 바로 안쪽에 배치

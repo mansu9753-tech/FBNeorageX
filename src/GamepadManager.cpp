@@ -369,9 +369,21 @@ uint16_t GamepadManager::readXInput() {
     }
 
     auto XInputGetState = reinterpret_cast<PFN_XInputGetState>(m_fnGetState);
+    // ★ 연결된 컨트롤러를 전부 확인해 입력을 합친다.
+    //   하나만 쓰면 나중에 연결한(블루투스 등) 패드가 무시된다.
+    WORD  allBtns = 0;
+    short allLX = 0, allLY = 0;
+    BYTE  allLT = 0, allRT = 0;
+    bool  anyPad = false;
     for (DWORD i = 0; i < 4; ++i) {
         _XINPUT_STATE state{};
         if (XInputGetState(i, &state) != 0) continue;
+        anyPad = true;
+        allBtns |= state.Gamepad.wButtons;
+        if (qAbs(state.Gamepad.sThumbLX) > qAbs(allLX)) allLX = state.Gamepad.sThumbLX;
+        if (qAbs(state.Gamepad.sThumbLY) > qAbs(allLY)) allLY = state.Gamepad.sThumbLY;
+        allLT = qMax(allLT, state.Gamepad.bLeftTrigger);
+        allRT = qMax(allRT, state.Gamepad.bRightTrigger);
 
         if (m_source != PadSource::XInput || m_ctrlIdx != (int)i) {
             m_source    = PadSource::XInput;
@@ -381,39 +393,39 @@ uint16_t GamepadManager::readXInput() {
             qDebug() << "GamepadManager: XInput 컨트롤러" << i << "연결";
         }
 
-        WORD btns = state.Gamepad.wButtons;
-        short lx = state.Gamepad.sThumbLX;
-        short ly = state.Gamepad.sThumbLY;
-        if (lx < -XI_DEAD)  btns |= XI_DPAD_LEFT;
-        if (lx >  XI_DEAD)  btns |= XI_DPAD_RIGHT;
-        if (ly >  XI_DEAD)  btns |= XI_DPAD_UP;
-        if (ly < -XI_DEAD)  btns |= XI_DPAD_DOWN;
+    }   // for i (모든 컨트롤러 합산)
 
-        int bits32 = btns;
-        if (state.Gamepad.bLeftTrigger  > XI_TRIG_DEAD) bits32 |= 0x10000;
-        if (state.Gamepad.bRightTrigger > XI_TRIG_DEAD) bits32 |= 0x20000;
-
-        // 핫키 비트 (게임 입력과 분리)
-        m_hotkeyBits = 0;
-        if (btns & XI_L3)      m_hotkeyBits |= HK_L3;
-        if (btns & XI_R3)      m_hotkeyBits |= HK_R3;
-        if (bits32 & 0x10000)  m_hotkeyBits |= HK_LT;
-        if (bits32 & 0x20000)  m_hotkeyBits |= HK_RT;
-
-        uint16_t result = 0;
-        for (auto it = m_xinputMapping.begin(); it != m_xinputMapping.end(); ++it)
-            if ((bits32 & it.key()) && it.value() < 16)
-                result |= (1 << it.value());
-        return result;
+    if (!anyPad) {
+        if (m_source == PadSource::XInput) {
+            m_source    = PadSource::None;
+            m_connected = false;
+            emit disconnected();
+        }
+        return 0;
     }
 
-    // 연결 없음
-    if (m_source == PadSource::XInput) {
-        m_source    = PadSource::None;
-        m_connected = false;
-        emit disconnected();
-    }
-    return 0;
+    WORD btns = allBtns;
+    if (allLX < -XI_DEAD)  btns |= XI_DPAD_LEFT;
+    if (allLX >  XI_DEAD)  btns |= XI_DPAD_RIGHT;
+    if (allLY >  XI_DEAD)  btns |= XI_DPAD_UP;
+    if (allLY < -XI_DEAD)  btns |= XI_DPAD_DOWN;
+
+    int bits32 = btns;
+    if (allLT > XI_TRIG_DEAD) bits32 |= 0x10000;
+    if (allRT > XI_TRIG_DEAD) bits32 |= 0x20000;
+
+    // 핫키 비트 (게임 입력과 분리)
+    m_hotkeyBits = 0;
+    if (btns & XI_L3)      m_hotkeyBits |= HK_L3;
+    if (btns & XI_R3)      m_hotkeyBits |= HK_R3;
+    if (bits32 & 0x10000)  m_hotkeyBits |= HK_LT;
+    if (bits32 & 0x20000)  m_hotkeyBits |= HK_RT;
+
+    uint16_t result = 0;
+    for (auto it = m_xinputMapping.begin(); it != m_xinputMapping.end(); ++it)
+        if ((bits32 & it.key()) && it.value() < 16)
+            result |= (1 << it.value());
+    return result;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -504,27 +516,41 @@ uint16_t GamepadManager::readWinMM() {
 // ════════════════════════════════════════════════════════════
 #else
 
+// ★ 연결된 조이스틱을 "전부" 연다.
+//   예전에는 처음 열린 것 하나만 썼다. 그래서
+//     · 블루투스 패드가 먼저 잡히면 스팀덱 내장 컨트롤러가 막히고
+//     · 나중에 연결한 패드는 아예 인식되지 않았다.
+//   지금은 여러 개를 동시에 읽어 어느 패드로도 조작할 수 있다.
+//   (플레이어별 배정은 다음 단계에서 추가)
 bool GamepadManager::openJoystick() {
-    for (int i = 0; i < 4; ++i) {
-        QString dev = QString("/dev/input/js%1").arg(i);
+    bool any = false;
+    for (int i = 0; i < kMaxPads; ++i) {
+        if (m_jsFds[i] >= 0) { any = true; continue; }      // 이미 열려 있음
+        const QString dev = QString("/dev/input/js%1").arg(i);
         int fd = ::open(dev.toLocal8Bit().constData(), O_RDONLY | O_NONBLOCK);
         if (fd >= 0) {
-            m_jsFd = fd; m_connected = true;
-            emit connected(i);
+            m_jsFds[i] = fd;
+            if (m_jsFd < 0) m_jsFd = fd;                    // 호환용 대표 fd
+            if (!m_connected) { m_connected = true; emit connected(i); }
             qDebug() << "GamepadManager:" << dev << "열림";
-            return true;
+            any = true;
         }
     }
-    // 폴링마다 찍히면 로그가 도배되어 정작 필요한 메시지가 묻힌다 → 한 번만
-    static bool warned = false;
-    if (!warned) { warned = true; qWarning() << "GamepadManager: 조이스틱 없음"; }
-    return false;
+    if (!any) {
+        // 폴링마다 찍히면 로그가 도배되어 정작 필요한 메시지가 묻힌다 → 한 번만
+        static bool warned = false;
+        if (!warned) { warned = true; qWarning() << "GamepadManager: 조이스틱 없음"; }
+    }
+    return any;
 }
 
 uint16_t GamepadManager::readJoystick() {
-    if (m_jsFd < 0) {
-        if (!openJoystick()) return 0;
+    // 새로 연결된 패드(블루투스 등)를 주기적으로 찾는다 — 핫플러그 대응
+    if (++m_rescanTick >= 120) {          // 폴링 주기 기준 약 1초
+        m_rescanTick = 0;
+        openJoystick();
     }
+    if (m_jsFd < 0 && !openJoystick()) return 0;
 
     // ── xpad / Steam Deck 표준 축 레이아웃 ───────────────────
     // axis 0: 왼쪽 스틱 X   axis 1: 왼쪽 스틱 Y
@@ -537,8 +563,14 @@ uint16_t GamepadManager::readJoystick() {
     // → 스틱과 D-패드가 동일 방향 비트를 공유하지 않으므로 상호 간섭 없음
     const short DEAD = 10000;  // ~30% 데드존 (스틱 드리프트 방지 강화)
 
+    // 연결된 모든 패드의 이벤트를 읽어 하나의 원시 비트로 합친다
+    //   → 내장 컨트롤러든 블루투스 패드든 아무 것으로나 조작 가능
+    for (int pad = 0; pad < kMaxPads; ++pad) {
+    const int fd = m_jsFds[pad];
+    if (fd < 0) continue;
+
     struct js_event ev;
-    while (::read(m_jsFd, &ev, sizeof(ev)) == sizeof(ev)) {
+    while (::read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
         if (ev.type & JS_EVENT_INIT) continue;
 
         if (ev.type == JS_EVENT_BUTTON) {
@@ -567,9 +599,19 @@ uint16_t GamepadManager::readJoystick() {
         }
     }
 
+    // 이 패드가 빠졌으면 그 fd 만 닫는다 (다른 패드는 계속 사용)
     if (errno == ENODEV) {
-        ::close(m_jsFd);
-        m_jsFd = -1;
+        ::close(fd);
+        m_jsFds[pad] = -1;
+        if (m_jsFd == fd) m_jsFd = -1;
+        qDebug() << "GamepadManager: js" << pad << "연결 해제";
+    }
+    }   // for pad
+
+    // 남은 패드가 하나도 없으면 연결 해제 상태로
+    bool anyOpen = false;
+    for (int i = 0; i < kMaxPads; ++i) if (m_jsFds[i] >= 0) { anyOpen = true; if (m_jsFd < 0) m_jsFd = m_jsFds[i]; }
+    if (!anyOpen) {
         m_rawBits = 0; m_buttonBits = 0; m_stickBits = 0; m_dpadBits = 0;
         if (m_connected) { m_connected = false; emit disconnected(); }
         return 0;
@@ -616,10 +658,12 @@ void GamepadManager::clearState() {
     m_buttonBits = 0;
     m_stickBits  = 0;
     m_dpadBits   = 0;
-    // 이전 게임 중 발생한 미처리 이벤트 드레인
-    if (m_jsFd >= 0) {
+    m_hotkeyBits = 0;
+    // 이전 게임 중 발생한 미처리 이벤트 드레인 (열린 패드 전부)
+    for (int i = 0; i < kMaxPads; ++i) {
+        if (m_jsFds[i] < 0) continue;
         struct js_event ev;
-        while (::read(m_jsFd, &ev, sizeof(ev)) == sizeof(ev)) {}
+        while (::read(m_jsFds[i], &ev, sizeof(ev)) == sizeof(ev)) {}
         // errno == EAGAIN/EWOULDBLOCK → 정상 (O_NONBLOCK)
     }
     // rawKeys 와 kbHeld 는 MainWindow 에서 직접 초기화

@@ -173,6 +173,7 @@ protected:
 class GamepadCaptureDialog : public QDialog {
 public:
     int capturedBtn = -1;  // XInput: bitmask / WinMM: 0-based index / -1=취소
+    int prevState   = 0;   // 직전 눌림 상태 (멤버여야 람다에서 안전하게 유지됨)
 
     explicit GamepadCaptureDialog(const QString& action, GamepadManager* gpad,
                                    bool winmm, QWidget* parent)
@@ -196,13 +197,17 @@ public:
         setModal(true);
 
         // 다이얼로그 열릴 때 이미 눌린 버튼은 무시 (초기 상태 저장)
+        //  ★ prevState 는 반드시 멤버여야 한다.
+        //    예전에는 생성자의 지역 변수를 람다가 참조(&prevState)로 캡처했는데,
+        //    생성자가 끝나면 그 변수가 사라져 타이머가 돌 때는 쓰레기값을 읽었다.
+        //    → 눌러도 "새로 눌린 버튼"이 계산되지 않아 캡처가 전혀 안 됐다.
         int init = gpad->pollRawForCapture(winmm);
-        int prevState = (init >= 0) ? init : 0;
+        prevState = (init >= 0) ? init : 0;
 
         // ~60Hz 폴링으로 새 버튼 입력 감지
         auto* timer = new QTimer(this);
         timer->setInterval(16);
-        connect(timer, &QTimer::timeout, this, [=, &prevState]() mutable {
+        connect(timer, &QTimer::timeout, this, [=]() mutable {
             int raw = gpad->pollRawForCapture(winmm);
             if (raw < 0) {
                 lbl->setText("<center><span style='color:#ff6644;"
@@ -1123,7 +1128,10 @@ void MainWindow::buildMainTab() {
     });
     // 영상이 끝나면 다시 프리뷰 이미지로 → 3초 뒤 영상 → 다시 이미지 …
     //   (타 에뮬레이터와 같은 이미지↔영상 순환 표시)
+    // 영상이 끝나면 프리뷰 이미지로 돌아가고, 다시 재생하지는 않는다.
+    //   (예전에는 이미지↔영상을 계속 반복해 산만했다)
     connect(m_previewVideo, &PreviewVideo::finished, this, [this]{
+        m_previewVideoDone = true;          // 이 게임은 이미 한 번 재생함
         if (!m_selectedGame.isEmpty()) loadPreview(m_selectedGame);
     });
 #endif
@@ -3303,6 +3311,7 @@ void MainWindow::filterRoms(const QString& text) {
 void MainWindow::selectGame(const QString& romName) {
     if (m_selectedGame == romName) return;
     m_selectedGame = romName;
+    m_previewVideoDone = false;      // 새 게임을 고르면 영상 1회 재생 다시 허용
 
     // 게임명 DB 표시명
     QString displayName = getGameDisplayName(romName);
@@ -3348,6 +3357,13 @@ void MainWindow::loadPreview(const QString& romName) {
     if (m_previewStack)    m_previewStack->setCurrentIndex(0);
 
     if (!m_previewLabel) return;
+
+    // 영상을 자동 재생할 상황인지 판단한다.
+    //   · 이미 이 게임의 영상을 한 번 재생했으면 다시 틀지 않는다 (1회만)
+    //   · 게임이 로드된 상태(플레이 중 메뉴로 나온 경우)에는 이미지만 보여준다
+    const bool inGame  = gState.gameLoaded || gState.isPaused;
+    const bool playVid = !m_previewVideoDone && !inGame;
+
     for (const QString ext : {"png","jpg","jpeg","bmp","gif"}) {
         QString path = gSettings.previewPath + "/" + romName + "." + ext;
         if (QFile::exists(path)) {
@@ -3355,8 +3371,7 @@ void MainWindow::loadPreview(const QString& romName) {
             if (!px.isNull()) {
                 applyPreviewAspect(px.size());      // 박스를 이미지 비율로
                 m_previewLabel->setPixmap(fitPreviewPixmap(px));
-                // 3초 후 영상 자동재생 시작
-                if (m_previewVidTimer) m_previewVidTimer->start();
+                if (playVid && m_previewVidTimer) m_previewVidTimer->start();
                 return;
             }
         }
@@ -3366,8 +3381,8 @@ void MainWindow::loadPreview(const QString& romName) {
     m_previewLabel->setText("NO PREVIEW\n" + romName.toUpper());
     m_previewLabel->setStyleSheet(
         "color:#335577;background:#000008;font-family:'Courier New';font-size:9px;");
-    // 이미지는 없어도 영상이 있을 수 있음 → 타이머 시작
-    if (m_previewVidTimer) m_previewVidTimer->start();
+    // 이미지는 없어도 영상이 있을 수 있음 → 같은 조건으로 타이머 시작
+    if (playVid && m_previewVidTimer) m_previewVidTimer->start();
 }
 
 void MainWindow::loadPreviewVideo(const QString& romName) {

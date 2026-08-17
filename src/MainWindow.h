@@ -181,6 +181,8 @@ private:
     // 프리뷰 박스 폭을 원본 비율에 맞춰 조정 → 잘림도 여백도 없게
     void    applyPreviewAspect(const QSize& mediaSize);
     QSize   m_previewMedia;      // 현재 표시 중인 원본 크기 (리사이즈 대응)
+    // 프리뷰 영상은 게임당 한 번만 재생한다 (끝나면 이미지로 돌아가고 반복 없음)
+    bool    m_previewVideoDone = false;
     void loadPreviewVideo(const QString& romName);
 
     // ── 마우스 커서 자동 숨김 ───────────────────────────
