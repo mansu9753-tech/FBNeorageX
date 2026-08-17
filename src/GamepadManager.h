@@ -33,6 +33,7 @@ public:
     QHash<int,int> getMapping() const;
 
     void resetDefaultMapping();   // XInput 기본 매핑
+    static QHash<int,int> makeDefaultMapping();   // 공장 기본값 생성
     void resetDefaultWinMM();     // WinMM 기본 매핑 (아케이드 스틱)
 
     // 현재 활성 입력 소스 이름
@@ -63,6 +64,8 @@ public:
     //   맞출 수 없다. 패드별로 매핑을 따로 들고 해석한다.
     void            setPadMapping(int idx, const QHash<int,int>& m);
     QHash<int,int>  padMapping(int idx) const;
+    // 기본 매핑 사본 (패드별 프로필 초기값으로 사용)
+    QHash<int,int>  defaultPadMapping() const;
 
     // ── 플레이어 배정 ────────────────────────────────────────
     //   0 = 사용 안 함, 1~4 = 해당 플레이어. 기본은 감지 순서대로 1P,2P,…

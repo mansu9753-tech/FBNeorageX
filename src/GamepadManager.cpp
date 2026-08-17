@@ -230,8 +230,12 @@ void GamepadManager::setPadMapping(int idx, const QHash<int,int>& m) {
 
 QHash<int,int> GamepadManager::padMapping(int idx) const {
     if (idx < 0 || idx >= 4) return {};
-    // 패드 전용 매핑이 없으면 공용(기본) 매핑을 쓴다
     return m_padMaps[idx].isEmpty() ? m_xinputMapping : m_padMaps[idx];
+}
+
+// 기본 매핑 사본 — 패드별 프로필의 출발점 (공장 기본값)
+QHash<int,int> GamepadManager::defaultPadMapping() const {
+    return makeDefaultMapping();
 }
 
 void GamepadManager::setPadPlayer(int idx, int player) {
@@ -258,7 +262,12 @@ uint16_t GamepadManager::playerBits(int player) const {
 //     X(왼쪽)=약손A   Y(위)=강손C
 //     A(아래)=약발B   B(오른쪽)=강발D
 void GamepadManager::resetDefaultMapping() {
-    m_xinputMapping.clear();
+    m_xinputMapping = makeDefaultMapping();
+}
+
+// 공장 기본 매핑을 만들어 돌려준다 (객체 상태와 무관)
+QHash<int,int> GamepadManager::makeDefaultMapping() {
+    QHash<int,int> m_xinputMapping;   // 아래 기존 코드를 그대로 쓰기 위한 지역명
 #ifdef _WIN32
     // Windows 는 기존 배치 유지 (사용자 요청)
     m_xinputMapping[XI_X]          = 0;   // X → Button A (약손)
@@ -302,6 +311,7 @@ void GamepadManager::resetDefaultMapping() {
     m_xinputMapping[RAW_ST_LEFT]   = 6;
     m_xinputMapping[RAW_ST_RIGHT]  = 7;
 #endif
+    return m_xinputMapping;
 }
 
 // ── 기본 매핑 (WinMM — 아케이드 스틱 / 일반 HID 패드) ─────────

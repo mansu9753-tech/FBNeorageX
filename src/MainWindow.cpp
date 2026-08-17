@@ -1763,7 +1763,10 @@ void MainWindow::refreshPadTable() {
         "padding:2px;font-family:'Courier New';font-size:9px;}"
         "QPushButton:hover{background:#002255;color:#aaccff;}";
 
-    QHash<int,int> mapping = m_gamepad->getXInputMapping();
+    // ★ "대상"으로 고른 패드의 매핑을 보여준다 (장치마다 다르므로)
+    QHash<int,int> mapping = m_gamepad->padPresent(m_remapPad)
+                             ? m_gamepad->padMapping(m_remapPad)
+                             : m_gamepad->getXInputMapping();
 
     m_padTable->setRowCount(kCtrlActionCount);
     m_padTable->blockSignals(true);
@@ -1814,9 +1817,12 @@ void MainWindow::refreshPadTable() {
             if (ok) {
                 map2.remove(dlg.capturedBtn);  // 충돌 제거
                 map2.insert(dlg.capturedBtn, libId2);
+                // ★ 이 패드의 프로필에만 저장한다.
+                //   예전에는 공용 매핑(gSettings.xinputMapping)까지 같이 덮어써서,
+                //   한 패드를 리매핑하면 프로필이 없는 다른 패드(스팀덱 내장 등)의
+                //   설정까지 통째로 바뀌어 버렸다.
                 m_gamepad->setPadMapping(m_remapPad, map2);
                 if (!padName.isEmpty()) gSettings.padProfiles[padName] = map2;
-                gSettings.xinputMapping = map2;      // 공용 기본값도 최신으로
                 gSettings.save();
                 refreshPadTable();
                 log(QString("게임패드 재설정 [%1]: %2 → %3")
@@ -4635,14 +4641,22 @@ void MainWindow::applyPadProfiles() {
         const QString name = m_gamepad->padName(i);
         if (name.isEmpty()) continue;
 
-        if (gSettings.padProfiles.contains(name))
-            m_gamepad->setPadMapping(i, gSettings.padProfiles.value(name));
-        else
-            m_gamepad->setPadMapping(i, {});      // 기본 매핑 사용
+        // ★ 프로필이 없어도 "기본 매핑의 사본"을 각 패드에 넣어 둔다.
+        //   빈 값으로 두면 공용 매핑을 폴백으로 쓰게 되어, 다른 패드를
+        //   건드렸을 때 같이 영향을 받는다. 사본을 주면 완전히 독립된다.
+        m_gamepad->setPadMapping(i, gSettings.padProfiles.contains(name)
+                                    ? gSettings.padProfiles.value(name)
+                                    : m_gamepad->defaultPadMapping());
 
-        // 배정: 저장값이 있으면 그것, 없으면 감지 순서대로 1P,2P,…
-        m_gamepad->setPadPlayer(i, gSettings.padAssign.contains(name)
-                                   ? gSettings.padAssign.value(name) : i + 1);
+        // 배정: 저장값이 있으면 그것.
+        //   저장값이 없을 때는 첫 패드만 1P 로 두고 나머지는 "사용 안 함".
+        //   ★ 스팀 인풋은 같은 컨트롤러를 가상 장치로 하나 더 만들어 내므로,
+        //     자동으로 2P·3P 까지 배정하면 패드 하나가 두 플레이어를 동시에
+        //     조종하게 된다. 추가 패드는 사용자가 직접 켜도록 한다.
+        if (gSettings.padAssign.contains(name))
+            m_gamepad->setPadPlayer(i, gSettings.padAssign.value(name));
+        else
+            m_gamepad->setPadPlayer(i, (i == 0) ? 1 : 0);
     }
 }
 
@@ -4672,6 +4686,7 @@ void MainWindow::rebuildPadAssignUi() {
         QPushButton* target = new QPushButton(isEn() ? "TARGET" : "대상");
         target->setCheckable(true);
         target->setChecked(m_remapPad == i);
+        target->setProperty("padIdx", i);           // 형제 버튼 갱신용 표시
         target->setFixedWidth(58);
         target->setFixedHeight(22);
         target->setStyleSheet(
@@ -4680,8 +4695,15 @@ void MainWindow::rebuildPadAssignUi() {
             "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}");
         connect(target, &QPushButton::clicked, this, [this, i]{
             m_remapPad = i;
-            if (m_gamepad) m_gamepad->setCapturePad(i);
-            rebuildPadAssignUi();
+            // ★ 목록을 다시 만들지 않는다. 클릭한 버튼 자신이 삭제되면
+            //   조작이 끊기고 오작동한다 → 체크 상태만 갱신한다.
+            if (m_padAssignBox) {
+                const auto btns = m_padAssignBox->findChildren<QPushButton*>();
+                for (QPushButton* b : btns) {
+                    const QVariant v = b->property("padIdx");
+                    if (v.isValid()) b->setChecked(v.toInt() == i);
+                }
+            }
             refreshPadTable();
             log(QString("🎮 리매핑 대상: %1").arg(m_gamepad->padName(i)));
         });
@@ -4696,10 +4718,13 @@ void MainWindow::rebuildPadAssignUi() {
         QComboBox* cb = new QComboBox;
         cb->setStyleSheet(editStyle());
         cb->setFixedWidth(96);
+        // 목록을 채우고 현재값을 고르는 동안 신호가 나가지 않게 막는다
+        cb->blockSignals(true);
         cb->addItem(isEn() ? "Off" : "사용 안 함", 0);
         for (int p = 1; p <= 4; ++p) cb->addItem(QString("%1P").arg(p), p);
         const int cur = cb->findData(m_gamepad->padPlayer(i));
-        if (cur >= 0) cb->setCurrentIndex(cur);
+        cb->setCurrentIndex(cur >= 0 ? cur : 0);
+        cb->blockSignals(false);
         connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this, i, cb, name](int){
             const int player = cb->currentData().toInt();
@@ -4708,6 +4733,7 @@ void MainWindow::rebuildPadAssignUi() {
             log(QString("🎮 %1 → %2").arg(name,
                     player == 0 ? QString(isEn() ? "Off" : "사용 안 함")
                                 : QString("%1P").arg(player)));
+            // ★ 여기서 목록을 다시 만들지 않는다 (자기 자신을 지우면 조작이 끊긴다)
         });
         h->addWidget(cb);
 
