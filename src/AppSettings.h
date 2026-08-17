@@ -98,6 +98,14 @@ struct AppSettings {
     QHash<QString, QHash<int,int>> xiScoped;   // XInput
     QHash<QString, QHash<int,int>> wmScoped;   // WinMM
 
+    // ── 장치별 게임패드 프로필 ──────────────────────────
+    //   패드마다 버튼 번호 체계가 달라(예: 8BitDo 16버튼 vs Xbox 11버튼)
+    //   공용 매핑 하나로는 맞출 수 없다. 장치 이름별로 따로 저장한다.
+    //   padProfiles : 장치 이름 → 버튼 매핑
+    //   padAssign   : 장치 이름 → 플레이어 (1~4, 0 = 사용 안 함)
+    QHash<QString, QHash<int,int>> padProfiles;
+    QHash<QString, int>            padAssign;
+
     // ── 머신 세팅 (DIP/BIOS) ────────────────────────────────────
     // 게임별: machineVars[romName][var]=value
     // 기종별: machineVarsByPlatform[platform][var]=value

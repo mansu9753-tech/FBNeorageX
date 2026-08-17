@@ -214,6 +214,39 @@ QString GamepadManager::activeSource() const {
 #endif
 }
 
+// ── 패드별 매핑 / 플레이어 배정 ───────────────────────────────
+bool GamepadManager::padPresent(int idx) const {
+#ifdef _WIN32
+    return idx >= 0 && idx < 4 && idx < m_padCount;
+#else
+    return idx >= 0 && idx < kMaxPads && m_jsFds[idx] >= 0;
+#endif
+}
+
+void GamepadManager::setPadMapping(int idx, const QHash<int,int>& m) {
+    if (idx < 0 || idx >= 4) return;
+    m_padMaps[idx] = m;
+}
+
+QHash<int,int> GamepadManager::padMapping(int idx) const {
+    if (idx < 0 || idx >= 4) return {};
+    // 패드 전용 매핑이 없으면 공용(기본) 매핑을 쓴다
+    return m_padMaps[idx].isEmpty() ? m_xinputMapping : m_padMaps[idx];
+}
+
+void GamepadManager::setPadPlayer(int idx, int player) {
+    if (idx < 0 || idx >= 4) return;
+    m_padPlayer[idx] = qBound(0, player, 4);
+}
+
+// 같은 플레이어에 여러 패드가 배정돼 있으면 합쳐서 돌려준다
+uint16_t GamepadManager::playerBits(int player) const {
+    uint16_t bits = 0;
+    for (int i = 0; i < 4; ++i)
+        if (m_padPlayer[i] == player) bits |= m_padBits[i];
+    return bits;
+}
+
 // ── 기본 매핑 (XInput — Xbox/표준 게임패드) ───────────────────
 // FBNeo 코어가 알려준 실제 버튼 정의 (게임 실행 중 확인):
 //     id 0 = Button A,  id 8 = Button B,  id 1 = Button C,  id 9 = Button D
@@ -543,6 +576,7 @@ bool GamepadManager::openJoystick() {
             qDebug().noquote() << QString("GamepadManager: js%1 열림 — \"%2\" (버튼 %3, 축 %4)")
                                   .arg(i).arg(m_padNames[i]).arg(int(nbtn)).arg(int(naxis));
             any = true;
+            emit padsChanged();          // 목록 갱신 → 프로필/배정 재적용
         }
     }
     if (!any) {
@@ -614,8 +648,12 @@ uint16_t GamepadManager::readJoystick() {
     if (errno == ENODEV) {
         ::close(fd);
         m_jsFds[pad] = -1;
+        m_padRaw[pad] = 0;
+        m_padBits[pad] = 0;
+        m_padNames[pad].clear();
         if (m_jsFd == fd) m_jsFd = -1;
         qDebug() << "GamepadManager: js" << pad << "연결 해제";
+        emit padsChanged();
     }
     }   // for pad
 
@@ -639,18 +677,20 @@ uint16_t GamepadManager::readJoystick() {
         if (m_jsFds[pad] < 0) continue;
         ++m_padCount;
         const uint32_t raw = m_padRaw[pad];
-        m_rawBits |= raw;
+        // 캡처용 합산본: 리매핑 대상 패드가 지정돼 있으면 그 패드만 본다
+        if (m_capturePad < 0 || m_capturePad == pad) m_rawBits |= raw;
+
+        // ★ 패드별 매핑을 쓴다 (장치마다 버튼 번호가 다르므로)
+        const QHash<int,int>& map =
+            m_padMaps[pad].isEmpty() ? m_xinputMapping : m_padMaps[pad];
         uint16_t bits = 0;
-        for (auto it = m_xinputMapping.constBegin(); it != m_xinputMapping.constEnd(); ++it)
+        for (auto it = map.constBegin(); it != map.constEnd(); ++it)
             if ((raw & uint32_t(it.key())) && it.value() < 16)
                 bits |= (1u << it.value());
         m_padBits[pad] = bits;
-        if (pad == 0) result = bits;      // 대표(1P) 결과
     }
-    // 열린 패드 순서가 비어 있을 수 있으므로, 1P 가 비면 첫 유효 패드를 쓴다
-    if (result == 0)
-        for (int pad = 0; pad < kMaxPads; ++pad)
-            if (m_jsFds[pad] >= 0) { result = m_padBits[pad]; break; }
+    // 1P 에 배정된 패드들의 합 (UI 네비게이션·단일 플레이 경로용)
+    result = playerBits(1);
 
     // 핫키 비트 (게임 입력과 분리 — 매핑 테이블을 거치지 않는다)
     m_hotkeyBits = 0;

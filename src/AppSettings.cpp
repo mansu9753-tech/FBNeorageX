@@ -206,6 +206,15 @@ void AppSettings::load(const QString& path) {
     loadScoped("kb_scoped", kbScoped);
     loadScoped("xi_scoped", xiScoped);
     loadScoped("wm_scoped", wmScoped);
+    loadScoped("pad_profiles", padProfiles);   // 장치 이름별 패드 매핑
+
+    // 장치 이름 → 플레이어 배정
+    padAssign.clear();
+    {
+        QJsonObject ao = o["pad_assign"].toObject();
+        for (auto it = ao.begin(); it != ao.end(); ++it)
+            padAssign[it.key()] = it.value().toInt();
+    }
 
     // 머신 세팅 (DIP/BIOS): { romName: { key: value } }
     auto loadStrMap2 = [&](const QString& key,
@@ -310,6 +319,13 @@ void AppSettings::save(const QString& path) const {
     saveScoped("kb_scoped", kbScoped);
     saveScoped("xi_scoped", xiScoped);
     saveScoped("wm_scoped", wmScoped);
+    saveScoped("pad_profiles", padProfiles);   // 장치 이름별 패드 매핑
+    {
+        QJsonObject ao;
+        for (auto it = padAssign.constBegin(); it != padAssign.constEnd(); ++it)
+            ao[it.key()] = it.value();
+        o["pad_assign"] = ao;
+    }
 
     // 머신 세팅 (DIP/BIOS) — 게임별 + 기종별
     auto saveStrMap2 = [&](const QString& key,

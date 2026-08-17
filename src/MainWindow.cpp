@@ -414,6 +414,12 @@ MainWindow::MainWindow(QWidget* parent)
         hk->start();
     }
 
+    // 패드 목록이 바뀌면 장치별 프로필/배정을 다시 적용하고 UI 갱신
+    connect(m_gamepad, &GamepadManager::padsChanged, this, [this]{
+        applyPadProfiles();
+        rebuildPadAssignUi();
+    });
+
     // 게임패드 시그널
     connect(m_gamepad, &GamepadManager::connected,    this, [this](int idx){
         log(QString("🎮 게임패드 %1 연결됨").arg(idx));
@@ -1255,6 +1261,10 @@ void MainWindow::buildMainTab() {
 
     // 옵션 페이지의 콤보/스핀/슬라이더가 휠을 가로채지 않도록 (스크롤 보장)
     applyWheelGuard(m_optionsStack);
+
+    // 이미 연결돼 있는 패드에 프로필·배정을 적용하고 목록을 채운다
+    applyPadProfiles();
+    rebuildPadAssignUi();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1486,6 +1496,37 @@ void MainWindow::buildControlsPage(QWidget* page) {
         periodH->addWidget(periodLbl); periodH->addWidget(periodSpin); periodH->addStretch();
         turboV->addLayout(periodH);
         v->addWidget(turboGroup);
+    }
+
+    // ── 연결된 패드 / 플레이어 배정 ─────────────────────────────
+    //   장치마다 버튼 번호가 다르므로 리매핑은 "선택한 패드"에만 적용된다.
+    {
+        const QString grpCss =
+            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
+            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
+        QGroupBox* padGroup = new QGroupBox;
+        trText(padGroup, "연결된 게임패드 / 플레이어 배정",
+                         "Connected Gamepads / Player Assignment");
+        padGroup->setStyleSheet(grpCss);
+        QVBoxLayout* pgV = new QVBoxLayout(padGroup);
+
+        QLabel* padHint = new QLabel;
+        trText(padHint,
+            "패드마다 버튼 번호 체계가 달라 리매핑은 [대상] 으로 고른 패드에만 적용됩니다.\n"
+            "같은 장치를 다시 연결해도 설정이 유지됩니다. (0P = 사용 안 함)",
+            "Pads number their buttons differently, so remapping applies only to the pad\n"
+            "chosen as [target]. Settings persist per device. (Off = unused)");
+        padHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
+        pgV->addWidget(padHint);
+
+        m_padAssignBox = new QWidget;
+        m_padAssignBox->setStyleSheet("background:transparent;");
+        m_padAssignLayout = new QVBoxLayout(m_padAssignBox);
+        m_padAssignLayout->setContentsMargins(0, 0, 0, 0);
+        m_padAssignLayout->setSpacing(3);
+        pgV->addWidget(m_padAssignBox);
+        v->addWidget(padGroup);
     }
 
     // ── 컨트롤 저장 범위 (전역/기종별/게임별) ───────────────────
@@ -1757,22 +1798,30 @@ void MainWindow::refreshPadTable() {
             int libId2  = actItm->data(Qt::UserRole).toInt();
             QString act = actItm->text();
 
-            QHash<int,int> map2 = m_gamepad->getXInputMapping();
+            // ★ 리매핑은 "대상으로 고른 패드"의 프로필에만 적용한다.
+            //   장치마다 버튼 번호가 달라 공용 매핑으로는 맞출 수 없다.
+            const QString padName = m_gamepad->padName(m_remapPad);
+            QHash<int,int> map2 = m_gamepad->padMapping(m_remapPad);
             // 기존 매핑 제거
             for (auto it = map2.begin(); it != map2.end(); )
                 it.value() == libId2 ? it = map2.erase(it) : ++it;
 
+            m_gamepad->setCapturePad(m_remapPad);   // 그 패드 입력만 캡처
             CaptureGuard cg(&m_captureActive);
             GamepadCaptureDialog dlg(act, m_gamepad, false, this);
-            if (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0) {
+            const bool ok = (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0);
+            m_gamepad->setCapturePad(-1);
+            if (ok) {
                 map2.remove(dlg.capturedBtn);  // 충돌 제거
                 map2.insert(dlg.capturedBtn, libId2);
-                m_gamepad->setXInputMapping(map2);
-                gSettings.xinputMapping = map2;
+                m_gamepad->setPadMapping(m_remapPad, map2);
+                if (!padName.isEmpty()) gSettings.padProfiles[padName] = map2;
+                gSettings.xinputMapping = map2;      // 공용 기본값도 최신으로
                 gSettings.save();
                 refreshPadTable();
-                log(QString("게임패드 재설정: %1 → %2")
-                    .arg(act, xinputBtnName(dlg.capturedBtn)));
+                log(QString("게임패드 재설정 [%1]: %2 → %3")
+                    .arg(padName.isEmpty() ? QString("PAD") : padName,
+                         act, xinputBtnName(dlg.capturedBtn)));
             } else {
                 refreshPadTable();
             }
@@ -4155,9 +4204,9 @@ void MainWindow::onEmuTimer() {
             auto spread = [](uint16_t bits, std::array<int,16>& dst) {
                 for (int i = 0; i < 16; ++i) dst[i] = (bits >> i) & 1;
             };
-            spread(m_gamepad->padBits(1), gState.p2Keys);
-            spread(m_gamepad->padBits(2), gState.p3Keys);
-            spread(m_gamepad->padBits(3), gState.p4Keys);
+            spread(m_gamepad->playerBits(2), gState.p2Keys);
+            spread(m_gamepad->playerBits(3), gState.p3Keys);
+            spread(m_gamepad->playerBits(4), gState.p4Keys);
         }
 
         // ── 서비스(TEST) 입력: 전용 핫키 펄스로만 전달 ───────────────
@@ -4571,6 +4620,108 @@ void MainWindow::playClickSound() {
                        ? int(m_sfxPcm.size() / m_sfxBytesPerMs) + 150 : 400;
     QPointer<QAudioSink> guard(m_sfxSink);
     QTimer::singleShot(clipMs, this, [guard]{ if (guard) guard->stop(); });
+}
+
+// ════════════════════════════════════════════════════════════
+//  장치별 패드 프로필 적용
+//   패드마다 버튼 번호 체계가 달라(8BitDo 16버튼 / Xbox 11버튼) 매핑을
+//   장치 이름별로 저장해 두고, 연결될 때마다 해당 프로필을 적용한다.
+//   저장된 프로필이 없으면 기본 매핑으로 시작한다.
+// ════════════════════════════════════════════════════════════
+void MainWindow::applyPadProfiles() {
+    if (!m_gamepad) return;
+    for (int i = 0; i < 4; ++i) {
+        if (!m_gamepad->padPresent(i)) continue;
+        const QString name = m_gamepad->padName(i);
+        if (name.isEmpty()) continue;
+
+        if (gSettings.padProfiles.contains(name))
+            m_gamepad->setPadMapping(i, gSettings.padProfiles.value(name));
+        else
+            m_gamepad->setPadMapping(i, {});      // 기본 매핑 사용
+
+        // 배정: 저장값이 있으면 그것, 없으면 감지 순서대로 1P,2P,…
+        m_gamepad->setPadPlayer(i, gSettings.padAssign.contains(name)
+                                   ? gSettings.padAssign.value(name) : i + 1);
+    }
+}
+
+// 컨트롤 화면의 "연결된 패드" 목록을 다시 만든다.
+//   각 줄: [대상] 장치이름 (버튼수)   [플레이어 콤보]
+void MainWindow::rebuildPadAssignUi() {
+    if (!m_padAssignLayout || !m_gamepad) return;
+
+    while (QLayoutItem* it = m_padAssignLayout->takeAt(0)) {
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
+    int shown = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (!m_gamepad->padPresent(i)) continue;
+        ++shown;
+        const QString name = m_gamepad->padName(i);
+
+        QWidget* row = new QWidget;
+        row->setStyleSheet("background:transparent;");
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(6);
+
+        // 리매핑 대상 선택 (라디오처럼 동작)
+        QPushButton* target = new QPushButton(isEn() ? "TARGET" : "대상");
+        target->setCheckable(true);
+        target->setChecked(m_remapPad == i);
+        target->setFixedWidth(58);
+        target->setFixedHeight(22);
+        target->setStyleSheet(
+            "QPushButton{background:#000033;color:#6688bb;border:1px solid #224488;"
+            "font-family:'Courier New';font-size:9px;font-weight:bold;}"
+            "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}");
+        connect(target, &QPushButton::clicked, this, [this, i]{
+            m_remapPad = i;
+            if (m_gamepad) m_gamepad->setCapturePad(i);
+            rebuildPadAssignUi();
+            refreshPadTable();
+            log(QString("🎮 리매핑 대상: %1").arg(m_gamepad->padName(i)));
+        });
+        h->addWidget(target);
+
+        QLabel* nameLbl = new QLabel(name.isEmpty() ? QString("PAD %1").arg(i + 1) : name);
+        nameLbl->setStyleSheet("color:#aaccff;font-family:'Courier New';font-size:10px;"
+                               "background:transparent;");
+        nameLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        h->addWidget(nameLbl, 1);
+
+        QComboBox* cb = new QComboBox;
+        cb->setStyleSheet(editStyle());
+        cb->setFixedWidth(96);
+        cb->addItem(isEn() ? "Off" : "사용 안 함", 0);
+        for (int p = 1; p <= 4; ++p) cb->addItem(QString("%1P").arg(p), p);
+        const int cur = cb->findData(m_gamepad->padPlayer(i));
+        if (cur >= 0) cb->setCurrentIndex(cur);
+        connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, i, cb, name](int){
+            const int player = cb->currentData().toInt();
+            m_gamepad->setPadPlayer(i, player);
+            if (!name.isEmpty()) { gSettings.padAssign[name] = player; gSettings.save(); }
+            log(QString("🎮 %1 → %2").arg(name,
+                    player == 0 ? QString(isEn() ? "Off" : "사용 안 함")
+                                : QString("%1P").arg(player)));
+        });
+        h->addWidget(cb);
+
+        m_padAssignLayout->addWidget(row);
+    }
+
+    if (shown == 0) {
+        QLabel* none = new QLabel(isEn() ? "No gamepad detected"
+                                         : "연결된 게임패드 없음");
+        none->setStyleSheet("color:#556677;font-family:'Courier New';font-size:10px;"
+                            "background:transparent;");
+        m_padAssignLayout->addWidget(none);
+    }
+    applyWheelGuard(m_padAssignBox);
 }
 
 // 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.

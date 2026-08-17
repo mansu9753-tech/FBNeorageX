@@ -56,6 +56,24 @@ public:
     int      padCount() const { return m_padCount; }
     QString  padName(int idx) const
     { return (idx >= 0 && idx < 4) ? m_padNames[idx] : QString(); }
+    bool     padPresent(int idx) const;
+
+    // ── 장치별 매핑 프로필 ───────────────────────────────────
+    //   패드마다 버튼 번호가 달라(8BitDo 16버튼 / Xbox 11버튼) 공용 매핑으로는
+    //   맞출 수 없다. 패드별로 매핑을 따로 들고 해석한다.
+    void            setPadMapping(int idx, const QHash<int,int>& m);
+    QHash<int,int>  padMapping(int idx) const;
+
+    // ── 플레이어 배정 ────────────────────────────────────────
+    //   0 = 사용 안 함, 1~4 = 해당 플레이어. 기본은 감지 순서대로 1P,2P,…
+    void     setPadPlayer(int idx, int player);
+    int      padPlayer(int idx) const
+    { return (idx >= 0 && idx < 4) ? m_padPlayer[idx] : 0; }
+    // 해당 플레이어에 배정된 패드들의 입력 합계
+    uint16_t playerBits(int player) const;
+
+    // 캡처 대상 패드 지정 (리매핑할 패드를 고를 때 사용)
+    void     setCapturePad(int idx) { m_capturePad = idx; }
 
     // 버튼 캡처 다이얼로그용 — 현재 눌린 버튼의 raw 상태를 반환
     // XInput: wButtons | (LT→bit16) | (RT→bit17) 값, 없으면 -1
@@ -74,6 +92,7 @@ public:
 signals:
     void connected(int index);
     void disconnected();
+    void padsChanged();          // 패드 목록이 바뀜 (연결/해제)
 
 private slots:
     void onPoll();
@@ -86,6 +105,9 @@ private:
     uint16_t        m_padBits[4]   = {0, 0, 0, 0};   // 패드별 매핑 결과
     QString         m_padNames[4];                   // 패드 장치 이름
     int             m_padCount     = 0;
+    QHash<int,int>  m_padMaps[4];                    // 패드별 버튼 매핑
+    int             m_padPlayer[4] = {1, 2, 3, 4};   // 패드 → 플레이어 (0=사용안함)
+    int             m_capturePad   = -1;             // 리매핑 대상 패드 (-1=아무거나)
 
     QHash<int,int>  m_xinputMapping;
     QHash<int,int>  m_winmmMapping;

@@ -164,6 +164,13 @@ private:
     // 옵션 패널의 콤보/스핀/슬라이더가 휠을 가로채 스크롤을 막는 것 방지.
     //   동적으로 다시 만들어지는 페이지(머신세팅/치트)는 갱신 후 다시 호출해야 한다.
     void applyWheelGuard(QWidget* root);
+
+    // ── 게임패드: 장치별 프로필 / 플레이어 배정 ──────────────
+    void applyPadProfiles();     // 연결된 패드에 저장된 프로필·배정 적용
+    void rebuildPadAssignUi();   // 컨트롤 화면의 패드 목록 갱신
+    QWidget*     m_padAssignBox    = nullptr;
+    QVBoxLayout* m_padAssignLayout = nullptr;
+    int          m_remapPad        = 0;   // 리매핑 대상 패드 인덱스
     QObject* m_wheelGuard = nullptr;
 
     // FBNeo 네이티브 치트 엔진 연동: <system_dir>/fbneo/cheats/ 로 ini 복사
