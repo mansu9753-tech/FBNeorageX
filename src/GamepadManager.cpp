@@ -93,6 +93,7 @@ static constexpr uint32_t XI_DPAD_LEFT  = RAW_DP_LEFT;
 static constexpr uint32_t XI_DPAD_RIGHT = RAW_DP_RIGHT;
 
 #  include <fcntl.h>
+#  include <sys/ioctl.h>   // 패드 장치 이름/버튼 수 조회 (JSIOCGNAME 등)
 #  include <unistd.h>
 #  include <linux/joystick.h>
 static constexpr int LR_B = 0, LR_Y = 1, LR_SEL = 2, LR_STA = 3;
@@ -531,8 +532,16 @@ bool GamepadManager::openJoystick() {
         if (fd >= 0) {
             m_jsFds[i] = fd;
             if (m_jsFd < 0) m_jsFd = fd;                    // 호환용 대표 fd
+            // 장치 이름을 읽어 둔다 (패드별 버튼 배열이 달라 진단에 필요)
+            char name[128] = {0};
+            if (::ioctl(fd, JSIOCGNAME(sizeof(name)), name) >= 0)
+                m_padNames[i] = QString::fromUtf8(name);
+            char nbtn = 0, naxis = 0;
+            ::ioctl(fd, JSIOCGBUTTONS, &nbtn);
+            ::ioctl(fd, JSIOCGAXES,    &naxis);
             if (!m_connected) { m_connected = true; emit connected(i); }
-            qDebug() << "GamepadManager:" << dev << "열림";
+            qDebug().noquote() << QString("GamepadManager: js%1 열림 — \"%2\" (버튼 %3, 축 %4)")
+                                  .arg(i).arg(m_padNames[i]).arg(int(nbtn)).arg(int(naxis));
             any = true;
         }
     }
@@ -573,11 +582,13 @@ uint16_t GamepadManager::readJoystick() {
     while (::read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
         if (ev.type & JS_EVENT_INIT) continue;
 
+        uint32_t& raw = m_padRaw[pad];        // 이 패드 전용 비트
+
         if (ev.type == JS_EVENT_BUTTON) {
             // 원시 비트만 갱신한다 (해석은 아래에서 매핑 테이블이 담당)
             if (ev.number < 16) {
-                if (ev.value) m_rawBits |=  (1u << ev.number);
-                else          m_rawBits &= ~(1u << ev.number);
+                if (ev.value) raw |=  (1u << ev.number);
+                else          raw &= ~(1u << ev.number);
             }
 
         } else if (ev.type == JS_EVENT_AXIS) {
@@ -586,16 +597,16 @@ uint16_t GamepadManager::readJoystick() {
 
             // 축도 "원시 비트"로 바꿔 둔다 → 매핑 테이블로 리매핑 가능해진다
             auto setDir = [&](uint32_t negBit, uint32_t posBit) {
-                m_rawBits &= ~(negBit | posBit);
-                if (val < -DEAD) m_rawBits |= negBit;
-                if (val >  DEAD) m_rawBits |= posBit;
+                raw &= ~(negBit | posBit);
+                if (val < -DEAD) raw |= negBit;
+                if (val >  DEAD) raw |= posBit;
             };
             if      (axis == 0) setDir(RAW_ST_LEFT, RAW_ST_RIGHT);  // 왼쪽 스틱 X
             else if (axis == 1) setDir(RAW_ST_UP,   RAW_ST_DOWN);   // 왼쪽 스틱 Y
             else if (axis == 6) setDir(RAW_DP_LEFT, RAW_DP_RIGHT);  // D-패드 X
             else if (axis == 7) setDir(RAW_DP_UP,   RAW_DP_DOWN);   // D-패드 Y
-            else if (axis == 2) { if (val > 0) m_rawBits |= RAW_L2; else m_rawBits &= ~RAW_L2; }
-            else if (axis == 5) { if (val > 0) m_rawBits |= RAW_R2; else m_rawBits &= ~RAW_R2; }
+            else if (axis == 2) { if (val > 0) raw |= RAW_L2; else raw &= ~RAW_L2; }
+            else if (axis == 5) { if (val > 0) raw |= RAW_R2; else raw &= ~RAW_R2; }
         }
     }
 
@@ -617,11 +628,29 @@ uint16_t GamepadManager::readJoystick() {
         return 0;
     }
 
-    // ── 원시 비트를 매핑 테이블로 해석 (Windows XInput 과 동일한 흐름) ──
+    // ── 패드별로 매핑 테이블을 적용 ──────────────────────────
+    //   패드마다 따로 계산해야 1P/2P/3P/4P 를 나눌 수 있다.
+    //   m_rawBits 는 전체 합산본 — 캡처/핫키/UI 네비게이션에서 쓴다.
+    m_rawBits  = 0;
+    m_padCount = 0;
     uint16_t result = 0;
-    for (auto it = m_xinputMapping.constBegin(); it != m_xinputMapping.constEnd(); ++it)
-        if ((m_rawBits & uint32_t(it.key())) && it.value() < 16)
-            result |= (1u << it.value());
+    for (int pad = 0; pad < kMaxPads; ++pad) {
+        m_padBits[pad] = 0;
+        if (m_jsFds[pad] < 0) continue;
+        ++m_padCount;
+        const uint32_t raw = m_padRaw[pad];
+        m_rawBits |= raw;
+        uint16_t bits = 0;
+        for (auto it = m_xinputMapping.constBegin(); it != m_xinputMapping.constEnd(); ++it)
+            if ((raw & uint32_t(it.key())) && it.value() < 16)
+                bits |= (1u << it.value());
+        m_padBits[pad] = bits;
+        if (pad == 0) result = bits;      // 대표(1P) 결과
+    }
+    // 열린 패드 순서가 비어 있을 수 있으므로, 1P 가 비면 첫 유효 패드를 쓴다
+    if (result == 0)
+        for (int pad = 0; pad < kMaxPads; ++pad)
+            if (m_jsFds[pad] >= 0) { result = m_padBits[pad]; break; }
 
     // 핫키 비트 (게임 입력과 분리 — 매핑 테이블을 거치지 않는다)
     m_hotkeyBits = 0;

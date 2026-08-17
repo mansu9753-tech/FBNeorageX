@@ -47,6 +47,10 @@ struct EmulatorState {
     std::array<int, 16> rawKeys  = {};
     std::array<int, 16> keys     = {};
     std::array<int, 16> p2Keys   = {};
+    // 3P/4P — 로컬 멀티플레이용. 넷플레이와 1P↔2P 스왑은 위 keys/p2Keys 만
+    // 사용하므로, 아래를 추가해도 기존 동작에 영향이 없다.
+    std::array<int, 16> p3Keys   = {};
+    std::array<int, 16> p4Keys   = {};
 
     // 연습용 1P↔2P 포트 스왑 (싱글 플레이 연습 모드)
     bool swapPlayers = false;

@@ -418,6 +418,8 @@ int16_t LibretroCore::inputStateCb(unsigned port, unsigned device,
     // port 0: 터보/넷플레이 처리된 keys 사용 (rawKeys는 터보 미적용)
     if (port == 0) return gState.keys[id];
     if (port == 1) return gState.p2Keys[id];
+    if (port == 2) return gState.p3Keys[id];   // 3P (로컬 멀티)
+    if (port == 3) return gState.p4Keys[id];   // 4P
     return 0;
 }
 

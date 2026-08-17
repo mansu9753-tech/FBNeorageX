@@ -122,6 +122,15 @@ protected:
     }
 };
 
+// 리매핑 캡처 중임을 표시하는 스코프 가드.
+//   캡처 창이 떠 있는 동안 메뉴 조작·핫키가 함께 동작하면
+//   방향키를 지정하다 목록이 움직이고, 실행 버튼을 지정하다 게임이 실행된다.
+struct CaptureGuard {
+    bool* flag;
+    explicit CaptureGuard(bool* f) : flag(f) { if (flag) *flag = true; }
+    ~CaptureGuard() { if (flag) *flag = false; }
+};
+
 // ── KEY CAPTURE DIALOG (non-Q_OBJECT) ──────────────────────────
 class KeyCaptureDialog : public QDialog {
 public:
@@ -372,7 +381,7 @@ MainWindow::MainWindow(QWidget* parent)
         auto* hk = new QTimer(this);
         hk->setInterval(33);                       // ~30Hz 로 눌림 변화만 감시
         connect(hk, &QTimer::timeout, this, [this]{
-            if (!m_gamepad) return;
+            if (!m_gamepad || m_captureActive) return;   // 리매핑 중에는 핫키도 중지
             const uint8_t now  = m_gamepad->hotkeyBits();
             const uint8_t down = uint8_t(now & ~m_padHotkeyPrev);   // 새로 눌린 것만
             m_padHotkeyPrev = now;
@@ -418,6 +427,10 @@ MainWindow::MainWindow(QWidget* parent)
     m_uiNavTimer = new QTimer(this);
     m_uiNavTimer->setInterval(16);  // ~60Hz
     connect(m_uiNavTimer, &QTimer::timeout, this, [this] {
+        // ★ 키/버튼 리매핑 중에는 메뉴 조작을 멈춘다.
+        //   방향키를 지정하려고 누르면 게임목록이 같이 움직이고,
+        //   실행 버튼을 지정하려 하면 게임이 실행돼 버리던 문제.
+        if (m_captureActive) { m_navDir = 0; m_navRepeatMs = 0; return; }
         // 게임 화면(스택 인덱스 1)이면 네비 비활성화
         if (!m_stack || m_stack->currentIndex() != 0) {
             m_navDir = 0; m_navRepeatMs = 0; return;
@@ -1678,6 +1691,7 @@ void MainWindow::refreshControlsTable() {
             }
 
             // 키 캡처 다이얼로그
+            CaptureGuard cg(&m_captureActive);
             KeyCaptureDialog dlg(act, this);
             if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
                 // 충돌 제거
@@ -1748,6 +1762,7 @@ void MainWindow::refreshPadTable() {
             for (auto it = map2.begin(); it != map2.end(); )
                 it.value() == libId2 ? it = map2.erase(it) : ++it;
 
+            CaptureGuard cg(&m_captureActive);
             GamepadCaptureDialog dlg(act, m_gamepad, false, this);
             if (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0) {
                 map2.remove(dlg.capturedBtn);  // 충돌 제거
@@ -1818,6 +1833,7 @@ void MainWindow::refreshWinMMTable() {
             for (auto it = map2.begin(); it != map2.end(); )
                 it.value() == libId2 ? it = map2.erase(it) : ++it;
 
+            CaptureGuard cg(&m_captureActive);
             GamepadCaptureDialog dlg(act, m_gamepad, true, this);
             if (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0) {
                 map2.remove(dlg.capturedBtn);  // 충돌 제거
@@ -1875,6 +1891,7 @@ void MainWindow::rebuildHotkeyTable() {
             for (int i = 0; i < n2; ++i)
                 if (action == d[i].action) { label = isEn() ? d[i].labelEn : d[i].label; break; }
 
+            CaptureGuard cg(&m_captureActive);
             KeyCaptureDialog dlg(label, this, /*withMods=*/true);
             if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
                 gSettings.hotkeyMap[action] =
@@ -4128,6 +4145,19 @@ void MainWindow::onEmuTimer() {
                 int phase = (gState.turboFrame / gState.turboPeriod) % 2;
                 gState.keys[i] = (phase == 0) ? 1 : 0;
             }
+        }
+
+        // ── 로컬 2P~4P: 두 번째 이후 패드를 각 플레이어에 배정 ──────
+        //   패드 1개 = 플레이어 1명. 연결 순서대로 2P, 3P, 4P.
+        //   1P 는 위에서 키보드+첫 패드 합산으로 이미 만들어졌다.
+        //   ※ 넷플레이 중에는 이 분기 자체를 타지 않으므로 영향 없음.
+        if (m_gamepad) {
+            auto spread = [](uint16_t bits, std::array<int,16>& dst) {
+                for (int i = 0; i < 16; ++i) dst[i] = (bits >> i) & 1;
+            };
+            spread(m_gamepad->padBits(1), gState.p2Keys);
+            spread(m_gamepad->padBits(2), gState.p3Keys);
+            spread(m_gamepad->padBits(3), gState.p4Keys);
         }
 
         // ── 서비스(TEST) 입력: 전용 핫키 펄스로만 전달 ───────────────

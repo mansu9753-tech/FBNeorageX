@@ -378,6 +378,8 @@ private:
     int  m_serviceHoldFrames = 0;
     // 게임패드 핫키(L3/R3/트리거) 눌림 상태 — 눌린 순간만 처리하기 위한 이전 값
     uint8_t m_padHotkeyPrev = 0;
+    // 리매핑 캡처 중 여부 — 이 동안에는 메뉴 조작·핫키를 멈춘다
+    bool    m_captureActive = false;
 
     // ── 코어 / 오디오 / 치트 / 게임패드 ─────────────────
     LibretroCore*    m_core    = nullptr;

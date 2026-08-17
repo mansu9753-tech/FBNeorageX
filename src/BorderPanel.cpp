@@ -211,34 +211,43 @@ void BorderPanel::paintEvent(QPaintEvent* event)
             p.save();
             p.setClipRegion(drawnRegion);
 
-            QPainterPath ring;
-            ring.addRect(0, 0, W, H);
-            ring.addRect(bw, bw, W - 2*bw, H - 2*bw);   // 안쪽을 빼서 링으로
-            ring.setFillRule(Qt::OddEvenFill);
+            // ── 관(파이프) 단면 음영 ──────────────────────────
+            //   테두리 두께를 가로지르며 색을 바꾼다.
+            //     바깥 = 어두움 → 살짝 안쪽에 하이라이트(빛 반사)
+            //     → 중간 본색 → 안쪽으로 갈수록 다시 어두움
+            //   이렇게 하면 단면이 둥근 관처럼 보이고, 사각형을 한 겹씩
+            //   그리는 방식이라 네 모서리에서 음영이 자연스럽게 이어진다.
+            auto tubeColor = [](double t) -> QColor {
+                struct Stop { double t; int r, g, b; };
+                static const Stop stops[] = {
+                    { 0.00, 0x0a, 0x18, 0x5e },   // 바깥 가장자리 (어두움)
+                    { 0.14, 0x3f, 0x6d, 0xf5 },
+                    { 0.28, 0xdc, 0xe9, 0xff },   // 하이라이트 (빛 반사)
+                    { 0.45, 0x59, 0x8a, 0xff },
+                    { 0.62, 0x22, 0x4e, 0xe6 },   // 본색
+                    { 0.82, 0x12, 0x2c, 0x9c },
+                    { 1.00, 0x05, 0x0f, 0x4a },   // 안쪽 가장자리 (어두움)
+                };
+                const int n = int(sizeof(stops) / sizeof(stops[0]));
+                t = qBound(0.0, t, 1.0);
+                for (int i = 1; i < n; ++i) {
+                    if (t <= stops[i].t) {
+                        const Stop& a = stops[i - 1];
+                        const Stop& b = stops[i];
+                        const double f = (b.t - a.t) < 1e-6 ? 0.0 : (t - a.t) / (b.t - a.t);
+                        return QColor(int(a.r + (b.r - a.r) * f),
+                                      int(a.g + (b.g - a.g) * f),
+                                      int(a.b + (b.b - a.b) * f));
+                    }
+                }
+                return QColor(stops[n - 1].r, stops[n - 1].g, stops[n - 1].b);
+            };
 
-            // 좌상단은 밝게, 우하단은 어둡게 — 빛이 왼쪽 위에서 오는 관 느낌
-            QLinearGradient g(0, 0, W, H);
-            g.setColorAt(0.00, QColor(0xd6, 0xe6, 0xff));
-            g.setColorAt(0.18, QColor(0x7d, 0xa8, 0xff));
-            g.setColorAt(0.50, QColor(0x2b, 0x57, 0xee));
-            g.setColorAt(0.82, QColor(0x14, 0x30, 0xa4));
-            g.setColorAt(1.00, QColor(0x06, 0x14, 0x5e));
-            p.fillPath(ring, g);
-
-            // 바깥/안쪽 가장자리에 얇은 선 → 관의 둥근 느낌을 강조
-            p.setPen(QPen(QColor(255, 255, 255, 90), 1));
-            p.drawLine(0, 0, W - 1, 0);                        // 바깥 위
-            p.drawLine(0, 0, 0, H - 1);                        // 바깥 왼쪽
-            p.setPen(QPen(QColor(0, 0, 0, 140), 1));
-            p.drawLine(0, H - 1, W - 1, H - 1);                // 바깥 아래
-            p.drawLine(W - 1, 0, W - 1, H - 1);                // 바깥 오른쪽
-            if (bw >= 4) {
-                p.setPen(QPen(QColor(0, 0, 0, 130), 1));
-                p.drawLine(bw, bw, W - bw - 1, bw);                 // 안쪽 위
-                p.drawLine(bw, bw, bw, H - bw - 1);                 // 안쪽 왼쪽
-                p.setPen(QPen(QColor(255, 255, 255, 70), 1));
-                p.drawLine(bw, H - bw - 1, W - bw - 1, H - bw - 1); // 안쪽 아래
-                p.drawLine(W - bw - 1, bw, W - bw - 1, H - bw - 1); // 안쪽 오른쪽
+            // 사각 테두리를 한 겹씩 안쪽으로 그린다 (모서리 음영이 이어짐)
+            for (int i = 0; i < bw; ++i) {
+                const double t = (bw <= 1) ? 0.0 : double(i) / (bw - 1);
+                p.setPen(QPen(tubeColor(t), 1));
+                p.drawRect(i, i, W - 2*i - 1, H - 2*i - 1);
             }
             p.restore();
         }

@@ -48,6 +48,15 @@ public:
     static constexpr uint8_t HK_RT = 0x8;   // 패스트포워드
     uint8_t hotkeyBits() const { return m_hotkeyBits; }
 
+    // ── 패드별 입력 (로컬 1P~4P) ─────────────────────────────
+    //   패드 하나가 플레이어 한 명. 연결 순서대로 1P, 2P, 3P, 4P 가 된다.
+    //   예전에는 모든 패드 입력을 합쳐서 전부 1P 로 잡혔다.
+    uint16_t padBits(int idx) const
+    { return (idx >= 0 && idx < 4) ? m_padBits[idx] : 0; }
+    int      padCount() const { return m_padCount; }
+    QString  padName(int idx) const
+    { return (idx >= 0 && idx < 4) ? m_padNames[idx] : QString(); }
+
     // 버튼 캡처 다이얼로그용 — 현재 눌린 버튼의 raw 상태를 반환
     // XInput: wButtons | (LT→bit16) | (RT→bit17) 값, 없으면 -1
     // WinMM : dwButtons 비트마스크, 없으면 -1
@@ -74,6 +83,9 @@ private:
     bool            m_connected    = false;
     int             m_ctrlIdx      = 0;
     uint8_t         m_hotkeyBits   = 0;   // 위 HK_* 조합 (플랫폼 공통)
+    uint16_t        m_padBits[4]   = {0, 0, 0, 0};   // 패드별 매핑 결과
+    QString         m_padNames[4];                   // 패드 장치 이름
+    int             m_padCount     = 0;
 
     QHash<int,int>  m_xinputMapping;
     QHash<int,int>  m_winmmMapping;
@@ -119,6 +131,7 @@ private:
     static constexpr int kMaxPads = 4;
     int      m_jsFds[kMaxPads] = { -1, -1, -1, -1 };
     int      m_rescanTick = 0;      // 주기적 재탐색(핫플러그) 카운터
+    uint32_t m_padRaw[kMaxPads] = { 0, 0, 0, 0 };   // 패드별 원시 비트
     uint16_t m_buttonBits = 0;  // (호환 유지용, 미사용)
     uint16_t m_stickBits  = 0;
     uint16_t m_dpadBits   = 0;  // UI 네비게이션용 방향 비트
