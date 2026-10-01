@@ -10,6 +10,20 @@
 
 ## 📋 Update History / 업데이트 내역
 
+### v2.3 (2026-10)
+
+Full notes / 전체 내용: [RELEASE_NOTES_v2.3.md](RELEASE_NOTES_v2.3.md)
+
+| | English | 한국어 |
+|---|---|---|
+| 🎨 NEW | **NeoRageX canvas UI** — the whole GUI is redrawn on one canvas: pen-drawn frames with a flat highlighter tip, translucent panels, search bar, mouse scrollbars, scrolling long game names, cursor zones (LB/RB), BACK button, and a full Korean menu in the bundled **Galmuri Mono** dot font. | **NeoRageX 캔버스 UI** — GUI 전체를 한 캔버스에 새로 그림: 형광펜 끝처럼 평평한 펜 그리기 테두리, 반투명 패널, 검색창, 마우스 스크롤바, 긴 게임 이름 자동 스크롤, 커서 영역(LB/RB), 뒤로 가기 버튼, 번들 **Galmuri Mono** 도트 폰트의 한글 메뉴 전체. |
+| 🎮 NEW | **Controls rework** — sectioned page, Neo Geo A B C D order, CPS 6-button fighters (약손 중손 강손 / 약발 중발 강발) and 2–3 button games (A B C), matching turbo names, **per-game auto-save** + per-platform save. | **컨트롤 개편** — 구역 나뉜 화면, 네오지오 A B C D 순서, CPS 6버튼 격투(약손 중손 강손 / 약발 중발 강발)·2~3버튼 게임(A B C), 같은 이름의 터보, **게임별 자동 저장** + 기종별 저장. |
+| ⌨️ NEW | **Gamepad / arcade-stick hotkeys** — hold SELECT + a button (menu, exit, service, fast-forward, save/load state, screenshot, slot, preview image, fullscreen, swap, record, preview clip). L3/R3 are no longer used. | **게임패드·아케이드 스틱 핫키** — SELECT 를 누른 채 버튼 조합(메뉴, 종료, 서비스, 패스트포워드, 상태 저장/불러오기, 스크린샷, 슬롯, 프리뷰 이미지, 전체화면, 스왑, 녹화, 프리뷰 영상). L3/R3 는 더 이상 쓰지 않음. |
+| 🎞️ NEW | **Frame Lab** (SHOTS FACTORY) — step a paused game frame by frame, pick from a thumbnail grid, save any frame as PNG. | **프레임 랩**(SHOTS FACTORY) — 멈춘 게임을 프레임 단위로 넘기고 썸네일 격자에서 골라 PNG 로 저장. |
+| 🎬 NEW | **Startup intro** — built-in sample, or your own `assets/intro/intro.mp4`. **Screensaver** starts after 5 minutes and returns the cursor to the game that was playing. | **시작 오프닝** — 내장 샘플 또는 직접 만든 `assets/intro/intro.mp4`. **화면보호기**는 5분 뒤 켜지고, 해제하면 커서가 재생되던 게임으로 이동. |
+| 🐛 FIX | Stale button names after switching games (core reloaded per game), Frame Lab freeze, `??` glyphs, cheat name prefix, Steam Deck fullscreen toggle, Windows XInput pad mapping. | 게임 전환 뒤 버튼 이름이 안 바뀌던 문제(게임마다 코어 재로드), 프레임 랩 멈춤, `??` 깨짐, 치트 이름 머리말, 스팀덱 전체화면 토글, Windows XInput 패드 매핑. |
+| 🗑️ REMOVED | Old Qt option windows, the home-screen button bar, the hotkey remapping screen, the global/platform/game scope selector, L3 gamepad hotkeys, the Region combo and `BorderPanel` — their features moved into the new pages (see the release notes). | 옛 Qt 옵션 창, 홈 화면 버튼 바, 핫키 재배정 화면, 전역/기종/게임 저장 범위 선택, L3 게임패드 핫키, Region 콤보, `BorderPanel` 삭제 — 기능은 새 페이지로 옮겨졌습니다(릴리스 노트 참고). |
+
 ### v2.2 (2026-07)
 
 | | English | 한국어 |
@@ -89,8 +103,8 @@
   **게임 목록** — ROM 자동 검색, 검색창, 즐겨찾기, 기종 탭(`ALL`/`FAV`/`NOFAV`/`NEOGEO`/`CPS`/`ETC`) 및 개수 표시
 - 🌏 **Korean game names** — Supports `gamelist.xml` (라즈겜동 format), or edit `names.txt` one line at a time (`kof94 = 더 킹 오브 파이터즈 94`)  
   **한글 게임명** — `gamelist.xml` (라즈겜동 형식) 자동 인식, 또는 `names.txt`에 한 줄씩 직접 지정 (`kof94 = 더 킹 오브 파이터즈 94`)
-- 🌐 **UI language toggle** — switch menus between Korean and English instantly (saved)  
-  **메뉴 한/영 전환** — 옵션 패널의 🌐 버튼으로 즉시 전환, 설정 저장
+- 🌐 **UI language toggle** — **OPTIONS → SYSTEM → LANGUAGE** switches the whole menu between Korean and English instantly (saved)  
+  **메뉴 한/영 전환** — **OPTIONS → SYSTEM → LANGUAGE** 에서 메뉴 전체를 즉시 전환, 설정 저장
 - 🖼️ **Preview** — image → video → image, cycling automatically (with sound), filling the box with no letterboxing  
   **프리뷰** — 이미지 → 영상 → 이미지 자동 순환 (사운드 포함), 레터박스 없이 꽉 차게 표시
 - 💾 **Save States** — 8 slots (F1–F8 load / Shift+F1–F8 save)  
@@ -103,24 +117,34 @@
   **스크린샷** — F12 / Ctrl+F12 (프리뷰 이미지)
 - 🔄 **1P↔2P Swap** — practice mode (F10)  
   **1P↔2P 스왑** — 혼자 연습 모드 (F10)
-- 📺 **Tate Mode** — Auto-rotate vertical shooters; manual toggle F8 (AUTO / 90°CCW / 90°CW / OFF)  
-  **Tate 모드** — 세로형 슈팅게임 자동 회전, F8 수동 전환 (AUTO / 90°CCW / 90°CW / OFF)
+- 📺 **Tate Mode** — Auto-rotate vertical shooters; manual toggle in **SYSTEM → TATE ROTATE** (AUTO / 90°CCW / 90°CW / OFF)  
+  **Tate 모드** — 세로형 슈팅게임 자동 회전, **SYSTEM → 세로 화면 회전** 에서 수동 전환 (AUTO / 90°CCW / 90°CW / OFF)
 - 🎛️ **DIP Switches** — per-game Machine Settings  
   **DIP 스위치** — 게임별 기판 설정 (지역, 난이도, 목숨 수, NeoGeo 모드 등)
 - 🃏 **Cheat system** — INI-based cheat parser  
   **치트 시스템** — INI 형식 치트 파일 자동 로드
 - 🌐 **Pure GGPO Netplay** — 6-char room token, STUN + Cloudflare Durable Objects matchmaking, UDP hole-punching, input-only rollback with checksum desync detection  
   **순수 GGPO 넷플레이** — 6자리 룸 토큰, STUN + Cloudflare Durable Objects 매치메이킹, UDP 홀펀칭, 입력 기반 롤백 + 체크섬 desync 감지
-- 🎮 **Controller support** — XInput / WinMM (arcade sticks) / keyboard, savable global / per-platform / per-game  
-  **컨트롤러 지원** — XInput / WinMM (아케이드 스틱) / 키보드, 전역/기종별/게임별 저장
-- ⌨️ **Configurable hotkeys** — remap with modifiers, reset-to-default & save  
-  **핫키 설정** — 모디파이어 포함 재배정, 기본값 복원·저장
+- 🎮 **Controller support** — XInput / WinMM (arcade sticks) / keyboard; changes auto-save per game, with a "save for all NEOGEO / CPS / OTHER games" action. CPS 6-button fighters show 약손 중손 강손 / 약발 중발 강발  
+  **컨트롤러 지원** — XInput / WinMM (아케이드 스틱) / 키보드. 바꾸면 게임별 자동 저장, "NEOGEO / CPS / 기타 기종 전체에 저장" 지원. CPS 6버튼 격투는 약손 중손 강손 / 약발 중발 강발 로 표시
+- ⌨️ **Hotkeys for every device** — fixed keyboard hotkeys, and RetroArch-style **SELECT + button** combos for gamepads and arcade sticks ([CONTROLS.md](CONTROLS.md))  
+  **모든 장치 핫키** — 고정 키보드 핫키, 게임패드·아케이드 스틱은 RetroArch 방식 **SELECT + 버튼** 조합 ([CONTROLS.md](CONTROLS.md))
+- 🎞️ **Frame Lab** — step a paused game frame by frame and save any frame as PNG  
+  **프레임 랩** — 멈춘 게임을 프레임 단위로 넘기며 원하는 프레임을 PNG 로 저장
+- 🔎 **Search bar, mouse scrollbars, scrolling long names** in the game list
+  게임 목록 **검색창, 마우스 스크롤바, 긴 이름 자동 스크롤**
+- 🎬 **Startup intro & screensaver** — custom `assets/intro/intro.mp4`; screensaver after 5 min jumps back to the game that was playing  
+  **시작 오프닝 & 화면보호기** — 직접 만든 `assets/intro/intro.mp4`, 5분 뒤 화면보호기가 해제되면 재생되던 게임으로 이동
 - 👁️ **Flash reduction** — matches full-screen white flashes to the surrounding brightness (eye protection, no color distortion)  
   **플래시 감소** — 전체 화면 흰 번쩍임을 주변 밝기에 맞춰 억제 (눈 보호, 색 왜곡 없음)
 - 🕹️ **Turbo buttons** — per-button toggle  
   **터보 버튼** — 버튼별 독립 터보 설정
 - 📺 **CRT shader** — scanlines, RGB mask, vignette, bloom  
   **CRT 쉐이더** — 스캔라인, RGB 마스크, 비네트, 블룸
+- 🖼️ **Full RetroArch shader support** — `.slang` / `.slangp` presets run through the same glslang → SPIR-V → GLSL pipeline RetroArch uses, so **Mega Bezel**, koko-aio, CRT-Royale and the rest work as-is (multi-pass, feedback, frame history, LUTs, parameters)  
+  **RetroArch 셰이더 완전 지원** — `.slang` / `.slangp` 프리셋을 RetroArch 와 같은 glslang → SPIR-V → GLSL 경로로 처리하므로 **Mega Bezel**, koko-aio, CRT-Royale 등이 그대로 동작 (다중 패스·피드백·프레임 히스토리·LUT·파라미터)
+- 🖼️ **Bezel overlay** — arcade frame PNG over the game, auto-fits the screen into the transparent window; one bezel can be assigned to many games  
+  **베젤 오버레이** — 게임 위에 아케이드 프레임 PNG, 투명한 창에 화면 자동 맞춤. 베젤 하나를 여러 게임에 지정 가능
 - 🎛️ **Machine settings** — DIP switches, savable per-platform / per-game  
   **머신 세팅** — DIP 스위치, 기종별/게임별 저장
 - 🔒 **Service mode protection** — arcade test menu blocked by default; sent only by a dedicated hotkey (separate from START-hold)  
@@ -196,89 +220,36 @@
 
 ## 🎮 Controls / 조작
 
-### Keyboard / 키보드 (default mapping / 기본 설정)
+Full tables / 전체 표: **[CONTROLS.md](CONTROLS.md)**
 
-| Keyboard Key | Libretro Button | NeoGeo |
-|:---:|:---:|:---:|
-| `Z` | B (JOYPAD_B) | A Button / A 버튼 |
-| `X` | A (JOYPAD_A) | B Button / B 버튼 |
-| `A` | Y (JOYPAD_Y) | C Button / C 버튼 |
-| `S` | X (JOYPAD_X) | D Button / D 버튼 |
-| `D` | L (JOYPAD_L) | — |
-| `C` | R (JOYPAD_R) | — |
-| `Enter` | START | START |
-| `Space` | SELECT | SELECT |
-| `↑ ↓ ← →` | D-Pad / 방향키 | D-Pad |
+### Default game input / 기본 게임 입력
 
-> All mappings can be changed in **Options → Controls → KEYBOARD**.  
-> 모든 키는 **Options → Controls → KEYBOARD**에서 변경 가능합니다.
+| Game type / 게임 종류 | Keyboard / 키보드 | Gamepad / 게임패드 |
+|---|---|---|
+| Neo Geo | `A` `S` `D` `F` = A B C D, `Z` `X` = CD / AB | X = A, A = B, Y = C, B = D |
+| CPS 2–3 button / CPS 2~3버튼 | `A` `S` `D` = A B C (A attack / 공격, B jump / 점프) | X = A, A = B, Y = C |
+| CPS 6-button fighters / CPS 6버튼 격투 | `A` `S` `D` = 약손 중손 강손, `Z` `X` `C` = 약발 중발 강발 | X Y R1 = 약손 중손 강손, A B R2 = 약발 중발 강발 |
+| Common / 공통 | `Enter`/`1` = START, `Space`/`2` = SELECT·COIN, arrow keys | Start, Select, D-pad |
 
----
+Arcade stick (WinMM) / 아케이드 스틱: buttons 1–4 = A B C D, 5/6 = L/R, 7/8 = L2/R2, 9 = SELECT, 10 = START.
 
-### Xbox / XInput Controller / 엑스박스 컨트롤러
-
-| Gamepad Button | Libretro Button | NeoGeo |
-|:---:|:---:|:---:|
-| A | B (JOYPAD_B) | A Button |
-| B | A (JOYPAD_A) | B Button |
-| X | Y (JOYPAD_Y) | C Button |
-| Y | X (JOYPAD_X) | D Button |
-| LB | L (JOYPAD_L) | — |
-| RB | R (JOYPAD_R) | — |
-| LT | L2 | — |
-| RT | R2 | — |
-| L3 (stick click) | L3 | — |
-| R3 (stick click) | R3 | — |
-| Back / Select | SELECT | SELECT |
-| Start / Menu | START | START |
-| D-Pad / 방향패드 | D-Pad | D-Pad |
+> Change any mapping in **OPTIONS → CONTROLS** — it is saved automatically for the current game.
+> 모든 매핑은 **OPTIONS → CONTROLS** 에서 바꿀 수 있고 지금 게임에 자동 저장됩니다.
 
 ---
 
-### Arcade Stick (WinMM) / 아케이드 스틱
+## ⌨️ Hotkeys / 단축키
 
-| Button # / 버튼 번호 | Libretro Button | NeoGeo |
-|:---:|:---:|:---:|
-| Button 1 / 버튼 1 | B (JOYPAD_B) | A Button |
-| Button 2 / 버튼 2 | A (JOYPAD_A) | B Button |
-| Button 3 / 버튼 3 | Y (JOYPAD_Y) | C Button |
-| Button 4 / 버튼 4 | X (JOYPAD_X) | D Button |
-| Button 5 / 버튼 5 | L | — |
-| Button 6 / 버튼 6 | R | — |
-| Button 7 / 버튼 7 | L2 | — |
-| Button 8 / 버튼 8 | R2 | — |
-| Button 9 / 버튼 9 | SELECT | SELECT |
-| Button 10 / 버튼 10 | START | START |
-| Stick / 스틱 | D-Pad / 방향 | D-Pad |
-
-> Mappings can be changed in **Options → Controls → ARCADE STICK**.  
-> **Options → Controls → ARCADE STICK**에서 변경 가능합니다.
-
----
-
-## ⌨️ Keyboard Shortcuts / 키보드 단축키
-
-### System / 시스템
+### Keyboard / 키보드 (fixed / 고정)
 
 | Key / 키 | Action / 기능 |
 |-----|--------|
-| `Tab` | Pause / Resume / 일시정지·재개 |
-| `ESC` | Stop game → main screen / 게임 종료 → 메인 화면 |
-| `Alt + Enter` | Toggle fullscreen / 전체화면 토글 |
-| `` ` `` (backtick) | Toggle **Service Mode** 5 sec / **서비스 모드** 5초 허용 |
-
-### Save States / 세이브스테이트
-
-| Key / 키 | Action / 기능 |
-|-----|--------|
-| `F1` – `F8` | **Load** save state (slot 1–8) / 세이브스테이트 **로드** |
-| `Shift + F1` – `Shift + F8` | **Save** save state (slot 1–8) / 세이브스테이트 **저장** |
-
-### Emulation & Recording / 에뮬레이션·녹화
-
-| Key / 키 | Action / 기능 |
-|-----|--------|
-| `F8` | **Tate rotation** cycle: AUTO → 90°CCW → 90°CW → OFF / **Tate 회전** 순환: AUTO → 90°CCW → 90°CW → OFF |
+| `Tab` | Game ↔ menu / 게임 ↔ 메뉴 |
+| `ESC` | Stop game / 게임 종료 |
+| `Alt + Enter` | Fullscreen / 전체화면 |
+| `` ` `` (backtick) | **Service (TEST)** input / **서비스(TEST)** 입력 |
+| `Shift + F1` – `Shift + F8` | **Save** state (slot 1–8) / 상태 **저장** |
+| `F1` – `F8` | **Load** state (slot 1–8) / 상태 **불러오기** |
 | `F9` | Start/stop recording / 녹화 시작·중지 → `recordings/{rom}_{timestamp}.mp4` |
 | `Ctrl + F9` | Record **preview clip** / **프리뷰 영상** 녹화 → `previews/{rom}.mp4` |
 | `F10` | **1P↔2P port swap** / **1P↔2P 포트 스왑** |
@@ -286,18 +257,31 @@
 | `F12` | Screenshot / 스크린샷 → `screenshots/{rom}_{timestamp}.png` |
 | `Ctrl + F12` | Save **preview image** / **프리뷰 이미지** 저장 → `previews/{rom}.png` |
 
-### Gamepad / 게임패드
+### Gamepad & arcade stick / 게임패드·아케이드 스틱 (hold SELECT / SELECT 를 누른 채)
 
-| Combo / 조합 | Action / 기능 |
-|-------|--------|
-| `SELECT + START` (hold 2 sec / 2초 유지) | Pause / return to GUI / 일시정지·GUI 복귀 |
+| Combo / 조합 | Action / 기능 | Arcade stick / 스틱 |
+|---|---|---|
+| SELECT + START | Game ↔ menu / 게임 ↔ 메뉴 | 9 + 10 |
+| SELECT + Y | Exit game / 게임 종료 | 9 + 4 |
+| SELECT + L1 | Service (TEST) / 서비스 | 9 + 5 |
+| SELECT + R1 | Fast forward / 패스트포워드 | 9 + 6 |
+| SELECT + A / B | Save / load state / 상태 저장·불러오기 | 9 + 1 / 2 |
+| SELECT + X | Screenshot / 스크린샷 | 9 + 3 |
+| SELECT + → | Next save slot / 다음 슬롯 | 9 + → |
+| SELECT + ← | Save preview image / 프리뷰 이미지 저장 | 9 + ← |
+| SELECT + ↑ | Fullscreen / 전체화면 | 9 + ↑ |
+| SELECT + ↓ | Swap 1P↔2P / 스왑 | 9 + ↓ |
+| SELECT + L2 | Record / 녹화 | 9 + 7 |
+| SELECT + R2 | Record preview clip / 프리뷰 영상 녹화 | 9 + 8 |
+
+SELECT alone sends **coin** when released. / SELECT 만 누르면 뗄 때 **코인**이 들어갑니다.
 
 ---
 
 ## 🕹️ Steam Deck — Recommended Button Layout / 권장 버튼 레이아웃
 
-Steam Deck has no F-keys — map them via **Steam Input**.  
-Steam Deck에는 F키가 없으므로 **Steam Input**으로 매핑합니다.
+Steam Deck has no F-keys. The gamepad hotkeys above (**SELECT + button**) work without any setup; Steam Input back-button keys are optional.  
+Steam Deck에는 F키가 없지만 위의 게임패드 핫키(**SELECT + 버튼**)는 별도 설정 없이 동작합니다. 뒷면 버튼 키 매핑은 선택 사항입니다.
 
 ### Recommended Back Button Mapping / 권장 뒷면 버튼 매핑
 
@@ -305,7 +289,6 @@ Steam Deck에는 F키가 없으므로 **Steam Input**으로 매핑합니다.
 |--------|-----------|----------|
 | R4 | `F10` | 1P↔2P swap / 포트 스왑 |
 | R5 | `F11` | Fast Forward / 패스트포워드 |
-| L4 | `F8` | Tate rotation / Tate 회전 |
 | L5 | `Tab` | Pause / 일시정지 |
 
 ### How to set Steam Input / Steam Input 설정 방법
@@ -320,16 +303,17 @@ Steam Deck에는 F키가 없으므로 **Steam Input**으로 매핑합니다.
 
 ## 🎛️ Options Panel Guide / 옵션 패널 안내
 
-| Tab / 탭 | Description / 설명 |
+| Category / 항목 | Description / 설명 |
 |-----|-------------|
-| **Controls** | Remap keyboard, XInput, arcade stick / 키보드·XInput·아케이드 스틱 키 재설정 |
-| **Directories** | Set ROM, save, screenshot, recording paths / ROM·저장·스크린샷·녹화 경로 설정 |
-| **Video** | Scale mode, CRT shader, frameskip, V-Sync / 화면 배율, CRT 쉐이더, 프레임스킵, V싱크 |
-| **Audio** | Volume, sample rate, buffer / 볼륨, 샘플레이트, 버퍼 |
-| **Machine** | DIP switches — region, difficulty, lives, Neo-Geo mode / 기판 설정 — 지역·난이도·목숨·NeoGeo 모드 |
-| **Shots** | Preview image/video factory / 프리뷰 이미지·영상 촬영 (Ctrl+F12 / Ctrl+F9) |
-| **Cheats** | Enable/disable per-game cheats / 게임별 치트 ON/OFF |
-| **Netplay** | Host or join rollback netplay / 넷플레이 호스트·참가 |
+| **CONTROLS / 컨트롤** | Device, button mapping, saving, turbo, hotkeys / 장치·키 매핑·저장·터보·핫키 |
+| **DIRECTORIES / 디렉터리** | ROM and preview folders, plus every fixed path the program reads / ROM·프리뷰 폴더와 프로그램이 읽는 고정 경로 목록 |
+| **VIDEO OPTIONS / 비디오 옵션** | Scale mode, smooth, CRT, flash guard, bezel, V-Sync, fullscreen, frameskip, shader / 화면 비율, 부드럽게, CRT, 플래시 감소, 베젤, V싱크, 전체화면, 프레임스킵, 셰이더 |
+| **AUDIO OPTIONS / 오디오 옵션** | Volume, sound mode, sample rate, buffer / 볼륨, 사운드 모드, 샘플레이트, 버퍼 |
+| **MACHINE SETTINGS / 머신 세팅** | The running game's DIP switches (region, difficulty, lives, Neo Geo mode …) / 실행 중 게임의 DIP 스위치 |
+| **SHOTS FACTORY / 샷 팩토리** | Screenshot, preview image, **Frame Lab**, recording, preview clip / 스크린샷, 프리뷰 이미지, **프레임 랩**, 녹화, 프리뷰 영상 |
+| **CHEATS / 치트** | Per-game cheats (core cheats or INI file) / 게임별 치트(코어 치트 또는 INI 파일) |
+| **MULTIPLAYER / 멀티플레이어** | Host or join rollback netplay / 넷플레이 호스트·참가 |
+| **SYSTEM / 시스템** | Save slot, save/load state, record, fast forward, 1P/2P, TATE, reset/stop game, language, startup intro, reset defaults / 저장 슬롯, 상태 저장·불러오기, 녹화, 빨리 감기, 1P/2P, 세로 화면, 게임 리셋·종료, 언어, 시작 오프닝, 기본값 초기화 |
 
 ---
 
@@ -350,7 +334,7 @@ long START press no longer open the operator menu by accident.
 
 | | English | 한국어 |
 |---|---|---|
-| Key / 키 | `` ` `` (default, remappable in Options → Controls → Hotkeys) | `` ` `` (기본값, 옵션 → 컨트롤 → 핫키 설정에서 변경 가능) |
+| Key / 키 | `` ` `` (keyboard) · SELECT + L1 (gamepad) | `` ` `` (키보드) · SELECT + L1 (게임패드) |
 | Behaviour / 동작 | One press = one service input sent to the board | 한 번 누르면 서비스 입력 1회 전송 |
 | Otherwise / 평소 | Service input is always blocked | 서비스 입력은 항상 차단 |
 
@@ -534,14 +518,75 @@ FBNeoRageX/
 ├── gamelist.xml            ← Korean game names (optional) / 한글 게임명 (선택, 미포함)
 ├── names.txt               ← Simple name overrides / 게임 이름 간편 변경 (gamelist.xml 보다 우선)
 ├── config.json             ← Settings (auto-created) / 설정 파일
-├── assets/                 ← UI assets (fonts, shaders) / UI 에셋
+├── assets/                 ← UI assets / UI 에셋
+│   ├── intro/              ← Put intro.mp4 here for a custom opening / 직접 만든 오프닝 영상(intro.mp4)
+│   ├── fonts/              ← Bundled font license / 번들 폰트 라이선스
 ├── roms/                   ← Place your ROM ZIPs here / ROM 파일 폴더
 ├── saves/                  ← Save states (auto-created) / 세이브스테이트
 ├── screenshots/            ← Screenshots (auto-created) / 스크린샷
 ├── recordings/             ← Video recordings (auto-created) / 녹화 영상
 ├── previews/               ← Preview images/videos / 프리뷰 이미지·영상
+├── shaders/                ← .glsl / .slang / .slangp shaders / 셰이더 폴더
+├── bezels/                 ← Bezel overlay PNGs (romname.png) / 베젤 이미지
 └── cheats/                 ← Cheat files (.ini format) / 치트 파일
 ```
+
+---
+
+## 🖼️ Shaders / 셰이더
+
+### Supported formats / 지원 형식
+
+| Format | Notes |
+|---|---|
+| `.glsl` | RetroArch legacy GLSL shaders / 구형 RetroArch GLSL 셰이더 |
+| `.slang` | Single-pass Vulkan-GLSL shader / 단일 패스 |
+| `.slangp` | Multi-pass preset, including `#reference` inheritance / 다중 패스 프리셋, `#reference` 상속 포함 |
+
+`.slang` / `.slangp` are compiled the same way RetroArch does it — **glslang → SPIR-V → SPIRV-Cross → desktop GLSL** — so shaders that rely on GLSL 450 features work unchanged.
+
+`.slang` / `.slangp` 은 RetroArch 와 똑같이 **glslang → SPIR-V → SPIRV-Cross → 데스크톱 GLSL** 로 변환합니다. 그래서 GLSL 450 기능을 쓰는 셰이더도 손대지 않고 그대로 돌아갑니다.
+
+Implemented semantics / 구현된 시맨틱:
+
+- Textures: `Original`, `Source`, `OriginalHistory1..N`, `PassOutput0..N`, `PassFeedback0..N`, pass aliases and `<alias>Feedback`, LUTs (`textures=`, `User0..N`)
+- Uniforms: `MVP`, `OutputSize`, `FinalViewportSize`, `FrameCount`, `FrameDirection`, `Rotation`, `TotalSubFrames`, `CurrentSubFrame`, every `<texture>Size`, and every `#pragma parameter`
+- Preset keys: `#reference`, `shaderN`, `aliasN`, `scale_type[_x|_y]N`, `scale[_x|_y]N`, `filter_linearN`, `wrap_modeN`, `float_framebufferN`, `srgb_framebufferN`, `mipmap_inputN`, `frame_count_modN`, `textures=` with `_linear` / `_wrap_mode` / `_mipmap`, and parameter overrides
+
+### How to use / 사용법
+
+1. Download a shader pack, e.g. the official [libretro/slang-shaders](https://github.com/libretro/slang-shaders) or [Mega Bezel](https://github.com/HyperspaceMadness/Mega_Bezel).
+2. Copy it into the `shaders/` folder **keeping its folder structure** — presets reference their `.slang` files by relative path.
+3. Options → Video → Shader, and pick a `.slangp`.
+
+1. 셰이더 팩을 받습니다. 예: [libretro/slang-shaders](https://github.com/libretro/slang-shaders), [Mega Bezel](https://github.com/HyperspaceMadness/Mega_Bezel)
+2. `shaders/` 폴더에 **폴더 구조를 그대로 유지한 채** 복사합니다. 프리셋이 상대 경로로 `.slang` 을 찾기 때문입니다.
+3. 옵션 → 비디오 → 셰이더에서 `.slangp` 를 고릅니다.
+
+### Shader parameters / 셰이더 파라미터
+
+Presets declare their own parameters (`#pragma parameter`). Press the **⚙** button next to the shader path to open them: search by name or description, drag a slider, and the picture updates live. Values are saved per preset in `config.json` and restored the next time you load that shader.
+
+프리셋은 자기 파라미터를 `#pragma parameter` 로 선언합니다. 셰이더 경로 옆 **⚙** 버튼을 누르면 목록이 열립니다. 이름이나 설명으로 검색하고 슬라이더를 움직이면 화면에 바로 반영됩니다. 값은 프리셋별로 `config.json` 에 저장되어 다음에 같은 셰이더를 걸면 복원됩니다.
+
+> **Mega Bezel: stretch the picture to fill the screen**  
+> Mega Bezel keeps the tube at the game's own aspect by design and fills the rest with its bezel and ambient lighting — that is not a bug. To stretch the picture edge to edge, open ⚙, search `aspect`, and set **`Type - Auto | Explicit | 4:3 | 3:2 | 16:9 | PAR | Full`** (`HSM_ASPECT_RATIO_MODE`) to **6 = Full**.
+>
+> **Mega Bezel 에서 화면을 꽉 채우려면**  
+> Mega Bezel 은 설계상 튜브를 게임 원본 비율로 유지하고 나머지를 베젤·앰비언트 광원으로 채웁니다. 버그가 아닙니다. 화면 전체로 늘리려면 ⚙ 를 열고 `aspect` 로 검색해 **`Type - Auto | Explicit | 4:3 | 3:2 | 16:9 | PAR | Full`** (`HSM_ASPECT_RATIO_MODE`) 을 **6 = Full** 로 두세요.
+
+### Notes / 참고
+
+- **Requires OpenGL 3.3 or newer.** On older GPUs the program falls back to the previous renderer and `.slang` support is disabled; everything else keeps working.  
+  **OpenGL 3.3 이상이 필요합니다.** 더 낮은 GPU 에서는 예전 렌더러로 자동 복귀하고 `.slang` 만 비활성화됩니다. 나머지 기능은 그대로 동작합니다.
+- Large presets (Mega Bezel has 30–40 passes) can take **10–40 seconds** to compile on first load — the graphics driver does the work, and the window stays busy meanwhile. This is normal and matches RetroArch.  
+  큰 프리셋(Mega Bezel 은 패스가 30~40개)은 처음 적용할 때 **10~40초** 걸릴 수 있습니다. 그래픽 드라이버가 컴파일하는 시간이며, 그동안 창이 멈춘 것처럼 보입니다. RetroArch 도 마찬가지입니다.
+- The scale mode applies to the shader too: **FULL** lets the shader cover the whole window, **4:3** gives it an aspect-correct area to lay itself out in, **1:1** a native-size area. The shader is told the size it actually draws into, so its own frame never gets squashed.  
+  화면 모드는 셰이더에도 그대로 적용됩니다. **FULL** 은 셰이더가 창 전체를 채우고, **4:3** 은 원본 비율 영역 안에서, **1:1** 은 원본 크기 영역 안에서 제 비율대로 그립니다. 셰이더에게 "실제로 그려 넣을 크기" 를 알려주므로 베젤 프레임이 찌그러지지 않습니다.
+- Mega Bezel draws its own frame, so use scale mode **FULL** for edge-to-edge and turn the built-in bezel overlay **off**.  
+  Mega Bezel 은 프레임을 직접 그리므로, 여백 없이 꽉 채우려면 화면 모드를 **FULL** 로 두고 내장 베젤 오버레이는 **끄세요**.
+- Presets under a `refs/` folder are fragments meant to be pulled in by other presets — pick the one in the parent folder instead.  
+  `refs/` 폴더 안의 프리셋은 다른 프리셋이 불러 쓰는 조각입니다. 상위 폴더의 것을 고르세요.
 
 **Steam Deck:**
 ```
@@ -648,8 +693,8 @@ sfa3   = 스트리트 파이터 제로 3
 > Delay(f) ≥ RTT(ms) ÷ 33으로 설정하세요. 국내: 1–2f, 아시아: 2–3f, 해외: 4–6f. RTT는 연결 후 상태 표시줄에서 확인 가능합니다.
 
 **Q: The vertical shooter screen is sideways. / 세로형 슈팅게임 화면이 옆으로 나와요.**  
-**A:** Press `F8` to cycle Tate rotation (AUTO → 90°CCW → 90°CW → OFF). Most vertical games rotate automatically on load.  
-> `F8`을 눌러 Tate 회전을 순환하세요 (AUTO → 90°CCW → 90°CW → OFF). 대부분의 세로형 게임은 자동으로 회전됩니다.
+**A:** Use **OPTIONS → SYSTEM → TATE ROTATE** (AUTO → 90°CCW → 90°CW → OFF). Most vertical games rotate automatically on load.  
+> **OPTIONS → SYSTEM → 세로 화면 회전** 에서 순환하세요 (AUTO → 90°CCW → 90°CW → OFF). 대부분의 세로형 게임은 자동으로 회전됩니다.
 
 ---
 
@@ -669,3 +714,4 @@ FinalBurn Neo 코어는 별도의 라이선스를 따릅니다.
 - [libretro](https://www.libretro.com/) — core/frontend interface standard / 코어·프론트엔드 인터페이스 표준
 - [Qt6](https://www.qt.io/) — UI framework / UI 프레임워크
 - [라즈겜동](https://cafe.naver.com/razberry) — Korean game name database / 한글 게임명 데이터베이스
+- [Galmuri](https://github.com/quiple/galmuri) by Lee Minseo (quiple) — pixel font used for the UI (Galmuri Mono 11, glyph subset), [SIL Open Font License 1.1](assets/fonts/LICENSE-Galmuri.txt) / UI 도트 폰트 (Galmuri Mono 11 서브셋)

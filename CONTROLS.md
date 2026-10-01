@@ -1,160 +1,150 @@
-# FBNeoRageX — 조작 및 단축키 가이드
+# FBNeoRageX — Controls & Hotkeys / 조작 및 단축키 가이드 (v2.3)
 
-## 목차
-- [메인 UI 버튼 바](#메인-ui-버튼-바)
-- [키보드 단축키 (시스템)](#키보드-단축키-시스템)
-- [기본 게임 입력 — 키보드](#기본-게임-입력--키보드)
-- [기본 게임 입력 — Xbox / XInput 패드](#기본-게임-입력--xbox--xinput-패드)
-- [기본 게임 입력 — 아케이드 스틱 (WinMM)](#기본-게임-입력--아케이드-스틱-winmm)
-- [게임 목록 필터 탭](#게임-목록-필터-탭)
-- [Steam Deck 사용 팁](#steam-deck-사용-팁)
-- [향후 추가 예정](#향후-추가-예정)
-
----
-
-## 메인 UI 버튼 바
-
-하단 버튼 바에서 마우스로 클릭합니다.
-
-| 버튼 | 기능 |
-|------|------|
-| `▶  LAUNCH / RESUME` | 선택한 게임 시작 / 일시정지 상태에서 재개 |
-| `■  STOP GAME` | 에뮬레이션 중단 후 메인 화면 복귀 |
-| `⏮  RESET` | 현재 게임 리셋 (코어 재시작) |
-| `⇄  1P` / `⇄  2P` | 1P↔2P 포트 전환 (켜지면 초록색, **F10**) |
-| `⛶  FULLSCREEN` | 전체화면 토글 |
-| `✖  EXIT` | 프로그램 종료 |
+## Contents / 목차
+- [Menu navigation / 메뉴 조작](#menu-navigation--메뉴-조작)
+- [Keyboard hotkeys / 키보드 단축키](#keyboard-hotkeys--키보드-단축키)
+- [Gamepad & arcade-stick hotkeys / 게임패드·아케이드 스틱 핫키](#gamepad--arcade-stick-hotkeys--게임패드아케이드-스틱-핫키)
+- [Default game input / 기본 게임 입력](#default-game-input--기본-게임-입력)
+- [Saving your mapping / 매핑 저장](#saving-your-mapping--매핑-저장)
+- [Turbo / 터보](#turbo--터보)
+- [Frame Lab / 프레임 랩](#frame-lab--프레임-랩)
+- [Steam Deck tips / 스팀덱 팁](#steam-deck-tips--스팀덱-팁)
 
 ---
 
-## 키보드 단축키 (시스템)
+## Menu navigation / 메뉴 조작
 
-게임 중 언제든지 사용 가능합니다.
+The menu has three cursor zones: **filter tabs → game list → options**.
+메뉴에는 **필터 탭 → 게임 목록 → 옵션** 세 개의 커서 영역이 있습니다.
 
-| 키 | 기능 |
-|----|------|
-| `Tab` | 일시정지 / 재개 (GUI ↔ 게임 화면 전환) |
-| `ESC` | 게임 강제 종료 → 메인 화면 복귀 |
-| `Alt + Enter` | 전체화면 토글 |
-| `F1` ~ `F8` | 세이브스테이트 **로드** (슬롯 1~8) |
-| `Shift + F1` ~ `Shift + F8` | 세이브스테이트 **저장** (슬롯 1~8) |
-| `F9` | 녹화 시작 / 중지 → `recordings/{rom}_{timestamp}.mp4` |
-| `Ctrl + F9` | **프리뷰 영상** 녹화 시작 / 중지 → `previews/{rom}.mp4` (덮어씌움) |
-| `F10` | **1P↔2P 포트 스왑** (싱글 연습 모드) |
-| `F11` | 패스트포워드 토글 |
-| `F12` | 스크린샷 저장 → `screenshots/{rom}_{timestamp}.png` |
-| `Ctrl + F12` | **프리뷰 이미지** 저장 → `previews/{rom}.png` (덮어씌움) |
+| Action / 동작 | Keyboard / 키보드 | Gamepad / 게임패드 | Mouse / 마우스 |
+|---|---|---|---|
+| Move / 이동 | `↑ ↓` (`PgUp` `PgDn` `Home` `End`) | D-pad | click / wheel, drag scrollbars |
+| Change value / 값 변경 | `← →` | D-pad ◀ ▶ | click the ◀ ▶ buttons |
+| Launch / open / 실행·열기 | `Enter` | **A** | click |
+| Back / 뒤로 | `Esc` / `Backspace` | **B** | BACK button |
+| Switch zone / 영역 이동 | `[` `]` | **LB** `RB` | — |
+| Favorite / 즐겨찾기 | `Space` | **X** | right-click |
+| Search / 검색 | `/` or `Ctrl+F` | **Y** (on-screen keyboard) | click the search bar |
 
----
-
-## 기본 게임 입력 — 키보드
-
-Controls 페이지에서 자유롭게 변경 가능합니다.
-
-| 키보드 키 | 게임 버튼 | 네오지오 대응 |
-|-----------|-----------|--------------|
-| `Z` | B (JOYPAD_B) | A 버튼 |
-| `X` | A (JOYPAD_A) | B 버튼 |
-| `A` | Y (JOYPAD_Y) | C 버튼 |
-| `S` | X (JOYPAD_X) | D 버튼 |
-| `D` | L (JOYPAD_L) | — |
-| `C` | R (JOYPAD_R) | — |
-| `Enter` | START | START |
-| `Space` | SELECT | SELECT |
-| `↑` | UP | 위 |
-| `↓` | DOWN | 아래 |
-| `←` | LEFT | 왼쪽 |
-| `→` | RIGHT | 오른쪽 |
+Search: `Enter` / `Esc` end typing, `Ctrl+U` (or the `x` button) clears.
+검색: `Enter` / `Esc` 로 입력 종료, `Ctrl+U`(또는 `x` 버튼)로 지우기.
 
 ---
 
-## 기본 게임 입력 — Xbox / XInput 패드
+## Keyboard hotkeys / 키보드 단축키
 
-| 패드 버튼 | 게임 버튼 | 네오지오 대응 |
-|-----------|-----------|--------------|
-| `A` | B (JOYPAD_B) | A 버튼 |
-| `B` | A (JOYPAD_A) | B 버튼 |
-| `X` | Y (JOYPAD_Y) | C 버튼 |
-| `Y` | X (JOYPAD_X) | D 버튼 |
-| `LB` | L (JOYPAD_L) | — |
-| `RB` | R (JOYPAD_R) | — |
-| `LT` | L2 | — |
-| `RT` | R2 | — |
-| `L3` (왼쪽 스틱 클릭) | L3 | — |
-| `R3` (오른쪽 스틱 클릭) | R3 | — |
-| `Back / Select` | SELECT | SELECT |
-| `Start / Menu` | START | START |
-| `D-Pad` | 방향 | 방향 |
+Keyboard hotkeys are fixed (no remapping screen). / 키보드 핫키는 고정입니다(재배정 화면 없음).
 
----
-
-## 기본 게임 입력 — 아케이드 스틱 (WinMM)
-
-| 버튼 번호 | 게임 버튼 | 네오지오 대응 |
-|-----------|-----------|--------------|
-| 버튼 1 | B (JOYPAD_B) | A 버튼 |
-| 버튼 2 | A (JOYPAD_A) | B 버튼 |
-| 버튼 3 | Y (JOYPAD_Y) | C 버튼 |
-| 버튼 4 | X (JOYPAD_X) | D 버튼 |
-| 버튼 5 | L | — |
-| 버튼 6 | R | — |
-| 버튼 7 | L2 | — |
-| 버튼 8 | R2 | — |
-| 버튼 9 | SELECT | SELECT |
-| 버튼 10 | START | START |
-| 버튼 11 | L3 | — |
-| 버튼 12 | R3 | — |
-| 스틱 | 방향 | 방향 |
-
-> 버튼 매핑은 Controls 페이지 → **ARCADE STICK** 탭에서 변경 가능합니다.
+| Key / 키 | Action / 기능 |
+|---|---|
+| `Tab` | Game ↔ menu / 게임 ↔ 메뉴 |
+| `Esc` | Stop game / 게임 종료 |
+| `` ` `` | Service (TEST) input / 서비스(TEST) 입력 |
+| `F11` | Fast forward / 패스트포워드 |
+| `Alt+Enter` | Fullscreen / 전체화면 |
+| `Shift+F1`–`F8` | Save state to slot 1–8 / 스테이트 저장 (슬롯 1–8) |
+| `F1`–`F8` | Load state / 스테이트 불러오기 |
+| `F12` | Screenshot → `screenshots/` / 스크린샷 |
+| `Ctrl+F12` | Save preview image → `previews/{rom}.png` / 프리뷰 이미지 저장 |
+| `F9` | Start / stop recording → `recordings/` / 녹화 시작·중지 |
+| `Ctrl+F9` | Record preview clip → `previews/{rom}.mp4` / 프리뷰 영상 녹화 |
+| `F10` | Swap 1P ↔ 2P / 1P ↔ 2P 스왑 |
 
 ---
 
-## 게임 목록 필터 탭
+## Gamepad & arcade-stick hotkeys / 게임패드·아케이드 스틱 핫키
 
-게임 목록 상단 탭 버튼으로 필터를 전환합니다.
+RetroArch style: **hold SELECT**, then press another button. L3 / R3 are not used.
+RetroArch 방식: **SELECT 를 누른 채** 다른 버튼을 누릅니다. L3 / R3 는 쓰지 않습니다.
 
-| 탭 | 기능 |
-|----|------|
-| `ALL` | 전체 게임 목록 표시 |
-| `★ FAV` | 즐겨찾기 등록 게임만 표시 |
-| `☆` | 즐겨찾기 미등록 게임만 표시 |
+| Action / 기능 | Gamepad / 게임패드 | Arcade stick / 아케이드 스틱 |
+|---|---|---|
+| Game ↔ menu / 게임 ↔ 메뉴 | SELECT + START | 9 + 10 |
+| Exit game / 게임 종료 | SELECT + Y | 9 + 4 |
+| Service (TEST) / 서비스 | SELECT + L1 | 9 + 5 |
+| Fast forward / 패스트포워드 | SELECT + R1 | 9 + 6 |
+| Save state / 상태 저장 | SELECT + A | 9 + 1 |
+| Load state / 상태 불러오기 | SELECT + B | 9 + 2 |
+| Screenshot / 스크린샷 | SELECT + X | 9 + 3 |
+| Next save slot (1→8) / 다음 슬롯 | SELECT + → | 9 + → |
+| Save preview image / 프리뷰 이미지 저장 | SELECT + ← | 9 + ← |
+| Fullscreen / 전체화면 | SELECT + ↑ | 9 + ↑ |
+| Swap 1P ↔ 2P / 스왑 | SELECT + ↓ | 9 + ↓ |
+| Record / 녹화 | SELECT + L2 | 9 + 7 |
+| Record preview clip / 프리뷰 영상 | SELECT + R2 | 9 + 8 |
 
-> 게임 목록에서 게임을 **더블클릭**하면 즐겨찾기 토글됩니다.
-
----
-
-## Steam Deck 사용 팁
-
-Steam Deck에는 키보드가 없으므로 F 키 단축키를 사용하려면 Steam Input을 설정합니다.
-
-### 권장 뒷면 그립 버튼 매핑 (Steam Input)
-
-| 그립 버튼 | 매핑 키 | 기능 |
-|-----------|---------|------|
-| R4 | `F10` | 1P↔2P 포트 스왑 |
-| R5 | `F11` | 패스트포워드 |
-| L4 | `F12` | 스크린샷 |
-| L5 | `Tab` | 일시정지 |
-
-### Steam Input 설정 방법
-1. Steam 라이브러리 → FBNeoRageX → 컨트롤러 설정 (⚙)
-2. `Edit Layout` → `Back Buttons` 탭
-3. 원하는 그립 버튼 → `Keyboard Key` → 해당 키 선택
-4. 저장
+- While SELECT is held, other buttons are **not** sent to the game. Tapping SELECT alone (no combo) sends **coin** when you release it.
+  SELECT 를 누르는 동안 다른 버튼은 게임에 전달되지 않습니다. 조합 없이 SELECT 만 눌렀다 떼면 뗄 때 **코인**이 들어갑니다.
+- Arcade stick numbers are button numbers (1-based); the stick/POV is the direction. / 스틱의 숫자는 버튼 번호(1부터)이고 방향은 스틱·POV 입니다.
 
 ---
 
-## 향후 추가 예정
+## Default game input / 기본 게임 입력
 
-아래 기능들은 추후 업데이트에서 패드 버튼 조합으로 사용 가능하게 될 예정입니다.
+The Controls page (OPTIONS → CONTROLS) shows the real button names of the running game.
+컨트롤 화면(OPTIONS → CONTROLS)에는 실행 중인 게임의 실제 버튼 이름이 표시됩니다.
 
-| 기능 | 예정 패드 콤보 |
-|------|--------------|
-| 일시정지 | `Select + Start` |
-| 1P↔2P 스왑 | `L3 + R3` |
-| 패스트포워드 | `Select + R2` |
-| 녹화 토글 | `Select + R1` |
-| 스크린샷 | `Select + L1` |
-| 세이브스테이트 저장 | `Select + 방향키` |
-| 세이브스테이트 로드 | `Start + 방향키` |
+### Keyboard / 키보드
+
+| Game type / 게임 종류 | Keys / 키 |
+|---|---|
+| Neo Geo, CPS 2–3 button, others / 네오지오·CPS 2~3버튼·기타 | `A` `S` `D` `F` = **A B C D**, `Z` `X` = CD / AB (Neo Geo only) |
+| CPS 6-button fighters / CPS 6버튼 격투 | `A` `S` `D` = **약손 중손 강손** (LP MP HP), `Z` `X` `C` = **약발 중발 강발** (LK MK HK) |
+| Common / 공통 | `Enter` or `1` = START · `Space` or `2` = SELECT / COIN · arrow keys |
+
+CPS 2–3 button games (belt-scrollers) just show **A B C** — A = attack, B = jump. / CPS 2~3버튼 게임(벨트스크롤)은 **A B C** 로 표시되며 A 가 공격, B 가 점프입니다.
+
+### Gamepad / 게임패드
+
+| Game type / 게임 종류 | Mapping / 배치 |
+|---|---|
+| Neo Geo & standard / 네오지오·일반 | X = A, A = B, Y = C, B = D (face buttons as a fight-stick layout) |
+| 6-button fighters / 6버튼 격투 | **X Y R1** = 약손 중손 강손 · **A B R2** = 약발 중발 강발 |
+| Common / 공통 | Start = START · Select = SELECT / COIN · D-pad |
+
+### Arcade stick (WinMM) / 아케이드 스틱
+
+Buttons 1–4 = A B C D, 5/6 = L / R, 7/8 = L2 / R2, 9 = SELECT, 10 = START.
+버튼 1~4 = A B C D, 5/6 = L / R, 7/8 = L2 / R2, 9 = SELECT, 10 = START.
+
+---
+
+## Saving your mapping / 매핑 저장
+
+- Every change to the key mapping or turbo is **saved automatically for the current game**. Other games are untouched.
+  키 매핑·터보를 바꾸면 **지금 게임에 자동 저장**됩니다. 다른 게임은 그대로입니다.
+- **SAVE FOR ALL NEOGEO / CPS / OTHER GAMES** stores the current keyboard, gamepad, stick and turbo for the whole platform. 6-button fighters and standard layouts are stored separately.
+  **NEOGEO / CPS / 기타 기종 전체에 저장** 은 지금 키보드·게임패드·스틱·터보를 그 기종 전체에 저장합니다. 6버튼 격투와 일반 배치는 따로 저장됩니다.
+- Priority / 적용 순서: **game > platform > global > default** (게임별 > 기종별 > 전역 > 기본값).
+- **CLEAR THIS GAME'S SAVED CONTROLS** (press twice) removes the game's own settings. / **이 게임 저장값 지우기**(두 번 누르기)는 그 게임 전용 설정을 지웁니다.
+- RESET KEYBOARD / GAMEPAD / ARCADE STICK writes the default table for the current game. / 초기화 항목은 기본값 표를 지금 게임에 저장합니다.
+
+## Turbo / 터보
+
+Each button has its own ON/OFF switch (TURBO A, TURBO B …, or TURBO 약손 … for 6-button fighters) and a shared period in frames. Saved per game like the mapping.
+버튼마다 켜고 끄는 터보 항목(터보 A, 터보 B … / 6버튼 격투는 터보 약손 …)과 공통 주기(프레임)가 있고, 매핑처럼 게임별로 저장됩니다.
+
+## Frame Lab / 프레임 랩
+
+Pause a game → **OPTIONS → SHOTS FACTORY → FRAME LAB**.
+
+| Key / 키 | Gamepad / 패드 | Action / 기능 |
+|---|---|---|
+| `←` `→` | D-pad ◀ ▶ | ±1 frame / 1프레임 이동 |
+| `PgUp` `PgDn` | LB / RB | ±10 frames / 10프레임 이동 |
+| `Home` `End` | — | first / last frame / 처음·끝 |
+| `Enter` | A | save this frame as PNG / 이 프레임 PNG 저장 |
+| `Esc` | B | close / 닫기 |
+| mouse / 마우스 | | click a thumbnail, wheel = step, right-click = close |
+
+Going past the recorded history advances the game one frame at a time, up to 600 frames, then stops with a notice.
+기록된 프레임을 넘어가면 게임을 한 프레임씩 진행하며(최대 600프레임) 한계에서 안내와 함께 멈춥니다.
+
+## Steam Deck tips / 스팀덱 팁
+
+- The window is always fullscreen on Steam Deck. / 스팀덱에서는 항상 전체화면입니다.
+- The Deck's **View** button is SELECT, **Menu** is START. All gamepad hotkeys above work without Steam Input remapping.
+  스팀덱의 **뷰** 버튼이 SELECT, **메뉴** 버튼이 START 입니다. 위의 게임패드 핫키는 Steam Input 설정 없이 그대로 동작합니다.
+- The Steam Input layout should send gamepad buttons as a plain gamepad (not keyboard/mouse) for hotkeys and the 6-button layout to work.
+  핫키와 6버튼 배치가 동작하려면 Steam Input 은 게임패드 버튼을 일반 게임패드로(키보드·마우스가 아니라) 보내야 합니다.

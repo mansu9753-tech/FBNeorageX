@@ -12,7 +12,7 @@ Built with C++17 + Qt6 for **Windows** and **Steam Deck**.
 **FinalBurn Neo libretro 코어 기반의 아케이드 에뮬레이터 프론트엔드입니다.**
 C++17 + Qt6로 제작되었으며 **윈도우**와 **스팀덱**을 지원합니다.
 
-[⬇️ Download / 다운로드 (v2.1)](https://github.com/mansu9753-tech/FBNeorageX/releases/latest){: .btn }
+[⬇️ Download / 다운로드 (v2.3)](https://github.com/mansu9753-tech/FBNeorageX/releases/latest){: .btn }
 [📖 GitHub](https://github.com/mansu9753-tech/FBNeorageX){: .btn }
 
 ---
@@ -29,7 +29,8 @@ C++17 + Qt6로 제작되었으며 **윈도우**와 **스팀덱**을 지원합니
 | **Save states, fast-forward, recording, screenshots** | **세이브스테이트 · 배속 · 녹화 · 스크린샷** |
 | **Per-platform / per-game settings** — controls & DIP switches | **기종별/게임별 설정** — 컨트롤·DIP 스위치 |
 | **Flash reduction** — eases full-screen white flashes (eye protection) | **플래시 감소** — 전체 화면 번쩍임 억제 (눈 보호) |
-| **KO / EN menu toggle**, configurable hotkeys, CRT shader, TATE mode | **메뉴 한/영 전환**, 핫키 설정, CRT 셰이더, TATE 모드 |
+| **KO / EN menu toggle**, hotkeys for keyboard / gamepad / arcade stick, CRT shader, TATE mode | **메뉴 한/영 전환**, 키보드·게임패드·아케이드 스틱 핫키, CRT 셰이더, TATE 모드 |
+| **NeoRageX canvas UI** with search, scrolling names and a pixel font; **Frame Lab**; startup intro | **NeoRageX 캔버스 UI** — 검색·긴 이름 스크롤·도트 폰트, **프레임 랩**, 시작 오프닝 |
 
 ---
 
