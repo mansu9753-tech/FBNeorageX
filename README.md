@@ -10,6 +10,15 @@
 
 ## 📋 Update History / 업데이트 내역
 
+### v2.3.1 (2026-10)
+
+Full notes / 전체 내용: [RELEASE_NOTES_v2.3.1.md](RELEASE_NOTES_v2.3.1.md)
+
+| | English | 한국어 |
+|---|---|---|
+| 🐛 FIX | **Black screen on some PCs** (older integrated graphics): the OpenGL game view is attached only when needed, and Windows switches to the new **software renderer** automatically if the game screen is not displayed. | **일부 PC 검은 화면**(구형 내장 그래픽): OpenGL 게임 화면을 필요할 때만 붙이고, 게임 화면이 안 나오면 Windows 에서 새 **소프트웨어 렌더러**로 자동 전환합니다. |
+| ✨ NEW | **Software renderer** (VIDEO OPTIONS → RENDERER) — CRT / flash guard / shader / VSYNC are locked (grey) in this mode. **Default opening video** is now embedded in the exe. | **소프트웨어 렌더러**(VIDEO OPTIONS → RENDERER) — 이 모드에서는 CRT·플래시 감소·셰이더·VSYNC 가 회색으로 잠깁니다. **기본 오프닝 영상**을 exe 에 내장. |
+
 ### v2.3 (2026-10)
 
 Full notes / 전체 내용: [RELEASE_NOTES_v2.3.md](RELEASE_NOTES_v2.3.md)
@@ -20,7 +29,7 @@ Full notes / 전체 내용: [RELEASE_NOTES_v2.3.md](RELEASE_NOTES_v2.3.md)
 | 🎮 NEW | **Controls rework** — sectioned page, Neo Geo A B C D order, CPS 6-button fighters (약손 중손 강손 / 약발 중발 강발) and 2–3 button games (A B C), matching turbo names, **per-game auto-save** + per-platform save. | **컨트롤 개편** — 구역 나뉜 화면, 네오지오 A B C D 순서, CPS 6버튼 격투(약손 중손 강손 / 약발 중발 강발)·2~3버튼 게임(A B C), 같은 이름의 터보, **게임별 자동 저장** + 기종별 저장. |
 | ⌨️ NEW | **Gamepad / arcade-stick hotkeys** — hold SELECT + a button (menu, exit, service, fast-forward, save/load state, screenshot, slot, preview image, fullscreen, swap, record, preview clip). L3/R3 are no longer used. | **게임패드·아케이드 스틱 핫키** — SELECT 를 누른 채 버튼 조합(메뉴, 종료, 서비스, 패스트포워드, 상태 저장/불러오기, 스크린샷, 슬롯, 프리뷰 이미지, 전체화면, 스왑, 녹화, 프리뷰 영상). L3/R3 는 더 이상 쓰지 않음. |
 | 🎞️ NEW | **Frame Lab** (SHOTS FACTORY) — step a paused game frame by frame, pick from a thumbnail grid, save any frame as PNG. | **프레임 랩**(SHOTS FACTORY) — 멈춘 게임을 프레임 단위로 넘기고 썸네일 격자에서 골라 PNG 로 저장. |
-| 🎬 NEW | **Startup intro** — built-in sample, or your own `assets/intro/intro.mp4`. **Screensaver** starts after 5 minutes and returns the cursor to the game that was playing. | **시작 오프닝** — 내장 샘플 또는 직접 만든 `assets/intro/intro.mp4`. **화면보호기**는 5분 뒤 켜지고, 해제하면 커서가 재생되던 게임으로 이동. |
+| 🎬 NEW | **Startup intro** — built-in video, or your own `assets/intro/intro.mp4`. **Screensaver** starts after 5 minutes and returns the cursor to the game that was playing. | **시작 오프닝** — 내장 샘플 또는 직접 만든 `assets/intro/intro.mp4`. **화면보호기**는 5분 뒤 켜지고, 해제하면 커서가 재생되던 게임으로 이동. |
 | 🐛 FIX | Stale button names after switching games (core reloaded per game), Frame Lab freeze, `??` glyphs, cheat name prefix, Steam Deck fullscreen toggle, Windows XInput pad mapping. | 게임 전환 뒤 버튼 이름이 안 바뀌던 문제(게임마다 코어 재로드), 프레임 랩 멈춤, `??` 깨짐, 치트 이름 머리말, 스팀덱 전체화면 토글, Windows XInput 패드 매핑. |
 | 🗑️ REMOVED | Old Qt option windows, the home-screen button bar, the hotkey remapping screen, the global/platform/game scope selector, L3 gamepad hotkeys, the Region combo and `BorderPanel` — their features moved into the new pages (see the release notes). | 옛 Qt 옵션 창, 홈 화면 버튼 바, 핫키 재배정 화면, 전역/기종/게임 저장 범위 선택, L3 게임패드 핫키, Region 콤보, `BorderPanel` 삭제 — 기능은 새 페이지로 옮겨졌습니다(릴리스 노트 참고). |
 
@@ -307,7 +316,7 @@ Steam Deck에는 F키가 없지만 위의 게임패드 핫키(**SELECT + 버튼*
 |-----|-------------|
 | **CONTROLS / 컨트롤** | Device, button mapping, saving, turbo, hotkeys / 장치·키 매핑·저장·터보·핫키 |
 | **DIRECTORIES / 디렉터리** | ROM and preview folders, plus every fixed path the program reads / ROM·프리뷰 폴더와 프로그램이 읽는 고정 경로 목록 |
-| **VIDEO OPTIONS / 비디오 옵션** | Scale mode, smooth, CRT, flash guard, bezel, V-Sync, fullscreen, frameskip, shader / 화면 비율, 부드럽게, CRT, 플래시 감소, 베젤, V싱크, 전체화면, 프레임스킵, 셰이더 |
+| **VIDEO OPTIONS / 비디오 옵션** | Scale mode, smooth, CRT, flash guard, bezel, V-Sync, **renderer (OPENGL / SOFTWARE)**, fullscreen, frameskip, shader / 화면 비율, 부드럽게, CRT, 플래시 감소, 베젤, V싱크, 전체화면, 프레임스킵, 셰이더 |
 | **AUDIO OPTIONS / 오디오 옵션** | Volume, sound mode, sample rate, buffer / 볼륨, 사운드 모드, 샘플레이트, 버퍼 |
 | **MACHINE SETTINGS / 머신 세팅** | The running game's DIP switches (region, difficulty, lives, Neo Geo mode …) / 실행 중 게임의 DIP 스위치 |
 | **SHOTS FACTORY / 샷 팩토리** | Screenshot, preview image, **Frame Lab**, recording, preview clip / 스크린샷, 프리뷰 이미지, **프레임 랩**, 녹화, 프리뷰 영상 |
@@ -650,6 +659,11 @@ sfa3   = 스트리트 파이터 제로 3
 **A:** Build from the [FinalBurn Neo source](https://github.com/finalburnneo/FBNeo) or download from [Libretro Buildbot](https://buildbot.libretro.com/nightly/).  
 > **Q: `fbneo_libretro.dll` / `.so`는 어디서 구하나요?**  
 > **A:** [FinalBurn Neo 소스](https://github.com/finalburnneo/FBNeo)에서 직접 빌드하거나 [Libretro Buildbot](https://buildbot.libretro.com/nightly/)에서 다운로드하세요.
+
+**Q: The game screen (or the whole window) is black on my PC.**  
+**A:** Older integrated graphics drivers can fail to display the OpenGL game view. Windows switches to the software renderer automatically after the first launch attempt; you can also choose **OPTIONS → VIDEO OPTIONS → RENDERER → SOFTWARE** and restart. (Shader / CRT / flash guard / VSync are unavailable in that mode.)  
+> **Q: 게임 화면(또는 창 전체)이 검게 나와요.**  
+> **A:** 구형 내장 그래픽 드라이버에서는 OpenGL 게임 화면이 표시되지 않을 수 있습니다. Windows 는 첫 실행 시도 뒤 자동으로 소프트웨어 렌더러로 전환하며, **OPTIONS → VIDEO OPTIONS → RENDERER → SOFTWARE** 로 직접 바꾸고 다시 시작해도 됩니다 (이 모드에서는 셰이더·CRT·플래시 감소·VSync 를 쓸 수 없습니다).
 
 **Q: My game is not in the list.**  
 **A:** Make sure your ROM ZIPs are compatible with the **FinalBurn Neo** ROM set (not MAME).  
