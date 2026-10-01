@@ -69,8 +69,6 @@ bool LibretroCore::loadAllProcs() {
 #undef LOAD
 
     // 선택적 (없어도 동작)
-    m_retro_cheat_reset = reinterpret_cast<retro_cheat_reset_t>(getProcAddress("retro_cheat_reset"));
-    m_retro_cheat_set   = reinterpret_cast<retro_cheat_set_t>(getProcAddress("retro_cheat_set"));
     m_retro_get_memory_data = reinterpret_cast<retro_get_memory_data_t>(
         getProcAddress("retro_get_memory_data"));
     m_retro_get_memory_size = reinterpret_cast<retro_get_memory_size_t>(
@@ -81,6 +79,7 @@ bool LibretroCore::loadAllProcs() {
 
 bool LibretroCore::load(const QString& libPath) {
     if (m_loaded) unload();
+    m_libPath = libPath;
 
 #ifdef _WIN32
     m_handle = LoadLibraryW(libPath.toStdWString().c_str());
@@ -151,6 +150,20 @@ bool LibretroCore::loadGame(const QString& romPath) {
     if (!m_loaded) return false;
     if (m_gameLoaded) unloadGame();
 
+    // ★ 두 번째 게임부터는 코어를 통째로 다시 불러온다.
+    //   FBNeo 코어는 버튼 정의(SET_INPUT_DESCRIPTORS)를 프로세스에서 처음 실행한 게임에서만 보내고,
+    //   그 뒤로는 다시 보내지 않는다. 그대로 두면 앞 게임(예: 네오지오)의 버튼 이름이 다음 게임
+    //   (예: 스트리트 파이터 II)에 남아 컨트롤 표가 엉뚱하게 나온다.
+    if (m_hadGame && !m_libPath.isEmpty()) {
+        const QString lib = m_libPath;
+        const bool quiet = blockSignals(true);       // "코어 로드" 안내가 게임을 켤 때마다 뜨지 않게
+        unload();
+        const bool ok = load(lib);
+        blockSignals(quiet);
+        if (!ok) { emit logMessage("코어 다시 불러오기 실패: " + lib); return false; }
+    }
+    gState.inputDesc.clear();
+
     // ROM 파일 읽기
     QFile f(romPath);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -182,6 +195,7 @@ bool LibretroCore::loadGame(const QString& romPath) {
                             ? m_avInfo.timing.sample_rate : 44100.0;
 
     m_gameLoaded = true;
+    m_hadGame = true;
     gState.gameLoaded = true;
     emit logMessage(QString("ROM 로드: %1 (FPS=%2)")
                     .arg(romPath).arg(m_fps, 0, 'f', 2));
@@ -215,16 +229,6 @@ bool LibretroCore::serialize(void* data, size_t size) {
 
 bool LibretroCore::unserialize(const void* data, size_t size) {
     return m_retro_unserialize ? m_retro_unserialize(data, size) : false;
-}
-
-// ── 치트 ─────────────────────────────────────────────────
-void LibretroCore::cheatReset() {
-    if (m_retro_cheat_reset) m_retro_cheat_reset();
-}
-
-void LibretroCore::cheatSet(unsigned index, bool enabled, const QString& code) {
-    if (m_retro_cheat_set)
-        m_retro_cheat_set(index, enabled, code.toUtf8().constData());
 }
 
 void* LibretroCore::getMemoryData(unsigned memId) {

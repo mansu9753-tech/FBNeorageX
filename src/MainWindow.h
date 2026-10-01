@@ -1,4 +1,5 @@
 #pragma once
+#include "ShellPage.h"
 // MainWindow.h — 메인 윈도우
 #include <map>
 #include <algorithm>
@@ -29,14 +30,16 @@
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMediaPlayer>
+#include <QVideoFrame>
+#include <QVideoSink>
 #include <QAudioSink>
 #include <QBuffer>
-#include <QVideoWidget>
 
 #include "AppSettings.h"   // gSettings (isEn() 인라인에서 사용)
-#include "BorderPanel.h"
 #include "GameCanvas.h"
 #include "VideoRecorder.h"
+#include "FrameLab.h"
+#include "IntroSplash.h"
 #include "PreviewVideo.h"   // 프리뷰 영상 자체 디코더 (Linux/FFmpeg)
 #include "LibretroCore.h"
 #include "AudioManager.h"
@@ -78,29 +81,27 @@ private slots:
 private:
     // ── UI 빌드 ─────────────────────────────────────────
     void buildUi();
-    void buildMainTab();
+    void buildShell();              // 메뉴 셸 생성 + 신호 연결
+    void syncShellList();           // 게임 목록을 셸로 복사
+    void syncShellPreview();        // 선택된 게임의 프리뷰 이미지를 셸로
+    void buildShellMenu();                       // OPTIONS 메뉴 페이지 등록
+    void applyPathSettings();                    // ROM/프리뷰 폴더 변경 반영 (코어 폴더 + 재스캔)
+    void applyLiveSettings();                    // 저장된 화면·음량 설정을 지금 화면에 반영
+    void refreshNativeCheatFlag();               // 네이티브 치트가 있으면 수동 엔진을 끈다
+    void syncShellFilters();        // 필터 단추 줄 갱신
 
     // OPTIONS 패널 내부 페이지 빌더
-    void buildControlsPage(QWidget* page);
-    void buildDirectoriesPage(QWidget* page);
-    void buildVideoPage(QWidget* page);
-    void buildAudioPage(QWidget* page);
-    void buildMachinePage(QWidget* page);
-    void buildShotsPage(QWidget* page);
-    void buildCheatsPage(QWidget* page);
-    void buildNetplayPage(QWidget* page);
 
-    void rebuildMachineSettings();
 
     // ── 공통 스타일 헬퍼 ────────────────────────────────
-    static QString btnStyle(bool accent = false);
-    static QString editStyle();
-    static QString labelStyle();
-    static QString groupStyle();
 
     // ── 게임 관리 ────────────────────────────────────────
     void scanRoms();
-    void filterRoms(const QString& text);
+    struct ListRow { QString rom; QString label; bool fav = false; };
+    QString          m_searchText;            // 검색어 (게임 이름·롬 이름에 포함되는 것만 보인다)
+    QTimer*          m_searchDebounce = nullptr;
+    QVector<ListRow> m_rows;                 // 화면에 보이는 게임 목록 (필터 적용 후)
+    void filterRoms();                       // 필터를 적용해 m_rows 를 만들고 셸에 넘긴다
     void selectGame(const QString& romName);
     bool loadRomInternal();
     void startEmu();
@@ -122,29 +123,20 @@ private:
     // ── 세이브스테이트 / 스크린샷 ────────────────────────
     void saveState(int slot);
     void loadState(int slot);
+    QImage currentFrameImage() const;   // 코어의 마지막 화면 (32비트). 없으면 널
+    void pushFrameHistory();            // FRAME LAB 용 최근 프레임 기록
+    QImage stepOneFrame();              // 멈춘 게임을 한 프레임만 진행
+    void openFrameLab();
     void takeScreenshot();
     void savePreviewShot();        // 현재 프레임을 previews/{rom}.png 로 저장
     void togglePreviewRecord();    // previews/{rom}.mp4 녹화 시작/정지
 
     // ── 설정 적용 ────────────────────────────────────────
-    void applySettings();
-    void refreshSettingsUi();
+    void openShaderParams();   // 셰이더 파라미터 편집 창
 
     // ── GUI 한/영 전환 ───────────────────────────────────
     //   위젯을 다시 만들지 않고 텍스트만 갈아끼운다 → 레이아웃/시그널 연결에
     //   전혀 영향을 주지 않으므로 기존 동작(멀티플레이 등)이 그대로 유지된다.
-    struct TrEntry {
-        QPointer<QWidget> w;
-        QString ko, en;
-        int kind;              // 0 = 표시 텍스트, 1 = 툴팁
-    };
-    QVector<TrEntry> m_trEntries;
-    QPushButton*     m_langBtn = nullptr;
-
-    void trText(QWidget* w, const QString& ko, const QString& en);  // 등록 + 즉시 적용
-    void trTip (QWidget* w, const QString& ko, const QString& en);
-    void trPlaceholder(QWidget* w, const QString& ko, const QString& en);
-    void applyTrEntry(const TrEntry& e);
     void retranslateUi();      // 등록된 모든 위젯을 현재 언어로 갱신
     void toggleLanguage();     // ko ↔ en 전환 + 저장
     static bool isEn() { return gSettings.uiLanguage == "en"; }
@@ -156,22 +148,39 @@ private:
     // ── 게임목록 필터 바 (ALL / ★FAV / ☆ + 기종별 탭) ────
     //   기종 탭은 실제로 가지고 있는 ROM 기준으로만 만들어진다.
     //   (없는 기종 버튼이 자리만 차지하지 않도록)
-    void rebuildFilterBar();
-    QWidget*     m_filterBar   = nullptr;   // 버튼 컨테이너 (동적 재생성)
-    QGridLayout* m_filterGrid  = nullptr;
     QString      m_hwFilter;                // 선택된 기종 id (빈 값 = 전체)
 
     // 옵션 패널의 콤보/스핀/슬라이더가 휠을 가로채 스크롤을 막는 것 방지.
     //   동적으로 다시 만들어지는 페이지(머신세팅/치트)는 갱신 후 다시 호출해야 한다.
-    void applyWheelGuard(QWidget* root);
 
     // ── 게임패드: 장치별 프로필 / 플레이어 배정 ──────────────
+    // ── 베젤 ─────────────────────────────────────────────
+    void       applyBezel();          // 현재 게임의 베젤을 캔버스에 적용
+    // ── VIDEO 셸 페이지 창구 (셰이더·베젤 이미지) ──
+    QString bezelKeyFor(const QString& scope) const;
+    QString bezelScopeLabel(const QString& scope) const;
+    QString bezelInfoText() const;
+    void    assignBezel(const QString& key, const QString& value);
+    void    clearBezelAssign(const QString& key);
+    bool    applyShaderFile(const QString& path);
+    void    clearShaderFile();
+    void    saveTurboSettings();
+
     void applyPadProfiles();     // 연결된 패드에 저장된 프로필·배정 적용
-    void rebuildPadAssignUi();   // 컨트롤 화면의 패드 목록 갱신
-    QWidget*     m_padAssignBox    = nullptr;
-    QVBoxLayout* m_padAssignLayout = nullptr;
+    // 패드 매핑 — 저장소 하나(gSettings.padMaps), 해석 한 곳
+    QString padScopeKeyDev (const QString& device) const;
+    QString currentPadRom() const;
+    QHash<int,int> layoutDefaultMap() const;   // 배치 기본값 (코어 정의 우선)
+    void    applyCoreButtonDefs();             // 코어 버튼 정의로 기본값 확정
+    CoreSixButtons m_coreBtns;                 // 코어가 알려준 6버튼 인덱스
+    QHash<int,int> m_padUiMap[4];              // 화면에 보여줄 표 (의미 포함)
+    int  keyActionIndex(int stored) const;     // 의미 → 이 게임의 실제 인덱스
+    QHash<int,int> resolvePadMap(const QString& device, const QString& rom,
+                                 QString* sourceOut = nullptr) const;
+    QString m_padMapSource[4];   // 패드별 "적용 출처" 표시용
+    void    clearPadScope(const QString& scope);
+    void logPadMappingSummary(); // 실제 적용된 매핑을 로그로 확인
     int          m_remapPad        = 0;   // 리매핑 대상 패드 인덱스
-    QObject* m_wheelGuard = nullptr;
 
     // FBNeo 네이티브 치트 엔진 연동: <system_dir>/fbneo/cheats/ 로 ini 복사
     void syncCheatsToSystemDir(const QString& romName);
@@ -179,17 +188,36 @@ private:
     bool m_nativeCheatsActive = false;
 
     // ── 치트 UI 갱신 ─────────────────────────────────────
-    void refreshCheatList();
 
     // ── 프리뷰 ──────────────────────────────────────────
+    void buildPreviewPlayers();                 // 프리뷰 영상 재생기 (프레임은 셸/화면보호기로)
+    void onPreviewFrame(const QImage& img);
+    void stopGame();                            // STOP GAME
+    void resetGame();                           // RESET
+    QString tateLabel() const;                  // TATE 상태 문구
     void loadPreview(const QString& romName);
     // 프리뷰 표시 (비율 유지, 크롭 없음)
-    QPixmap fitPreviewPixmap(const QPixmap& src) const;
     // 프리뷰 박스 폭을 원본 비율에 맞춰 조정 → 잘림도 여백도 없게
-    void    applyPreviewAspect(const QSize& mediaSize);
-    QSize   m_previewMedia;      // 현재 표시 중인 원본 크기 (리사이즈 대응)
     // 프리뷰 영상은 게임당 한 번만 재생한다 (끝나면 이미지로 돌아가고 반복 없음)
     bool    m_previewVideoDone = false;
+
+    // ── 화면보호기 ───────────────────────────────────────
+    //   메뉴에서 1분간 조작이 없으면 프리뷰 영상을 무작위로 전체화면 재생하고,
+    //   한 편이 끝나면 또 다른 영상을 무작위로 이어서 재생한다.
+    //   아무 조작이나 하면 즉시 빠져나온다. (번인 방지)
+    QWidget* m_ssPage      = nullptr;   // 전체화면 표시용 페이지 (스택 index 2)
+    QLabel*  m_ssLabel     = nullptr;   // FFmpeg 프레임을 그리는 라벨
+    QTimer*  m_ssIdle      = nullptr;   // 무조작 감시 타이머 (1초 틱)
+    int      m_ssIdleTicks = 0;         // 연속 무조작 초
+    bool     m_ssActive    = false;
+    QString  m_ssLastFile;              // 직전 재생 파일 (연속 중복 방지)
+    uint32_t m_ssPadPrev   = 0;         // 패드 조작 감지용 이전 상태
+    bool     m_ssWasWindowed = false;   // 시작 전 창모드였는지 (해제 시 원복)
+    void     startScreensaver();
+    void     stopScreensaver();
+    void     playRandomScreensaverVideo();
+    void     resetIdleTimer();          // 입력이 있으면 대기시간 초기화
+    void     revealGame(const QString& rom);   // 목록 커서를 그 게임으로 (필터에 가려져 있으면 필터를 푼다)
     void loadPreviewVideo(const QString& romName);
 
     // ── 마우스 커서 자동 숨김 ───────────────────────────
@@ -206,20 +234,37 @@ private:
     // 넷플레이 입력 합성: lb=로컬, rb=원격 → gState.keys / p2Keys
     void npApplyInput(uint16_t lb, uint16_t rb);
     void applyKeyRelease(int qtKey);
-    static QHash<int, int> buildDefaultKeymap();
-    void refreshControlsTable();   // 키보드 테이블 갱신
-    void refreshPadTable();        // 게임패드(XInput) 테이블 갱신
-    void refreshWinMMTable();      // 아케이드스틱(WinMM) 테이블 갱신
+    static QHash<int, int> buildDefaultKeymap(bool six);
+    void reloadKeymap();
+    // ── 컨트롤 저장 범위: 게임별(자동) > 기종별(직접 저장) > 전역 > 기본 ──
+    QString platScopeKey(const QString& rom) const;      // "plat:neogeo#std" 처럼 기종+배치
+    QString gameScopeKey(const QString& rom) const { return rom.isEmpty() ? QString() : "game:" + rom; }
+    void    autoSaveKeyboard();                          // 지금 키보드 표를 이 게임 범위에 저장
+    void    autoSavePad(int padIdx);                     // 그 패드의 표를 이 게임 범위에 저장
+    void    autoSaveStick();                             // 아케이드 스틱 표
+    void    saveControlsForPlatform();                   // 지금 컨트롤·터보를 이 기종 전체에 저장
+    void    forgetGameControls();                        // 이 게임에 저장된 컨트롤을 지운다
+    QString platformSaveLabel() const;                   // "NEOGEO" / "CPS" / "OTHER"
+    void    applyTurboFor(const QString& rom);           // 게임 > 기종 > 전역 순으로 터보 적용
+    QString turboToString() const;                               // 지금 배치·게임에 맞는 키보드 표를 다시 고른다
+    bool sixLayoutNow() const { return m_gamepad && m_gamepad->padLayout() == PadLayout::SixButton; }
+    QVector<QPair<int,QString>> turboButtons() const;  // 터보 표: (libretro 인덱스, 이름)
+    // ── CONTROLS 셸 페이지가 ShellHost::controls 로 부르는 창구 ──
+    //   dev: 0=키보드 1=게임패드(XInput) 2=아케이드 스틱(WinMM)
+    void refreshControlsUi();                          // 열려 있는 CONTROLS 화면을 다시 그린다
+    QVector<ControlSlot> controlSlots(int dev);        // 액션 목록 + 현재 배정
+    void remapControl(int dev, int slot);              // 캡처창을 열어 다시 배정
+    void resetControlDevice(int dev);                  // 그 장치 매핑을 기본값으로
+    QString padSourceText() const;                     // "지금 적용 중: ..." 안내
     QHash<int, int> m_keymap;      // Qt key → libretro button
 
     // ── 기종 분류 + 핫키 시스템 ─────────────────────────────────
     static QString gamePlatform(const QString& rom);   // 기종 분류
     static int  hotkeyEncode(int key, int mods);
     static void hotkeyDecode(int enc, int& key, int& mods);
-    static QString hotkeyText(int enc);                // 표시용 ("Ctrl+F9" 등)
-    void rebuildHotkeyTable();                         // 핫키 테이블 갱신
-    QTableWidget* m_hotkeyTable = nullptr;
-    QString m_machineScope = "game";   // 머신세팅 저장 범위: "game"/"plat"
+
+    // ── 사운드 모드 ──────────────────────────────────────
+    void applyResolvedSoundMode();  // 우선순위대로 골라 오디오에 반영
     int  hotkeyOf(const QString& action);              // 현재 핫키(설정>기본)
     bool hotkeyMatch(const QString& action, int key, int qtMods);
 
@@ -229,9 +274,7 @@ private:
                                   const QHash<int,int>& dflt,
                                   const QString& rom);
     void resolveAndApplyControls(const QString& rom);  // 게임 로드 시 적용
-    void saveControlsToScope(const QString& scope);    // "global"/"plat"/"game"
     QString m_ctrlScopeRom;        // 현재 컨트롤 테이블이 대상으로 하는 게임 (게임별 저장용)
-    QString m_hotkeyCapture;       // 핫키 캡처 중인 action (빈 문자열=비캡처)
 
     // 핫키 정의 테이블
     struct HotkeyDef { const char* action; const char* label; const char* labelEn; int key; int mods; };
@@ -244,28 +287,16 @@ private:
     // ── 화면 전환 스택 ───────────────────────────────────
     QStackedWidget*  m_stack      = nullptr;  // 0=GUI, 1=게임화면
     QWidget*         m_guiWidget  = nullptr;
-    QWidget*         m_mainTab    = nullptr;  // GUI 루트 위젯
     GameCanvas*      m_canvas     = nullptr;
 
-    // ── OPTIONS 패널 내부 스택 ───────────────────────────
-    QStackedWidget*  m_optionsStack   = nullptr;
-    // Machine 페이지용 스크롤
-    QScrollArea*     m_machineScroll  = nullptr;
-    QWidget*         m_machineContent = nullptr;
+    // ── NeoRageX 0.6b 메뉴 셸 ────────────────────────────
+    //   GUI 화면(게임 목록·옵션 메뉴·프리뷰·이벤트)을 통째로 이 위젯이 그린다.
+    class NeoRageXShell* m_shell     = nullptr;
+    class ShellMenu*     m_menu      = nullptr;   // OPTIONS 메뉴 컨트롤러
 
-    // ── 메인 패널 ────────────────────────────────────────
-    BorderPanel*     m_gamelistPanel  = nullptr;
-    BorderPanel*     m_optionsPanel   = nullptr;
-    BorderPanel*     m_previewPanel   = nullptr;
-    BorderPanel*     m_eventsPanel    = nullptr;
 
-    QLineEdit*       m_searchEdit     = nullptr;
-    QListWidget*     m_gameList       = nullptr;
 
     // 프리뷰 스택 (0=이미지, 1=비디오)
-    QStackedWidget*  m_previewStack   = nullptr;
-    QLabel*          m_previewLabel   = nullptr;
-    QVideoWidget*    m_videoWidget    = nullptr;
     // ── 마우스 좌클릭 효과음 ─────────────────────────────
     //   QSoundEffect 는 두어 번 재생하면 무음이 되는 문제가 있었다.
     //   클릭마다 sink 를 stop/start 하는 방식도 불안정했다(10회 중 7회만 재생).
@@ -280,61 +311,34 @@ private:
     double           m_sfxBytesPerMs  = 0.0;       // 재생 길이 계산용
     void             loadClickSound();
     void             playClickSound();
+    QVideoSink*      m_videoSink     = nullptr;   // Windows: 프리뷰 영상 프레임을 받는다
     QMediaPlayer*    m_mediaPlayer    = nullptr;   // Windows 경로에서만 사용
     PreviewVideo*    m_previewVideo   = nullptr;   // Linux: 자체 소프트웨어 디코더
     QTimer*          m_previewVidTimer= nullptr;
 
-    QTextEdit*       m_logEdit        = nullptr;
 
     // ── CONTROLS 페이지 ──────────────────────────────────
-    QTableWidget*    m_ctrlTable      = nullptr;   // 키보드
-    QTableWidget*    m_padTable       = nullptr;   // 게임패드(XInput)
-    QTableWidget*    m_winmmTable     = nullptr;   // 아케이드스틱(WinMM)
 
     // ── DIRECTORIES / SETTINGS 위젯 ─────────────────────
-    QLineEdit*       m_romPathEdit        = nullptr;
-    QLineEdit*       m_previewPathEdit    = nullptr;
-    QLineEdit*       m_screenshotPathEdit = nullptr;
-    QLineEdit*       m_savePathEdit       = nullptr;
-    QLineEdit*       m_recordPathEdit     = nullptr;
 
     // ── VIDEO 위젯 ───────────────────────────────────────
-    QComboBox*       m_scaleCombo       = nullptr;
-    QCheckBox*       m_smoothCheck      = nullptr;
-    QCheckBox*       m_crtCheck         = nullptr;
-    QSlider*         m_crtSlider        = nullptr;
-    QCheckBox*       m_vsyncCheck       = nullptr;
-    QSpinBox*        m_frameskipSpin    = nullptr;
-    QCheckBox*       m_flashGuardCheck  = nullptr;   // 플래시 감소 on/off
-    QSlider*         m_flashSlider      = nullptr;   // 플래시 감소 강도
 
     // ── AUDIO 위젯 ───────────────────────────────────────
-    QSlider*         m_volumeSlider     = nullptr;
-    QLabel*          m_volumeLabel      = nullptr;
-    QComboBox*       m_sampleRateCombo  = nullptr;
-    QSpinBox*        m_bufferMsSpin     = nullptr;
-    QComboBox*       m_regionCombo      = nullptr;
 
     // ── CHEATS 페이지 위젯 ───────────────────────────────
-    QScrollArea*     m_cheatScroll      = nullptr;   // 치트 목록 스크롤 영역
-    QWidget*         m_cheatRows        = nullptr;   // 행 컨테이너 (동적 재생성)
-    QLabel*          m_cheatStatusLabel = nullptr;
 
     // ── NETPLAY 페이지 위젯 ──────────────────────────────
-    QLineEdit*       m_npIpEdit          = nullptr;
-    QSpinBox*        m_npPortSpin        = nullptr;
-    QLabel*          m_npStatusLabel     = nullptr;
-    QPushButton*     m_npHostBtn         = nullptr;
-    QPushButton*     m_npConnectBtn      = nullptr;
-    QPushButton*     m_npStartBtn        = nullptr;
-    QPushButton*     m_npDisconnBtn      = nullptr;
-    QLabel*          m_npLocalIpLabel    = nullptr;
-    QLabel*          m_npPublicIpLabel   = nullptr;
-    QLabel*          m_npRoomCodeLabel   = nullptr;
-    QLineEdit*       m_npRoomCodeEdit    = nullptr;
-    QSpinBox*        m_npDelaySpinBox    = nullptr;
-    QLabel*          m_npRttLabel        = nullptr;
-    QLineEdit*       m_npRelayUrlEdit    = nullptr;         // 릴레이 URL 입력창
+    // ── MULTIPLAYER 셸 페이지 창구 ──
+    NetState         m_net;                                 // 화면에 보일 상태 (문구·버튼 가능 여부)
+    int              m_netDelay = 2;                        // 입력 지연 (프레임)
+    void netHost();
+    void netJoin();
+    void netDisconnect();
+    void netSetRelay(const QString& typed);
+    void netCopyRoomCode();
+    void fetchPublicIp();
+    void refreshNetUi();
+    NetState netState() const;
     QString          m_publicIp;                            // 외부 공개 IP (api.ipify.org)
     QHash<uint32_t, uint16_t> m_npDelayQueue;              // 입력 지연 큐 frame→bits
 
@@ -344,10 +348,13 @@ private:
     QString          m_selectedGame;
     QString          m_loadedGame;   // 현재 코어에 실제 로드된 롬 이름 (isPaused 재개 판별용)
     bool             m_isFullscreen  = false;
-    QPushButton*     m_swapBtn       = nullptr;  // 1P↔2P 스왑 버튼
+    bool             fullscreenNow() const;
+    FrameLab*        m_lab = nullptr;            // 스택 4번 페이지
+    QList<QImage>    m_frameHist;                // 최근 프레임 (오래된 것 -> 최신)
+    QString          m_histGame;                 // 기록이 어느 게임의 것인지
+    IntroSplash*     m_intro = nullptr;          // 시작 오프닝 (스택 3번 페이지)
     QLabel*          m_playerOverlay = nullptr;  // 게임 화면 내 플레이어 표시 오버레이
     QTimer*          m_overlayTimer  = nullptr;  // 1P 복귀 시 오버레이 자동 숨김 타이머
-    QPushButton*     m_tateBtn       = nullptr;  // TATE 회전 버튼 (세로형 게임)
     int              m_glFilter     = 0;  // 0=ALL, 1=FAV(즐겨찾기만), 2=☆(미즐겨찾기만)
     QSize            m_windowedSize;
     int              m_stateSlot    = 1;
@@ -370,11 +377,15 @@ private:
     int              m_navHDir      = 0;    // 수평: -1=LEFT, 0=없음, 1=RIGHT
     int              m_navHRepeatMs = 0;    // 수평 방향 유지 누적 시간(ms)
     bool             m_navAWasDown  = false;  // A버튼 이전 상태 (엣지 감지)
+    bool             m_navBWasDown  = false;  // B버튼 (메뉴 닫기)
+    bool             m_navXWasDown  = false;  // X버튼 (즐겨찾기)
+    bool             m_navYWasDown  = false;  // Y버튼 (검색)
+    bool             m_navLBWasDown = false;  // L 버튼 (커서 → 게임 목록)
+    bool             m_navRBWasDown = false;  // R 버튼 (커서 → 옵션 메뉴)
 
     // ── 게임패드 메뉴 진입 홀드 카운터 ─────────────────────────
     // SELECT+START 동시 홀드 120프레임(~2초) → togglePause (메인 GUI)
     // Start 단독은 게임으로 그대로 전달 (KOF 보스선택 커맨드 정상 작동)
-    int  m_menuHoldCount   = 0;
     // START 연속 홀드 프레임 카운터 (서비스 메뉴 우발 진입 방지)
     // serviceMode=false 상태에서 90프레임 초과 → keys[3]=0 강제
     int  m_startHoldFrames = 0;
@@ -384,7 +395,6 @@ private:
     //   L2 와 완전히 분리된 "마메식 전용 서비스 키"를 모든 기종에 제공.
     int  m_serviceHoldFrames = 0;
     // 게임패드 핫키(L3/R3/트리거) 눌림 상태 — 눌린 순간만 처리하기 위한 이전 값
-    uint8_t m_padHotkeyPrev = 0;
     // 리매핑 캡처 중 여부 — 이 동안에는 메뉴 조작·핫키를 멈춘다
     bool    m_captureActive = false;
 

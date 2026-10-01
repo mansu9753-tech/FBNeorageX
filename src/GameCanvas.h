@@ -2,6 +2,12 @@
 // GameCanvas.h — OpenGL 게임 렌더링 위젯 (Phase 3 완전 구현 예정)
 
 #include <QOpenGLWidget>
+#include <QPixmap>
+#include <QMatrix4x4>
+#include <QVector>
+#include <QOpenGLFramebufferObject>
+#include "SlangPreset.h"
+#include "SlangChain.h"
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
@@ -19,6 +25,12 @@ public:
     void setSmooth(bool smooth);
     void setCrtMode(bool on, double intensity = 0.4);
     bool setShaderPath(const QString& path);  // true=성공/보류, false=컴파일 실패
+
+    // ── 베젤(아케이드 프레임) 오버레이 ───────────────────────
+    //   게임 화면 위에 PNG 를 덧그린다. 투명한 가운데 창으로 게임이 비친다.
+    //   셰이더 파이프라인과 완전히 분리돼 있어 CRT/플래시 처리에 영향이 없다.
+    void setBezelImage(const QImage& img);   // 빈 이미지면 해제
+    bool hasBezel() const { return !m_bezel.isNull(); }
     void setRecording(bool on);   // REC 오버레이 토글
 
     // 플래시 감소 (눈 보호): 화면이 갑자기 밝아지는 순간(카운터/총구 화염)을
@@ -31,8 +43,14 @@ public:
     void setRotation(int rot);
     int  rotation() const { return m_rotation; }
 
-    // 외부에서 커스텀 GLSL 쉐이더 로드
-    bool loadShader(const QString& vertPath, const QString& fragPath);
+    // ── slang 셰이더 파라미터 (RetroArch 의 "셰이더 파라미터" 에 해당) ──
+    //   현재 걸린 프리셋이 선언한 파라미터 목록. 체인이 없으면 비어 있다.
+    QVector<SlangParamDecl> shaderParameters() const;
+    float shaderParameter(const QString& name) const;
+    // 값을 바꾼다. 다음 프레임부터 화면에 반영된다.
+    void  setShaderParameter(const QString& name, float value);
+    // 지금 걸린 프리셋의 파일 이름 (설정 저장 키로 쓴다)
+    QString shaderKey() const { return m_shaderKey; }
 
 signals:
     void glLogMessage(const QString& msg);
@@ -101,6 +119,61 @@ private:
 
     // 외부 RetroArch .glsl 셰이더 파싱 및 컴파일
     bool parseAndLoadGlsl(const QString& path);
+    bool parseAndLoadSlang(const QString& path);   // RetroArch .slang / .slangp
+    bool compileProgram(const QString& vertSrc, const QString& fragSrc);
+
+    // slang 셰이더용 — 위치가 [0,1] 인 정점 버퍼 + [0,1]→화면 변환
+    unsigned int m_vboUnit = 0;
+    QMatrix4x4   m_slangMvp;
+    bool         m_slangShader = false;
+
+    // ── 다중 패스 slang (.slangp) ────────────────────────────
+    //   기존 단일 패스 경로는 그대로 두고, 다중 패스 프리셋일 때만 이쪽을 탄다.
+    //   실패하면 전부 해제하고 기본 셰이더로 돌아간다.
+    struct MultiPass {
+        QOpenGLShaderProgram*     prog = nullptr;
+        QOpenGLFramebufferObject* fbo[2] = {nullptr, nullptr};  // 피드백용 핑퐁
+        int       cur     = 0;      // 이전 프레임 결과를 담고 있는 버퍼 (피드백 원본)
+        int       written = 0;      // 이번 프레임에 실제로 그린 버퍼
+        QString   alias;
+        SlangScale scaleType = SlangScale::Source;
+        float     scale  = 1.0f;
+        bool      linear = false;
+        SlangWrap wrap   = SlangWrap::ClampToEdge;
+        bool      needsFeedback = false;   // PassFeedbackN 을 참조하는가
+        bool      floatFbo    = false;     // 부동소수점 렌더타깃
+        bool      mipmapInput = false;     // 입력에 밉맵 생성
+        QSize     size;
+    };
+    QVector<MultiPass> m_passes;
+    struct LutTex { QString name; GLuint id = 0; };
+    QVector<LutTex>    m_luts;
+    QHash<QString,float> m_presetParams;   // 프리셋이 지정한 파라미터 값
+    bool   m_multiPass = false;
+    GLuint m_unitVboMid = 0;      // 중간 패스용 (위치 [0,1] + UV 항등)
+
+    // ── RetroArch 완전 호환 경로 (glslang + SPIRV-Cross) ───
+    //   OpenGL 3.3 이상이면 이쪽을 먼저 시도한다. Mega Bezel 처럼 GLSL 450
+    //   기능을 쓰는 셰이더도 그대로 돌아간다. 실패하면 아래 예전 경로로
+    //   자동으로 내려가므로, 지금까지 되던 셰이더가 안 되는 일은 없다.
+    SlangChain m_chain;
+    bool   m_chainActive = false;
+    QString m_shaderKey;           // 지금 걸린 프리셋 파일 이름
+    int    m_glslVersion = 0;      // 이 컨텍스트가 감당하는 GLSL 버전 (0=불가)
+    QRectF m_destRect;             // 마지막으로 계산한 출력 사각형 (논리 좌표)
+
+    bool loadSlangPreset(const QString& presetPath);
+    void releaseMultiPass();
+    void renderMultiPass();
+    void setSlangUniforms(QOpenGLShaderProgram& pr, const QSize& srcSize,
+                          const QSize& outSize, const QMatrix4x4& mvp);
+
+    QPixmap m_bezel;         // 원본 (해제 시 null)
+    // 베젤의 "뚫린 창" 위치 (이미지 기준 0~1 정규화). 못 찾으면 무효.
+    //   게임 화면을 이 안에 맞춰 넣어야 잘리지 않는다.
+    QRectF  m_bezelWindow;
+    QPixmap m_bezelScaled;   // 현재 위젯 크기에 맞춰 캐시한 것
+    QSize   m_bezelScaledFor;
 
     // 플랫폼별 기본 쉐이더 소스
     static const char* defaultVertSrc();

@@ -48,7 +48,6 @@ bool CheatManager::loadIni(const QString& path) {
 void CheatManager::clearAll() {
     m_entries.clear();
     m_loadedPath.clear();
-    emit cheatsCleared();
 }
 
 void CheatManager::setActive(int index, bool active) {

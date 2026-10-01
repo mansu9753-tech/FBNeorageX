@@ -9,6 +9,7 @@
 #include <memory>
 #include <cstdint>
 #include "DrcPid.h"
+#include "SoundMode.h"
 
 // ── 풀모드 링버퍼 ─────────────────────────────────────────────
 // QAudioSink가 하드웨어 타이밍에 맞춰 readData()를 직접 호출.
@@ -67,9 +68,12 @@ public:
     // ── 에뮬 루프에서 매 프레임 호출 ─────────────────────────
     void processDrc(int preAudioSize);
 
-    // ── 오디오 콜백에서 직접 PCM 추가 ────────────────────────
-    void appendSamples(const int16_t* data, size_t frames);
-    void appendSample (int16_t left, int16_t right);
+
+    // ── 사운드 모드 ──────────────────────────────────────────
+    //   리샘플 직후, 링버퍼에 넣기 직전에 적용한다. 따라서 항상
+    //   하드웨어 샘플레이트 기준이고, 게임 도중 바꿔도 즉시 반영된다.
+    void        setSoundMode(SoundModeId id);
+    SoundModeId soundMode() const { return m_sound.mode(); }
 
 private:
     std::unique_ptr<QAudioSink>      m_sink;
@@ -91,4 +95,5 @@ private:
     // kp·ki·kd 모두 낮춰 PID 진동 억제
     DrcPid              m_pid  { 0.008, 0.00003, 0.001, 0.001 };
     FractionalResampler m_resampler;
+    SoundProcessor      m_sound;   // 사운드 모드 이펙트 체인
 };

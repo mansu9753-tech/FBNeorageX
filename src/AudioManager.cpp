@@ -173,6 +173,9 @@ bool AudioManager::init(int sampleRate, int bufferMs) {
         m_targetBytes = AudioRingBuffer::RING_BYTES / 2;
     m_pid.reset();
     m_resampler.reset();  // 이전 게임의 리샘플러 위상이 남으면 첫 프레임 노이즈 발생
+    // 사운드 모드는 리샘플 후단에 붙으므로 계수 기준은 하드웨어 레이트다
+    m_sound.setSampleRate(m_hwSampleRate);
+    m_sound.reset();
 
     // 링버퍼 선채움 (start() 전 — race-free)
     // SRC로 생산속도 ≒ 소비속도가 맞춰지므로 pre-fill 후 안정 유지
@@ -232,6 +235,7 @@ void AudioManager::flush() {
     m_ringBuf->resetBuffer();
     m_pid.reset();
     m_resampler.reset();
+    m_sound.reset();               // 이전 게임의 잔향·필터 상태 제거
     gState.audioPending.clear();   // 재개 전 잔류 오디오 제거
 
     // 목표량만큼 무음 선채움 → 재개 직후 안정적인 오디오 공급
@@ -279,17 +283,17 @@ void AudioManager::processDrc(int preAudioSize) {
     QByteArray resampled = m_resampler.process(chunk, ratio);
     if (resampled.isEmpty()) return;
 
+    // ── 사운드 모드 이펙트 ───────────────────────────────────
+    // ORIGINAL 이면 process() 가 즉시 반환하므로 추가 비용이 없다.
+    m_sound.process(reinterpret_cast<int16_t*>(resampled.data()),
+                    static_cast<int>(resampled.size() / 4));
+
     m_ringBuf->pushData(resampled.constData(), resampled.size());
 }
 
-// ── 직접 PCM 추가 ────────────────────────────────────────────
-void AudioManager::appendSamples(const int16_t* data, size_t frames) {
-    gState.audioPending.append(
-        reinterpret_cast<const char*>(data),
-        static_cast<int>(frames * 4));
+// ── 사운드 모드 ──────────────────────────────────────────────
+void AudioManager::setSoundMode(SoundModeId id) {
+    m_sound.setSampleRate(m_hwSampleRate);
+    m_sound.setMode(id);
 }
 
-void AudioManager::appendSample(int16_t left, int16_t right) {
-    int16_t buf[2] = {left, right};
-    gState.audioPending.append(reinterpret_cast<const char*>(buf), 4);
-}

@@ -1,10 +1,21 @@
 // MainWindow.cpp — 메인 윈도우 (Phase 3 완전 구현)
 
 #include "MainWindow.h"
+
+#include <QRegularExpression>
+#include "ShaderParamDialog.h"
+#include "NeoRageXShell.h"
+#include "NativeCheats.h"
+#include "ShellMenu.h"
+#include "ShellPages.h"
 #include "AppSettings.h"
 #include "EmulatorState.h"
 #include "GameNamesDb.h"
 #include "GameHardware.h"   // 게임목록 기종별 탭 분류
+#include "SoundMode.h"      // 사운드 모드 프리셋
+#include "ArcadeLayout.h"   // 게임별 아케이드 버튼 배치 (6버튼 격투 판별)
+#include "PadMapping.h"     // 패드 매핑 해석 (저장소 하나, 우선순위 하나)
+#include "PadRawBits.h"     // 물리 버튼 비트 (메뉴 조작용)
 
 #include <QApplication>
 #include <QEvent>
@@ -45,6 +56,7 @@
 #include <QHeaderView>
 #include <QTableWidget>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -99,29 +111,6 @@ protected:
     }
 };
 
-// ── 휠 가드 ────────────────────────────────────────────────────
-//  콤보박스/스핀박스/슬라이더는 마우스 휠을 자기가 먹어버린다. 그래서
-//  옵션 페이지에서 이런 위젯 위에 커서가 있으면
-//    · 페이지 스크롤이 안 되고
-//    · 굴린 만큼 설정값이 의도치 않게 바뀐다
-//  → 포커스를 갖지 않은 상태의 휠 이벤트는 무시하고 스크롤 영역으로 넘긴다.
-//    (클릭해서 포커스를 준 뒤에는 기존처럼 휠로 값 조절 가능)
-class WheelGuard : public QObject {
-public:
-    using QObject::QObject;
-protected:
-    bool eventFilter(QObject* obj, QEvent* ev) override {
-        if (ev->type() == QEvent::Wheel) {
-            auto* w = qobject_cast<QWidget*>(obj);
-            if (w && !w->hasFocus()) {
-                ev->ignore();
-                return true;    // 위젯이 소비하지 못하게 차단 → 부모가 스크롤
-            }
-        }
-        return QObject::eventFilter(obj, ev);
-    }
-};
-
 // 리매핑 캡처 중임을 표시하는 스코프 가드.
 //   캡처 창이 떠 있는 동안 메뉴 조작·핫키가 함께 동작하면
 //   방향키를 지정하다 목록이 움직이고, 실행 버튼을 지정하다 게임이 실행된다.
@@ -160,6 +149,7 @@ public:
     }
 protected:
     void keyPressEvent(QKeyEvent* e) override {
+        if (e->isAutoRepeat()) return;      // 캡처창을 연 Enter 를 계속 누르고 있어도 배정되지 않는다
         int k = e->key();
         if (k == Qt::Key_Escape) { reject(); return; }
         // 모디파이어 키 단독 입력은 무시 (실제 키를 기다림)
@@ -246,42 +236,6 @@ protected:
     }
 };
 
-// ── 공통 스타일 ───────────────────────────────────────────
-// NeoRageX 0.6b 스타일 버튼 — 파란 채움 + 흰 글씨 + 각진 얇은 테두리
-QString MainWindow::btnStyle(bool accent) {
-    if (accent)
-        return "QPushButton{background:#2b4fd8;color:#ffffff;border:1px solid #86a6ff;"
-               "padding:6px 10px;font-family:'Courier New';font-size:11px;"
-               "font-weight:bold;letter-spacing:1px;}"
-               "QPushButton:hover{background:#3d63ee;}"
-               "QPushButton:pressed{background:#1e3bb0;}"
-               "QPushButton:disabled{background:#1a1f3a;color:#4a5a80;border-color:#2b3a66;}";
-    return "QPushButton{background:#14287a;color:#cfe0ff;border:1px solid #4a6ad0;"
-           "padding:6px 10px;font-family:'Courier New';font-size:11px;"
-           "font-weight:bold;letter-spacing:1px;}"
-           "QPushButton:hover{background:#1e3bb0;color:#ffffff;}"
-           "QPushButton:pressed{background:#0e1c58;}"
-           "QPushButton:disabled{background:#1a1f3a;color:#4a5a80;border-color:#2b3a66;}";
-}
-QString MainWindow::editStyle() {
-    return "QLineEdit,QSpinBox,QComboBox{"
-           "background:#000820;color:#aaccff;border:1px solid #334488;"
-           "padding:4px;font-family:'Courier New';font-size:11px;}"
-           "QLineEdit:focus,QSpinBox:focus,QComboBox:focus{border-color:#6688ff;}"
-           "QComboBox::drop-down{border:none;}"
-           "QComboBox QAbstractItemView{background:#000820;color:#aaccff;"
-           "selection-background-color:#001166;}";
-}
-QString MainWindow::labelStyle() {
-    return "QLabel{color:#6688aa;font-family:'Courier New';font-size:10px;}";
-}
-QString MainWindow::groupStyle() {
-    return "QGroupBox{color:#4466aa;border:1px solid #223366;"
-           "border-radius:2px;margin-top:12px;padding:4px;"
-           "font-family:'Courier New';font-size:10px;}"
-           "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;}";
-}
-
 // ════════════════════════════════════════════════════════════
 //  ROOM CODE 헬퍼 (토큰 방식 — IP 미포함)
 //  포맷: XXXXXX (6자 base-36 영숫자 대문자)
@@ -312,10 +266,12 @@ static bool isValidRoomCode(const QString& raw) {
 }
 
 // ── 생성자 ─────────────────────────────────────────────────
+static constexpr int kScreensaverIdleSec = 300;      // 이 시간(초) 동안 조작이 없으면 화면보호기가 켜진다
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("FBNEORAGEX Core Edition 1.9");
+    setWindowTitle("FBNEORAGEX Core Edition " FBNRX_VERSION);
     m_windowedSize = QSize(1360, 840);
     resize(m_windowedSize);
 #ifdef _WIN32
@@ -355,7 +311,7 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     // 키맵 — 저장된 매핑이 있으면 복원, 없으면 기본값
-    m_keymap = buildDefaultKeymap();
+    m_keymap = buildDefaultKeymap(false);
     if (!gSettings.keyboardMapping.isEmpty())
         m_keymap = gSettings.keyboardMapping;
 
@@ -368,56 +324,115 @@ MainWindow::MainWindow(QWidget* parent)
     // 치트 시그널
     connect(m_cheat, &CheatManager::cheatsLoaded, this, [this](int cnt, const QString& path){
         log(QString("🔓 치트 %1개 로드 — %2").arg(cnt).arg(QFileInfo(path).fileName()));
-        refreshCheatList();
-    });
-    connect(m_cheat, &CheatManager::cheatsCleared, this, [this]{
-        refreshCheatList();
+        // 치트 화면은 셸 메뉴가 열릴 때마다 지금 상태를 읽으므로 따로 갱신할 게 없다
+        if (m_menu) m_menu->refreshOpen();
     });
 
-    // ── 게임패드 핫키 (L3/R3/트리거) ─────────────────────────
+    // ── 게임패드 조합 핫키 (SELECT + 버튼) ───────────────────
     //   게임 입력과 분리된 경로라 게임에 그대로 전달되지 않는다.
-    //   L3=메뉴전환, R3=게임종료, L트리거=서비스, R트리거=패스트포워드
+    //   SELECT+START=메뉴, +Y=종료, +L1=서비스, +R1=패스트포워드,
+    //   +A=상태 저장, +B=상태 불러오기, +X=스크린샷, +→=슬롯, +←=프리뷰 이미지, +↑=전체화면,
+    //   +↓=1P/2P 스왑, +L2=녹화, +R2=프리뷰 영상 녹화 (키보드 핫키와 같은 기능 전부)
     {
         auto* hk = new QTimer(this);
         hk->setInterval(33);                       // ~30Hz 로 눌림 변화만 감시
         connect(hk, &QTimer::timeout, this, [this]{
             if (!m_gamepad || m_captureActive) return;   // 리매핑 중에는 핫키도 중지
-            const uint8_t now  = m_gamepad->hotkeyBits();
-            const uint8_t down = uint8_t(now & ~m_padHotkeyPrev);   // 새로 눌린 것만
-            m_padHotkeyPrev = now;
-            if (!down) return;
+            // 패드 조작도 "조작 있음"으로 쳐서 화면보호기를 초기화/해제한다
+            {
+                uint32_t act = m_gamepad->hotkeyModifierHeld() ? 1u : 0u;
+                for (int i = 0; i < 4; ++i) act |= m_gamepad->padBits(i);
+                if (act && act != m_ssPadPrev) resetIdleTimer();
+                m_ssPadPrev = act;
+            }
 
-            if (down & GamepadManager::HK_L3) {         // 게임 ↔ 메뉴
+            // 조합 핫키는 이벤트로 온다 (레벨이 아니라서 에지 검출이 필요 없다)
+            const uint16_t down = m_gamepad->takeHotkeyEvents();
+            if (!down) return;
+            resetIdleTimer();
+            if (m_stack && m_stack->currentIndex() > 1) return;   // 오프닝·프레임 랩·화면보호기 중에는 무시
+
+            using GM = GamepadManager;
+            const bool playing = gState.gameLoaded && !gState.isPaused;
+            if (down & GM::HK_MENU) {                   // SELECT + START → 게임 ↔ 메뉴
                 if (gState.gameLoaded) togglePause();
             }
-            if (down & GamepadManager::HK_R3) {         // 게임 종료
+            if (down & GM::HK_EXIT) {                   // SELECT + Y → 게임 종료
                 if (gState.gameLoaded || gState.isPaused) {
                     m_timer->stop();
                     gState.isPaused = false;
                     if (m_core) m_core->unloadGame();
                     m_loadedGame.clear();
                     leaveGameScreen();
-                    log("■ 게임 종료 (패드 R3)");
+                    log("■ 게임 종료 (패드 SELECT+Y)");
                 }
             }
-            if (down & GamepadManager::HK_LT) {         // 서비스(TEST)
-                if (gState.gameLoaded && !gState.isPaused) {
+            if (down & GM::HK_SERVICE) {                // SELECT + L1 → 서비스(TEST)
+                if (playing) {
                     m_serviceHoldFrames = 12;
-                    log("🔧 서비스(TEST) 입력 — 패드 L트리거");
+                    log("🔧 서비스(TEST) 입력 — 패드 SELECT+L1");
                 }
             }
-            if (down & GamepadManager::HK_RT) {         // 패스트포워드 토글
-                if (gState.gameLoaded && !gState.isPaused)
-                    toggleFastForward(!gState.fastForward);
+            if (down & GM::HK_FF) {                     // SELECT + R1 → 패스트포워드
+                if (playing) toggleFastForward(!gState.fastForward);
+            }
+            if (gState.gameLoaded) {
+                if (down & GM::HK_SAVE)      saveState(m_stateSlot);
+                if (down & GM::HK_LOAD)      loadState(m_stateSlot);
+                if (down & GM::HK_SHOT)      takeScreenshot();
+                if (down & GM::HK_SLOT_UP) {
+                    m_stateSlot = m_stateSlot % 8 + 1;
+                    log(QString("💾 저장 슬롯 %1").arg(m_stateSlot));
+                }
+                if (down & GM::HK_PREVSHOT)  savePreviewShot();
+                if (down & GM::HK_FULLSCR)   toggleFullscreen();
+                if (down & GM::HK_SWAP)      toggleSwapPlayers();
+                if (down & GM::HK_RECORD)    toggleRecording();
+                if (down & GM::HK_PREVREC)   togglePreviewRecord();
             }
         });
         hk->start();
     }
 
+    // 구버전 패드 설정을 정리했으면 알려 준다
+    if (gSettings.padMapsMigrated) {
+        QTimer::singleShot(0, this, [this]{
+            log(isEn()
+                ? "🎮 Pad mappings were reset once - the storage layout changed."
+                : "🎮 패드 매핑을 1회 초기화했습니다 — 저장 구조가 바뀌었습니다.");
+        });
+    }
+
+    // ── 잘못 저장된 6버튼 프로필 정리 (1회) ────────────────────
+    //   6버튼 배치를 처음 넣었을 때 인덱스가 뒤집혀 있었고, 그 상태에서 패드를
+    //   리매핑하면 그 표가 장치 프로필로 저장됐다. 이제 프로필은 배치별로
+    //   나뉘므로, 그 표가 남아 있으면 "일반 배치" 프로필로 오인되어 네오지오까지
+    //   망가진다. 특징(R2 → 11)으로 찾아 지운다.
+    {
+        QStringList bad;
+        for (auto it = gSettings.padProfiles.begin();
+             it != gSettings.padProfiles.end(); ) {
+            if (it.value().value(0x20000, -1) == 11) {
+                bad << it.key();
+                it = gSettings.padProfiles.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!bad.isEmpty()) {
+            gSettings.save();
+            // UI 가 아직 없는 시점이라 바로 log() 하면 메시지가 버려진다 → 뒤로 미룬다
+            QTimer::singleShot(0, this, [this, bad]{
+                log("🎮 잘못 저장된 패드 프로필 정리: " + bad.join(", ")
+                    + " → 기본값으로 되돌림");
+            });
+        }
+    }
+
     // 패드 목록이 바뀌면 장치별 프로필/배정을 다시 적용하고 UI 갱신
     connect(m_gamepad, &GamepadManager::padsChanged, this, [this]{
         applyPadProfiles();
-        rebuildPadAssignUi();
+        refreshControlsUi();
     });
 
     // 게임패드 시그널
@@ -436,12 +451,61 @@ MainWindow::MainWindow(QWidget* parent)
         // ★ 키/버튼 리매핑 중에는 메뉴 조작을 멈춘다.
         //   방향키를 지정하려고 누르면 게임목록이 같이 움직이고,
         //   실행 버튼을 지정하려 하면 게임이 실행돼 버리던 문제.
-        if (m_captureActive) { m_navDir = 0; m_navRepeatMs = 0; return; }
+        if (m_captureActive) {
+            m_navDir = 0; m_navHDir = 0; m_navRepeatMs = 0;
+            // ★ 캡처가 끝나는 순간 "새로 눌림"으로 오인되던 문제.
+            //   방금 배정한 버튼이 아직 눌려 있으면 (예: B 를 배정) 그 B 가 "뒤로 가기"로,
+            //   A 가 "실행"으로 처리돼 버렸다. 모든 버튼을 눌린 상태로 표시해 두면
+            //   손을 뗐다 다시 눌러야 동작한다.
+            m_navAWasDown = m_navBWasDown = m_navXWasDown = m_navYWasDown = true;
+            m_navLBWasDown = m_navRBWasDown = true;
+            return;
+        }
+        // 오프닝 중에는 아무 패드 버튼이나 누르면 건너뛴다 (시작 직후 눌려 있던 버튼은 무시)
+        if (m_stack && m_stack->currentIndex() == 3 && m_intro) {
+            bool any = false;
+            for (int i = 0; i < 16; ++i) any = any || gState.rawKeys[i];
+            if (any && m_intro->elapsedMs() > 500) m_intro->skip();
+            m_navDir = 0; m_navRepeatMs = 0;
+            m_navAWasDown = m_navBWasDown = m_navXWasDown = m_navYWasDown = true;
+            m_navLBWasDown = m_navRBWasDown = true;
+            return;
+        }
+        // FRAME LAB: 좌우 = 프레임(길게 누르면 반복), L/R = 10프레임, A = 저장, B = 닫기
+        if (m_stack && m_stack->currentIndex() == 4 && m_lab) {
+            using Cmd = FrameLab::Cmd;
+            const uint32_t bits = m_gamepad ? m_gamepad->rawBits() : 0;
+            const int dir = (gState.rawKeys[7] && !gState.rawKeys[6]) ? 1
+                          : (gState.rawKeys[6] && !gState.rawKeys[7]) ? -1 : 0;
+            if (dir != m_navHDir) {
+                m_navHDir = dir; m_navHRepeatMs = 0;
+                if (dir) m_lab->navigate(dir < 0 ? Cmd::Prev : Cmd::Next);
+            } else if (dir) {
+                m_navHRepeatMs += 16;
+                if (m_navHRepeatMs >= 380 && ((m_navHRepeatMs - 380) % 60) < 16)
+                    m_lab->navigate(dir < 0 ? Cmd::Prev : Cmd::Next);
+            }
+            const bool a = bits & PAD_A, b = bits & PAD_B, lb = bits & PAD_LB, rb = bits & PAD_RB;
+            if (a && !m_navAWasDown)   m_lab->navigate(Cmd::Save);
+            if (b && !m_navBWasDown)   m_lab->navigate(Cmd::Close);
+            if (lb && !m_navLBWasDown) m_lab->navigate(Cmd::Prev10);
+            if (rb && !m_navRBWasDown) m_lab->navigate(Cmd::Next10);
+            m_navAWasDown = a; m_navBWasDown = b; m_navLBWasDown = lb; m_navRBWasDown = rb;
+            return;
+        }
         // 게임 화면(스택 인덱스 1)이면 네비 비활성화
         if (!m_stack || m_stack->currentIndex() != 0) {
             m_navDir = 0; m_navRepeatMs = 0; return;
         }
-        if (!m_gameList) return;
+        if (!m_shell) return;
+        // 모달 창(폴더·파일 선택, 키 캡처)이 떠 있는 동안에는 그 뒤의 셸을 조작하지 않는다
+        if (QApplication::activeModalWidget()) {
+            m_navDir = 0; m_navHDir = 0;
+            m_navAWasDown = m_navBWasDown = m_navXWasDown = m_navYWasDown = true;
+            m_navLBWasDown = m_navRBWasDown = true;
+            return;
+        }
+        using Nav = NeoRageXShell::Nav;
 
         static constexpr int REPEAT_INIT = 380; // 첫 반복 딜레이 (ms)
         static constexpr int REPEAT_RATE =  90; // 반복 간격 (ms)
@@ -474,24 +538,37 @@ MainWindow::MainWindow(QWidget* parent)
             }
         }
 
-        if (moved) {
-            int cnt = m_gameList->count();
-            if (cnt > 0) {
-                int row    = m_gameList->currentRow();
-                if (row < 0) row = (m_navDir < 0) ? cnt - 1 : 0;
-                else         row = std::clamp(row + m_navDir, 0, cnt - 1);
-                m_gameList->setCurrentRow(row);
-                m_gameList->scrollToItem(m_gameList->item(row),
-                                         QAbstractItemView::EnsureVisible);
-            }
-        }
+        // 셸이 목록이든 열린 메뉴든 알아서 처리한다 (키보드와 같은 경로)
+        if (moved) m_shell->navigate(m_navDir < 0 ? Nav::Up : Nav::Down);
 
-        // A버튼 (rawKeys[8] = libretro A) — 엣지 감지로 게임 실행
-        bool aDown = (gState.rawKeys[8] != 0);
-        if (aDown && !m_navAWasDown && !m_selectedGame.isEmpty()) {
-            launchGame();
-        }
+        // ★ 실행은 "패드의 물리 A 버튼"으로 한다.
+        //   예전에는 libretro 인덱스 8 을 봤는데, 그 인덱스에 배정된 물리 버튼은
+        //   배치/게임에 따라 달라서 스팀덱에서는 Y 버튼이 실행이 돼 버렸다.
+        const bool aDown = m_gamepad && (m_gamepad->rawBits() & PAD_A);
+        if (aDown && !m_navAWasDown) m_shell->navigate(Nav::Accept);
         m_navAWasDown = aDown;
+
+        // B: 열린 메뉴 닫기 / X: 즐겨찾기 (스팀덱엔 키보드가 없다)
+        const bool bDown = m_gamepad && (m_gamepad->rawBits() & PAD_B);
+        if (bDown && !m_navBWasDown) m_shell->navigate(Nav::Back);
+        m_navBWasDown = bDown;
+        const bool xDown = m_gamepad && (m_gamepad->rawBits() & PAD_X);
+        if (xDown && !m_navXWasDown) m_shell->navigate(Nav::Favorite);
+        m_navXWasDown = xDown;
+
+        // L / R: 커서를 게임 목록 ↔ 옵션 메뉴로 옮긴다 (L3 조합 핫키 중에는 쓰지 않는다)
+        const bool l3 = m_gamepad && m_gamepad->hotkeyModifierHeld();
+        const bool lbDown = m_gamepad && !l3 && (m_gamepad->rawBits() & PAD_LB);
+        const bool rbDown = m_gamepad && !l3 && (m_gamepad->rawBits() & PAD_RB);
+        if (lbDown && !m_navLBWasDown) m_shell->navigate(Nav::ZoneLeft);
+        if (rbDown && !m_navRBWasDown) m_shell->navigate(Nav::ZoneRight);
+        m_navLBWasDown = lbDown;
+        m_navRBWasDown = rbDown;
+
+        // Y: 검색어 입력 (화면 키보드가 뜨는 입력창)
+        const bool yDown = m_gamepad && (m_gamepad->rawBits() & PAD_Y);
+        if (yDown && !m_navYWasDown) m_shell->navigate(Nav::Search);
+        m_navYWasDown = yDown;
 
         // ── LEFT / RIGHT D-패드 → 페이지 업/다운 (길게 누르면 반복) ──
 #ifdef Q_OS_LINUX
@@ -501,21 +578,6 @@ MainWindow::MainWindow(QWidget* parent)
         bool lDown = (gState.rawKeys[6] != 0);  // libretro LEFT
         bool rDown = (gState.rawKeys[7] != 0);  // libretro RIGHT
 #endif
-        int  cnt   = m_gameList->count();
-
-        auto pageMove = [&](int dir) {
-            if (cnt <= 0) return;
-            int rowH     = m_gameList->sizeHintForRow(0);
-            int pageSize = (rowH > 0)
-                ? std::max(1, m_gameList->viewport()->height() / rowH)
-                : 10;
-            int cur2   = std::max(0, m_gameList->currentRow());
-            int newRow = std::clamp(cur2 + dir * pageSize, 0, cnt - 1);
-            m_gameList->setCurrentRow(newRow);
-            m_gameList->scrollToItem(m_gameList->item(newRow),
-                                     QAbstractItemView::PositionAtTop);
-        };
-
         // 상/하와 동일한 반복 타이밍: 첫 입력 즉시 → 380ms 후 90ms 간격 반복
         int newHDir = (lDown && !rDown) ? -1 : (rDown && !lDown) ? 1 : 0;
         bool hMoved = false;
@@ -530,7 +592,8 @@ MainWindow::MainWindow(QWidget* parent)
                 hMoved = (phase < TICK);
             }
         }
-        if (hMoved) pageMove(m_navHDir);
+        // 목록에서는 페이지 이동, 열린 메뉴에서는 ◀ ▶ 값 조절
+        if (hMoved) m_shell->navigate(m_navHDir < 0 ? Nav::Left : Nav::Right);
     });
     m_uiNavTimer->start();
 
@@ -617,9 +680,17 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     scanRoms();
-    // 앱 시작 시 게임리스트 포커스 (D패드/방향키 즉시 동작)
-    if (m_gameList) m_gameList->setFocus();
+    // NeoRageX 부팅 시퀀스 시작 (테두리를 펜으로 그리고 내용이 차례로 등장)
+    if (gSettings.showIntro) {
+        m_stack->setCurrentIndex(3);
+        m_intro->setFocus();
+        m_intro->start(IntroSplash::findVideo(base));
+    } else {
+        m_shell->setFocus();
+        m_shell->boot();
+    }
     m_audio->init(gSettings.audioSampleRate, gSettings.audioBufferMs);
+    applyResolvedSoundMode();   // 저장해 둔 사운드 모드 복원
 
     // 터보 설정 복원
     gState.turboPeriod = gSettings.turboPeriod;
@@ -629,8 +700,6 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     // 게임패드 매핑 복원
-    if (!gSettings.xinputMapping.isEmpty())
-        m_gamepad->setXInputMapping(gSettings.xinputMapping);
     if (!gSettings.winmmMapping.isEmpty())
         m_gamepad->setWinMMMapping(gSettings.winmmMapping);
 
@@ -642,6 +711,21 @@ MainWindow::MainWindow(QWidget* parent)
 
     // ── 마우스 클릭음 (원본 NeoRageX 느낌) ────────────────────
     loadClickSound();
+
+    // ── 화면보호기 대기 타이머 (5분 무조작) ────────────────────
+    //   1초마다 확인해서 300초 연속 무조작이면 켠다. 매 틱마다 "지금 켜도 되는
+    //   상태인지"를 다시 보므로 게임 실행·리매핑 등 화면 전환에 자동으로 따라간다.
+    m_ssIdle = new QTimer(this);
+    m_ssIdle->setInterval(1000);
+    connect(m_ssIdle, &QTimer::timeout, this, [this]{
+        if (m_ssActive) return;
+        const bool eligible = m_stack && m_stack->currentIndex() == 0
+                              && !gState.gameLoaded && !gState.isPaused
+                              && !m_captureActive && !gNetplay().playing();
+        if (!eligible) { m_ssIdleTicks = 0; return; }
+        if (++m_ssIdleTicks >= kScreensaverIdleSec) { m_ssIdleTicks = 0; startScreensaver(); }
+    });
+    m_ssIdle->start();
 
     // 마우스 커서 자동 숨김 타이머 (3초 비입력 시 숨김)
     m_cursorTimer = new QTimer(this);
@@ -660,11 +744,6 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
 
-    // 패널 애니메이션
-    if (m_gamelistPanel) m_gamelistPanel->startAnim(0);
-    if (m_optionsPanel)  m_optionsPanel->startAnim(80);
-    if (m_previewPanel)  m_previewPanel->startAnim(160);
-    if (m_eventsPanel)   m_eventsPanel->startAnim(240);
 }
 
 MainWindow::~MainWindow() {}
@@ -689,10 +768,11 @@ void MainWindow::buildUi() {
     guiV->setContentsMargins(0, 0, 0, 0);
     guiV->setSpacing(0);
 
-    // 탭 없이 단일 메인 위젯
-    m_mainTab = new QWidget;
-    buildMainTab();
-    guiV->addWidget(m_mainTab);
+    buildPreviewPlayers();
+    applyPadProfiles();     // 이미 연결돼 있는 패드에 프로필·배정을 적용한다
+
+    buildShell();
+    guiV->addWidget(m_shell);
 
     m_stack->addWidget(m_guiWidget);
 
@@ -701,6 +781,43 @@ void MainWindow::buildUi() {
     m_canvas->setMouseTracking(true);   // 버튼 안 눌러도 마우스 이동 감지
     connect(m_canvas, &GameCanvas::glLogMessage, this, &MainWindow::log);
     m_stack->addWidget(m_canvas);
+
+    buildShellMenu();   // 캔버스·오디오·치트가 모두 준비된 뒤에 만든다
+
+    // ── 화면보호기 (index 2) ────────────────────────────────
+    //   메뉴에서 일정 시간 조작이 없으면 프리뷰 영상을 무작위로 전체화면 재생.
+    //   같은 화면이 오래 떠 있어 생기는 번인을 줄이기 위한 기능.
+    //   두 플랫폼 모두 디코딩한 프레임을 라벨에 직접 그린다 (onPreviewFrame).
+    m_ssPage = new QWidget;
+    m_ssPage->setStyleSheet("background:#000000;");
+    m_ssPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_ssPage->setMinimumSize(0, 0);
+    auto* ssLay = new QVBoxLayout(m_ssPage);
+    ssLay->setContentsMargins(0, 0, 0, 0);
+    ssLay->setSpacing(0);
+    m_ssLabel = new QLabel;
+    m_ssLabel->setAlignment(Qt::AlignCenter);
+    m_ssLabel->setStyleSheet("background:#000000;");
+    m_ssLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_ssLabel->setMinimumSize(0, 0);
+    ssLay->addWidget(m_ssLabel);
+    m_stack->addWidget(m_ssPage);
+
+    // ── 시작 오프닝 (index 3) ────────────────────────────────
+    m_intro = new IntroSplash;
+    m_stack->addWidget(m_intro);
+    // ── FRAME LAB (index 4) ─────────────────────────────────
+    m_lab = new FrameLab;
+    m_stack->addWidget(m_lab);
+    connect(m_lab, &FrameLab::closed, this, [this] {
+        m_stack->setCurrentIndex(0);
+        m_shell->setFocus();
+    });
+    connect(m_intro, &IntroSplash::finished, this, [this] {
+        m_stack->setCurrentIndex(0);
+        m_shell->setFocus();
+        m_shell->boot();                 // 오프닝이 끝나면 메뉴 부팅(테두리 그리기)이 시작된다
+    });
 
     // ── 1P↔2P 게임 화면 오버레이 ─────────────────────────────
     m_playerOverlay = new QLabel(m_canvas);
@@ -729,1806 +846,699 @@ void MainWindow::buildUi() {
     m_canvas->installEventFilter(this);
 }
 
+
 // ════════════════════════════════════════════════════════════
-//  buildMainTab — 게임 목록 + 프리뷰 + 버튼 + 로그
+//  NeoRageX 0.6b 메뉴 셸
 // ════════════════════════════════════════════════════════════
-void MainWindow::buildMainTab() {
-    QVBoxLayout* vRoot = new QVBoxLayout(m_mainTab);
-    vRoot->setContentsMargins(6, 6, 6, 6);
-    vRoot->setSpacing(4);
+//  GUI 화면을 셸이 통째로 그린다 (게임 목록, 옵션 메뉴, 프리뷰, 이벤트 로그).
+void MainWindow::buildShell() {
+    m_shell = new NeoRageXShell;
+    m_shell->setPointerCursor(m_customCursor);      // 제공받은 포인터 그림 (mousepoint.png)
 
-    // ════════════════════════════════════════════════
-    //  상단: GAMELIST(좌) + OPTIONS 패널(우)
-    // ════════════════════════════════════════════════
-    QHBoxLayout* hTop = new QHBoxLayout;
-    hTop->setSpacing(0);
-
-    // ── 좌: GAMELIST ─────────────────────────────────
-    m_gamelistPanel = new BorderPanel("GAMELIST");
-
-    // 필터 바 — ALL / ★FAV / ☆ + 기종별 탭 (ROM 스캔 후 동적 생성)
-    m_filterBar  = new QWidget;
-    m_filterBar->setStyleSheet("background:transparent;");
-    m_filterGrid = new QGridLayout(m_filterBar);
-    m_filterGrid->setContentsMargins(0, 0, 0, 0);
-    m_filterGrid->setSpacing(3);
-    m_gamelistPanel->innerLayout()->addWidget(m_filterBar);
-
-    m_searchEdit = new QLineEdit;
-    m_searchEdit->setPlaceholderText("Search...");
-    m_searchEdit->setStyleSheet(editStyle());
-    connect(m_searchEdit, &QLineEdit::textChanged, this, &MainWindow::filterRoms);
-    m_gamelistPanel->innerLayout()->addWidget(m_searchEdit);
-
-    m_gameList = new QListWidget;
-    // ★ QListWidget 완전 투명 처리 — BorderPanel 의 내부 알파만 색조 담당
-    //   1) viewport autoFillBackground=false
-    //   2) viewport stylesheet background:transparent (명시적 지정)
-    //   3) QListWidget frame background:transparent
-    //   4) ::item background:transparent (palette Base fall-through 차단)
-    //   → 패널 안 어떤 paint 경로로도 색을 칠하지 않음.
-    //     PREVIEW(QLabel) / EVENTS(QTextEdit) 와 동일한 가시성 보장.
-    m_gameList->viewport()->setAutoFillBackground(false);
-    m_gameList->viewport()->setStyleSheet("background:transparent;");
-    m_gameList->setStyleSheet(
-        "QListWidget{background:transparent;border:none;color:#99ccee;"
-        "font-family:'Courier New';font-size:12px;outline:none;}"
-        "QListWidget::item{padding:4px 8px;background:transparent;}"
-        "QListWidget::item:selected{background:#001166;color:#ffffff;"
-        "border-left:3px solid #0088ff;font-weight:bold;}"
-        "QListWidget::item:hover{background:#000833;}"
-        "QScrollBar:vertical{background:#001133;width:14px;border:none;margin:2px 2px 2px 0;}"
-        "QScrollBar::handle:vertical{background:#3366aa;border-radius:5px;min-height:30px;}"
-        "QScrollBar::handle:vertical:hover{background:#5588cc;}"
-        "QScrollBar::handle:vertical:pressed{background:#77aaee;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-        "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}");
-    m_gameList->setContextMenuPolicy(Qt::CustomContextMenu);
-
-    connect(m_gameList, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos){
-        QListWidgetItem* item = m_gameList->itemAt(pos);
-        if (!item) return;
-        QString rom = item->data(Qt::UserRole).toString();
-        bool fav = isFavorite(rom);
-        QMenu menu(this);
-        menu.setStyleSheet("QMenu{background:#000820;color:#aaccff;border:1px solid #334488;"
-                           "font-family:'Courier New';font-size:10px;}"
-                           "QMenu::item:selected{background:#001166;}");
-        QAction* launchAct = menu.addAction("▶  실행");
-        QAction* favAct    = menu.addAction(fav ? "☆  즐겨찾기 제거" : "★  즐겨찾기 추가");
-        menu.addSeparator();
-        QAction* cheatAct  = menu.addAction("CHEATS");
-        QAction* sel = menu.exec(m_gameList->viewport()->mapToGlobal(pos));
-        if      (sel == launchAct) { selectGame(rom); launchGame(); }
-        else if (sel == favAct)    { toggleFavorite(rom); }
-        else if (sel == cheatAct)  { selectGame(rom); if (m_optionsStack) m_optionsStack->setCurrentIndex(7); }
-    });
-    connect(m_gameList, &QListWidget::itemSelectionChanged, this, [this]{
-        auto items = m_gameList->selectedItems();
-        if (!items.isEmpty()) selectGame(items.first()->data(Qt::UserRole).toString());
-    });
-    connect(m_gameList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item){
-        if (item) { selectGame(item->data(Qt::UserRole).toString()); launchGame(); }
-    });
-    m_gamelistPanel->innerLayout()->addWidget(m_gameList, 1);
-    // 좌측 패널: 오른쪽 코너는 OPTIONS 와 맞닿으므로 직각
-    m_gamelistPanel->setRoundedCorners(BorderPanel::CornerTL | BorderPanel::CornerBL);
-    hTop->addWidget(m_gamelistPanel, 3);
-
-    // ── 우: OPTIONS (전체폭 스택, 클릭→상세→BACK 방식) ──────
-    m_optionsPanel = new BorderPanel("OPTIONS");
-
-    // ── 전체폭 콘텐츠 스택 ───────────────────────────────────
-    m_optionsStack = new QStackedWidget;
-    // palette 자동 채움 해제 — BorderPanel 의 반투명 내부가 비치도록
-    m_optionsStack->setAutoFillBackground(false);
-    m_optionsStack->setStyleSheet(
-        "QStackedWidget{background:transparent;}"
-        "QScrollArea{background:#000410;border:none;}"
-        "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
-        "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
-        "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}"
-        "QScrollBar:vertical{background:#000022;width:8px;border:none;}"
-        "QScrollBar::handle:vertical{background:#224466;border-radius:4px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
-
-    // ════════════════════════════════════════════════════════
-    //  페이지 0: 홈 메뉴 (background.png 배경 + 메뉴 버튼)
-    // ════════════════════════════════════════════════════════
+    // 배경 아트워크 — 기존 background.png 를 그대로 쓴다
     {
-        QWidget* homePage = new QWidget;
-        // BgWidget 의 배경 이미지가 비치도록 autoFillBackground 명시 해제
-        // (stylesheet 의 background:transparent 만으로는 Qt6 에서 viewport 자동
-        //  채움이 그대로 동작하는 경우가 있어 명시적 false 설정 필수)
-        homePage->setAutoFillBackground(false);
-        // guiRoot의 border-image가 비쳐 보이도록 transparent 유지
-        // (border-image 중복 설정 제거 → guiRoot 하나로 통일)
-        homePage->setStyleSheet(
-            "QWidget{background:transparent;}"
-            "QPushButton{background:rgba(0,4,20,180);color:#00aaff;"
-            "border:none;border-top:1px solid transparent;border-bottom:1px solid transparent;"
-            "font-family:'Courier New';font-size:13px;font-weight:bold;"
-            "text-align:center;padding:8px 20px;letter-spacing:2px;}"
-            "QPushButton:hover{color:#00eeff;background:rgba(0,60,180,160);"
-            "border-top:1px solid #0044aa;border-bottom:1px solid #0088ff;}"
-            "QPushButton:pressed{color:#ffffff;background:rgba(0,40,140,200);}");
-        homePage->setObjectName("optHome");
-
-        QVBoxLayout* homeV = new QVBoxLayout(homePage);
-        homeV->setContentsMargins(0, 0, 0, 0);
-        homeV->setSpacing(0);
-
-        // 상단 타이틀 레이블 (가운데 정렬)
-        QLabel* titleLbl = new QLabel("OPTIONS");
-        titleLbl->setAlignment(Qt::AlignCenter);
-        titleLbl->setStyleSheet(
-            "QLabel{color:#0066cc;font-family:'Courier New';font-size:10px;"
-            "font-weight:bold;letter-spacing:4px;background:rgba(0,0,10,160);"
-            "padding:6px 14px;border-bottom:1px solid #001a44;}");
-        homeV->addWidget(titleLbl);
-
-        homeV->addStretch(1);
-
-        // 메뉴 버튼
-        static const struct { const char* label; int page; } menuItems[] = {
-            {"CONTROLS",         1},
-            {"DIRECTORIES",      2},
-            {"VIDEO OPTIONS",    3},
-            {"AUDIO OPTIONS",    4},
-            {"MACHINE SETTINGS", 5},
-            {"SHOTS FACTORY",    6},
-            {"CHEATS",           7},
-            {"MULTIPLAYER",      8},
-        };
-        // NeoRageX 0.6b 스타일: 장식 없는 가운데 정렬 텍스트 메뉴
-        const QString menuCss =
-            "QPushButton{background:transparent;border:none;color:#dde6ff;"
-            "font-family:'Courier New';font-size:15px;font-weight:bold;"
-            "letter-spacing:3px;padding:2px;}"
-            "QPushButton:hover{color:#ffffff;background:rgba(32,80,255,70);}"
-            "QPushButton:pressed{color:#ffffff;background:rgba(32,80,255,120);}"
-            "QPushButton:disabled{color:#667799;}";
-        for (const auto& mi : menuItems) {
-            QPushButton* b = new QPushButton(QString::fromLatin1(mi.label));
-            b->setFlat(true);
-            b->setStyleSheet(menuCss);
-            b->setCursor(Qt::PointingHandCursor);
-            b->setFixedHeight(34);
-            int pageIdx = mi.page;
-            connect(b, &QPushButton::clicked, this, [this, pageIdx]{
-                m_optionsStack->setCurrentIndex(pageIdx);
-            });
-            homeV->addWidget(b);
-        }
-
-        homeV->addStretch(1);
-
-        // 구분선
-        auto* div = new QFrame; div->setFrameShape(QFrame::HLine);
-        div->setStyleSheet("background:rgba(0,80,160,120);border:none;max-height:1px;");
-        homeV->addWidget(div);
-
-        // 하단: 슬롯 + SAVE/LOAD/SHOT/REC/FF
-        QWidget* bottomCtrl = new QWidget;
-        bottomCtrl->setStyleSheet("background:rgba(0,2,14,200);");
-        QVBoxLayout* bottomV = new QVBoxLayout(bottomCtrl);
-        bottomV->setContentsMargins(12, 6, 12, 6);
-        bottomV->setSpacing(4);
-
-        QHBoxLayout* slotH = new QHBoxLayout; slotH->setSpacing(6);
-        QLabel* slotLbl = new QLabel("SLOT: 1");
-        slotLbl->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-        QComboBox* slotBox = new QComboBox;
-        slotBox->setStyleSheet(editStyle()); slotBox->setFixedWidth(54);
-        for (int i = 1; i <= 8; ++i) slotBox->addItem(QString::number(i));
-        connect(slotBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [this, slotLbl](int idx){
-                    m_stateSlot = idx+1;
-                    slotLbl->setText(QString("SLOT: %1").arg(m_stateSlot));
-                });
-        slotH->addWidget(slotLbl); slotH->addWidget(slotBox); slotH->addStretch();
-
-        // ── GUI 한/영 전환 버튼 ─────────────────────────────
-        //   누르면 즉시 전환(재시작 불필요) + 설정에 저장되어 다음 실행에도 유지
-        m_langBtn = new QPushButton;
-        m_langBtn->setStyleSheet(btnStyle());
-        m_langBtn->setFixedHeight(26);
-        m_langBtn->setFixedWidth(72);
-        m_langBtn->setText(isEn() ? "\xF0\x9F\x8C\x90  KO" : "\xF0\x9F\x8C\x90  EN");
-        trTip(m_langBtn, "메뉴 언어를 한국어 ↔ English 로 전환",
-                         "Switch menu language between English and Korean");
-        connect(m_langBtn, &QPushButton::clicked, this, &MainWindow::toggleLanguage);
-        slotH->addWidget(m_langBtn);
-
-        bottomV->addLayout(slotH);
-
-        QHBoxLayout* ctrlH2 = new QHBoxLayout; ctrlH2->setSpacing(3);
-        auto makeSmallBtn = [&](const QString& t, auto fn) {
-            auto* b = new QPushButton(t); b->setStyleSheet(btnStyle()); b->setFixedHeight(26);
-            connect(b, &QPushButton::clicked, this, fn); ctrlH2->addWidget(b);
-        };
-        makeSmallBtn("SAVE", [this]{ saveState(m_stateSlot); });
-        makeSmallBtn("LOAD", [this]{ loadState(m_stateSlot); });
-        makeSmallBtn("SHOT", [this]{ takeScreenshot(); });
-        makeSmallBtn("REC",  [this]{ toggleRecording(); });
-        makeSmallBtn("FF",   [this]{ gState.fastForward = !gState.fastForward; });
-        bottomV->addLayout(ctrlH2);
-        homeV->addWidget(bottomCtrl);
-
-        m_optionsStack->addWidget(homePage);  // index 0
+        QImage bg(QStringLiteral(":/assets/background.png"));
+        if (!bg.isNull()) m_shell->setBackdrop(bg);
     }
 
-    // ════════════════════════════════════════════════════════
-    //  페이지 1-8: 각 콘텐츠 페이지 (BACK 버튼 헤더 포함)
-    // ════════════════════════════════════════════════════════
-    static const char* kPageTitles[] = {
-        "CONTROLS",
-        "DIRECTORIES",
-        "VIDEO OPTIONS",
-        "AUDIO OPTIONS",
-        "MACHINE SETTINGS",
-        "SHOTS FACTORY",
-        "CHEATS",
-        "MULTIPLAYER",
-    };
+    connect(m_shell, &NeoRageXShell::launchRequested, this,
+            [this](const QString&) { launchGame(); });
 
-    auto makeContentPage = [&](int titleIdx, auto buildFn) {
-        QWidget* wrapper = new QWidget;
-        wrapper->setStyleSheet("QWidget{background:#000410;}"
-                               "QScrollArea{background:#000410;border:none;}");
-        QVBoxLayout* wv = new QVBoxLayout(wrapper);
-        wv->setContentsMargins(0, 0, 0, 0);
-        wv->setSpacing(0);
-
-        // ── BACK 헤더 바 ─────────────────────────────────────
-        QWidget* header = new QWidget;
-        header->setFixedHeight(38);
-        header->setStyleSheet("QWidget{background:#000820;border-bottom:1px solid #223366;}");
-        QHBoxLayout* hh = new QHBoxLayout(header);
-        hh->setContentsMargins(8, 0, 12, 0);
-        hh->setSpacing(8);
-
-        QPushButton* backBtn = new QPushButton("◀  BACK");
-        backBtn->setStyleSheet(btnStyle(false));
-        backBtn->setFixedHeight(28);
-        backBtn->setFixedWidth(90);
-        connect(backBtn, &QPushButton::clicked, this, [this]{
-            m_optionsStack->setCurrentIndex(0);
-        });
-
-        QLabel* pageTitleLbl = new QLabel(kPageTitles[titleIdx]);
-        pageTitleLbl->setStyleSheet(
-            "QLabel{color:#aaccff;font-family:'Courier New';"
-            "font-size:12px;font-weight:bold;letter-spacing:2px;background:transparent;}");
-
-        hh->addWidget(backBtn);
-        hh->addSpacing(10);
-        hh->addWidget(pageTitleLbl, 1);
-        wv->addWidget(header);
-
-        // ── 콘텐츠 영역 ──────────────────────────────────────
-        QWidget* content = new QWidget;
-        content->setStyleSheet("QWidget{background:#000410;}");
-        buildFn(content);
-        wv->addWidget(content, 1);
-
-        // 페이지가 자기 크기를 주장하지 못하게 한다.
-        //   치트/머신세팅처럼 내용이 많은 페이지로 전환하면 그 페이지의 요구
-        //   크기가 OPTIONS 패널을 통해 바깥 비율에 영향을 줄 수 있다.
-        //   (패널 자체는 이미 Ignored 이지만, 페이지가 최소 크기를 밀어올리는
-        //    경로를 확실히 끊어 어떤 페이지에서도 비율이 흔들리지 않게 한다)
-        wrapper->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        wrapper->setMinimumSize(0, 0);
-        content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        content->setMinimumSize(0, 0);
-
-        m_optionsStack->addWidget(wrapper);
-    };
-
-    makeContentPage(0, [&](QWidget* p){ buildControlsPage(p);    }); // 1
-    makeContentPage(1, [&](QWidget* p){ buildDirectoriesPage(p); }); // 2
-    makeContentPage(2, [&](QWidget* p){ buildVideoPage(p);       }); // 3
-    makeContentPage(3, [&](QWidget* p){ buildAudioPage(p);       }); // 4
-    makeContentPage(4, [&](QWidget* p){ buildMachinePage(p);     }); // 5
-    makeContentPage(5, [&](QWidget* p){ buildShotsPage(p);       }); // 6
-    makeContentPage(6, [&](QWidget* p){ buildCheatsPage(p);      }); // 7
-    makeContentPage(7, [&](QWidget* p){ buildNetplayPage(p);     }); // 8
-
-    m_optionsStack->setCurrentIndex(0);
-    m_optionsPanel->innerLayout()->addWidget(m_optionsStack);
-    // 우측 패널: 왼쪽 코너는 GAMELIST 와 맞닿으므로 직각
-    m_optionsPanel->setRoundedCorners(BorderPanel::CornerTR | BorderPanel::CornerBR);
-    hTop->addWidget(m_optionsPanel, 5);
-
-    // 세로 비율: 위(게임리스트+옵션) : 아래(프리뷰+이벤트) = 5:4
-    //   스트레치 값은 창 크기에 비례 스케일 → 창 크기 무관하게 비율 유지
-    vRoot->addLayout(hTop, 5);
-
-    // ════════════════════════════════════════════════
-    //  버튼 바
-    // ════════════════════════════════════════════════
-    QHBoxLayout* btnBar = new QHBoxLayout; btnBar->setSpacing(4);
-    auto makeBarBtn = [&](const QString& t, bool accent, auto fn) {
-        auto* b = new QPushButton(t); b->setStyleSheet(btnStyle(accent)); b->setFixedHeight(36);
-        connect(b, &QPushButton::clicked, this, fn); btnBar->addWidget(b);
-    };
-    makeBarBtn("▶  LAUNCH / RESUME", true,  [this]{ launchGame(); });
-    makeBarBtn("■  STOP GAME",       false, [this]{
-        if (!gState.gameLoaded && !gState.isPaused) return;
-        m_timer->stop();
-        gState.isPaused = false;
-        if (m_core) m_core->unloadGame();
-        m_loadedGame.clear();
-        leaveGameScreen();
-        log("■ 게임 종료");
+    connect(m_shell, &NeoRageXShell::importRequested, this, [this] {
+        log(QStringLiteral("ROM 폴더를 다시 읽습니다..."));
+        scanRoms();
     });
-    makeBarBtn("⏮  RESET",     false, [this]{ if (m_core) m_core->reset(); });
 
-    // 1P↔2P 스왑 버튼 (토글, F10)
-    m_swapBtn = new QPushButton("⇄  1P");
-    m_swapBtn->setCheckable(true);
-    m_swapBtn->setFixedHeight(36);
-    trTip(m_swapBtn, "1P / 2P 포트 전환 (F10)  — 싱글 연습용",
-                     "Swap 1P / 2P port (F10) — for solo practice");
-    m_swapBtn->setStyleSheet(
-        "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
-        "font-family:'Courier New';font-size:10px;font-weight:bold;}"
-        "QPushButton:checked{background:#003300;color:#44ff88;border-color:#00cc44;}"
-        "QPushButton:hover{background:#00004d;color:#99ccff;}"
-        "QPushButton:pressed{background:#001166;}");
-    connect(m_swapBtn, &QPushButton::clicked, this, [this]{ toggleSwapPlayers(); });
-    btnBar->addWidget(m_swapBtn);
+    connect(m_shell, &NeoRageXShell::exitRequested, this, [this] { close(); });
 
-    // TATE 버튼 (세로형 슈팅게임 화면 회전, F8)
-    m_tateBtn = new QPushButton("⟳  TATE");
-    m_tateBtn->setCheckable(false);
-    m_tateBtn->setFixedHeight(36);
-    m_tateBtn->setToolTip(
-        "세로형 화면 회전 (F8)\n"
-        "AUTO → 90°CCW → 90°CW → OFF → AUTO\n"
-        "세로형 슈팅게임: 1942, DonPachi, Raiden 등");
-    m_tateBtn->setStyleSheet(
-        "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
-        "font-family:'Courier New';font-size:10px;font-weight:bold;}"
-        "QPushButton:hover{background:#00004d;color:#99ccff;}"
-        "QPushButton:pressed{background:#001166;}");
-    connect(m_tateBtn, &QPushButton::clicked, this, [this]{ toggleTate(); });
-    btnBar->addWidget(m_tateBtn);
+    // 검색: 글자를 칠 때마다 목록을 다시 거르면 선택 게임이 바뀌며 로그가 쏟아지므로
+    //   입력이 잠시 멈춘 뒤에 한 번만 적용한다.
+    m_searchDebounce = new QTimer(this);
+    m_searchDebounce->setSingleShot(true);
+    m_searchDebounce->setInterval(150);
+    connect(m_searchDebounce, &QTimer::timeout, this, [this] { filterRoms(); });
+    connect(m_shell, &NeoRageXShell::searchChanged, this, [this](const QString& t) {
+        m_searchText = t;
+        m_searchDebounce->start();
+    });
+    // 게임패드(Y): OS 입력창 (스팀덱에서는 화면 키보드가 뜬다)
+    connect(m_shell, &NeoRageXShell::searchRequested, this, [this] {
+        bool ok = false;
+        const QString t = QInputDialog::getText(this, QStringLiteral("SEARCH"),
+            isEn() ? QStringLiteral("Game name or ROM name") : QStringLiteral("게임 이름 또는 롬 이름"),
+            QLineEdit::Normal, m_searchText, &ok);
+        if (!ok) return;
+        m_searchText = t.trimmed();
+        m_shell->setSearchText(m_searchText);
+        filterRoms();
+    });
 
-#ifdef _WIN32
-    // 스팀덱(Linux)은 항상 전체화면으로 동작하므로 이 버튼이 의미가 없다 → Windows 전용
-    makeBarBtn("⛶  FULLSCREEN",false, [this]{ toggleFullscreen(); });
-#endif
-    makeBarBtn("✖  EXIT",       false, [this]{ close(); });
-    vRoot->addLayout(btnBar);
+    // 셸에서 고른 행 → 선택 게임
+    auto pick = [this](int index) {
+        if (index < 0 || index >= m_rows.size()) return;
+        selectGame(m_rows.at(index).rom);
+        syncShellPreview();
+    };
+    connect(m_shell, &NeoRageXShell::gameSelected, this,
+            [pick](const QString&, int i) { pick(i); });
+    connect(m_shell, &NeoRageXShell::gameHighlighted, this,
+            [pick](const QString&, int i) { pick(i); });
 
-    // ════════════════════════════════════════════════
-    //  하단: PREVIEW(좌) + EVENTS(우)
-    // ════════════════════════════════════════════════
-    QHBoxLayout* hBot = new QHBoxLayout; hBot->setSpacing(0);
+    // 즐겨찾기 토글 (목록에서 Space)
+    connect(m_shell, &NeoRageXShell::favoriteToggled, this, [this](int index) {
+        if (index < 0 || index >= m_rows.size()) return;
+        toggleFavorite(m_rows.at(index).rom);
+    });
 
-    m_previewPanel = new BorderPanel("PREVIEW");
-    m_previewLabel = new QLabel("NO PREVIEW");
-    m_previewLabel->setAlignment(Qt::AlignCenter);
-    // 완전 투명 — BorderPanel 알파만 색조 담당 (다른 패널과 동일)
-    m_previewLabel->setAutoFillBackground(false);
-    m_previewLabel->setStyleSheet("color:#335577;background:transparent;"
-                                  "font-family:'Courier New';font-size:10px;");
-    m_previewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_videoWidget  = new QVideoWidget;
-    // QVideoWidget 은 영상 재생 중엔 영상이 모든 픽셀을 덮으므로
-    // 배경색은 영상 미재생 시(placeholder 대체 직전)에만 영향. 검정 유지.
-    m_videoWidget->setStyleSheet("background:#000008;");
-    m_videoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // 박스 고정 + 영상을 박스에 맞춰 늘림 (레터박스·잘림 없음) — Windows 경로
-    m_videoWidget->setAspectRatioMode(Qt::IgnoreAspectRatio);
-    m_previewStack = new QStackedWidget;
-    // QStackedWidget 도 palette 색 자동 채움이 활성화되어 있어
-    // BorderPanel 의 반투명 내부 오버레이를 가려버린다. 명시적 해제.
-    m_previewStack->setAutoFillBackground(false);
-    m_previewStack->setStyleSheet("QStackedWidget{background:transparent;}");
-    m_previewStack->addWidget(m_previewLabel);
-    m_previewStack->addWidget(m_videoWidget);
-    m_previewStack->setCurrentIndex(0);
-    m_previewPanel->innerLayout()->addWidget(m_previewStack);
+    // 필터 단추 (ALL / FAV / NOFAV / 기종)
+    connect(m_shell, &NeoRageXShell::filterChosen, this, [this](const QString& fid) {
+        if      (fid == QLatin1String("all"))   { m_glFilter = 0; m_hwFilter.clear(); }
+        else if (fid == QLatin1String("fav"))   { m_glFilter = 1; m_hwFilter.clear(); }
+        else if (fid == QLatin1String("nofav")) { m_glFilter = 2; m_hwFilter.clear(); }
+        else if (fid.startsWith(QLatin1String("hw:"))) {
+            m_glFilter = 0;
+            m_hwFilter = fid.mid(3);
+        }
+        filterRoms();
+    });
+}
+
+// 필터 단추 줄을 셸에 넘긴다.
+//   기종 목록은 실제로 보유한 것만, 개수 없이 짧은 이름으로 만든다.
+void MainWindow::syncShellFilters() {
+    if (!m_shell) return;
+    using Tab = NeoRageXShell::FilterTab;
+    QVector<Tab> tabs;
+    tabs << Tab{ QStringLiteral("all"),   QStringLiteral("ALL")   }
+         << Tab{ QStringLiteral("fav"),   QStringLiteral("FAV")   }
+         << Tab{ QStringLiteral("nofav"), QStringLiteral("NOFAV") };
+
+    QHash<QString, int> hwCount;
+    for (const auto& pair : m_allRoms)
+        ++hwCount[gameHardwareGroup(gameHardwareOf(pair.second))];
+    for (const auto& d : gameHardwareList()) {
+        const QString id = QString::fromLatin1(d.id);
+        if (hwCount.value(id, 0) <= 0) continue;
+        tabs << Tab{ QStringLiteral("hw:") + id,
+                     QString::fromLatin1(d.label).toUpper() };
+    }
+
+    QString cur = QStringLiteral("all");
+    if (!m_hwFilter.isEmpty())    cur = QStringLiteral("hw:") + m_hwFilter;
+    else if (m_glFilter == 1)     cur = QStringLiteral("fav");
+    else if (m_glFilter == 2)     cur = QStringLiteral("nofav");
+    m_shell->setFilterTabs(tabs, cur);
+}
+
+// 화면에 보일 목록(m_rows)을 셸로 옮긴다.
+void MainWindow::syncShellList() {
+    if (!m_shell) return;
+    QStringList labels;
+    QVector<bool> favs;
+    labels.reserve(m_rows.size());
+    favs.reserve(m_rows.size());
+    int sel = -1;
+    for (int r = 0; r < m_rows.size(); ++r) {
+        labels << m_rows[r].label;
+        favs   << m_rows[r].fav;
+        if (m_rows[r].rom == m_selectedGame) sel = r;
+    }
+    m_shell->setGames(labels, favs);
+    if (sel >= 0) m_shell->setSelectedIndex(sel);
+    syncShellFilters();
+    syncShellPreview();
+}
+// 선택한 게임의 프리뷰 이미지를 셸에 넘긴다 (previews/<rom>.png 등)
+void MainWindow::syncShellPreview() {
+    if (!m_shell) return;
+    if (m_selectedGame.isEmpty()) { m_shell->setPreview(QImage()); return; }
+    static const char* exts[] = { ".png", ".jpg", ".jpeg", ".bmp", ".gif" };
+    for (const char* e : exts) {
+        const QString path = gSettings.previewPath + QLatin1Char('/')
+                           + m_selectedGame + QLatin1String(e);
+        if (QFileInfo::exists(path)) {
+            QImage img(path);
+            if (!img.isNull()) { m_shell->setPreview(img); return; }
+        }
+    }
+    m_shell->setPreview(QImage());
+}
+
+
+// OPTIONS 메뉴를 만든다. 카테고리 하나 = 페이지 하나.
+//   페이지는 ShellHost 로만 앱과 이야기한다. MainWindow 의 나머지를 만지지 않는다.
+void MainWindow::buildShellMenu() {
+    ShellHost h;
+    h.canvas = m_canvas;
+    h.audio  = m_audio;
+    h.cheat  = m_cheat;
+    h.window = this;
+
+    h.log     = [this](const QString& s) { log(s); };
+    h.english = [this]() { return isEn(); };
+
+    h.loadedGame   = [this]() { return m_loadedGame; };
+    h.selectedGame = [this]() { return m_selectedGame; };
+    h.platformOf   = [this](const QString& rom) { return gamePlatform(rom); };
+
+    h.applyBezel        = [this]() { applyBezel(); };
+    h.applySoundMode    = [this]() { applyResolvedSoundMode(); };
+    h.applyLiveSettings = [this]() { applyLiveSettings(); };
+    h.applyPaths        = [this]() { applyPathSettings(); };
+    h.toggleFullscreen  = [this]() { toggleFullscreen(); };
+    h.isFullscreen      = [this]() { return fullscreenNow(); };
+    h.openShaderParams  = [this]() { openShaderParams(); };
+    h.toggleLanguage    = [this]() { toggleLanguage(); };
+    h.stopGame          = [this]() { stopGame(); };
+    h.resetGame         = [this]() { resetGame(); };
+    h.swapPlayers       = []() { return gState.swapPlayers; };
+    h.toggleSwap        = [this]() { toggleSwapPlayers(); };
+    h.tateLabel         = [this]() { return tateLabel(); };
+    h.toggleTate        = [this]() { toggleTate(); };
+
+    h.stateSlot       = [this]() { return m_stateSlot; };
+    h.setStateSlot    = [this](int s) { m_stateSlot = s; };
+    h.saveState       = [this]() { saveState(m_stateSlot); };
+    h.loadState       = [this]() { loadState(m_stateSlot); };
+    h.takeScreenshot  = [this]() { takeScreenshot(); };
+    h.openFrameLab    = [this]() { openFrameLab(); };
+    h.toggleRecording = [this]() { toggleRecording(); };
+    h.savePreviewShot = [this]() { savePreviewShot(); };
+    h.togglePreviewRecord = [this]() { togglePreviewRecord(); };
+    h.isRecording     = []() { return gState.isRecording.load(); };
+
+    {
+        ControlsApi& k = h.controls;
+        k.bindings     = [this](int d) { return controlSlots(d); };
+        k.remap        = [this](int d, int s) { remapControl(d, s); };
+        k.resetDevice  = [this](int d) { resetControlDevice(d); };
+        k.pads         = [this]() {
+            QVector<ControlPad> v;
+            if (!m_gamepad) return v;
+            for (int i = 0; i < 4; ++i)
+                if (m_gamepad->padPresent(i))
+                    v.append(ControlPad{i, m_gamepad->padName(i), m_gamepad->padPlayer(i)});
+            return v;
+        };
+        k.targetPad    = [this]() { return m_remapPad; };
+        k.setTargetPad = [this](int i) {
+            m_remapPad = i;
+            log(QString("🎮 리매핑 대상: %1").arg(m_gamepad ? m_gamepad->padName(i) : QString()));
+        };
+        k.setPadPlayer = [this](int i, int player) {
+            if (!m_gamepad) return;
+            const QString name = m_gamepad->padName(i);
+            m_gamepad->setPadPlayer(i, player);
+            if (!name.isEmpty()) { gSettings.padAssign[name] = player; gSettings.save(); }
+            log(QString("🎮 %1 → %2").arg(name,
+                    player == 0 ? QString(isEn() ? "Off" : "사용 안 함") : QString("%1P").arg(player)));
+        };
+        k.sourceText       = [this]() { return padSourceText(); };
+        k.savePlatform     = [this]() { saveControlsForPlatform(); };
+        k.platformLabel    = [this]() { return platformSaveLabel(); };
+        k.forgetGame       = [this]() { forgetGameControls(); };
+        k.clearPadProfiles = [this]() { clearPadScope("all"); };
+        k.inputMode        = []() { return gSettings.inputMode; };
+        k.setInputMode     = [this](const QString& m) {
+            gSettings.inputMode = m;
+            gSettings.save();
+            log("게임패드 모드: " + m);
+        };
+        k.turboButtons   = [this]() { return turboButtons(); };
+        k.turbo          = [](int idx) { return gState.turboBtns.value(idx, false); };
+        k.setTurbo       = [this](int idx, bool on) { gState.turboBtns[idx] = on; saveTurboSettings(); };
+        k.turboPeriod    = []() { return gState.turboPeriod; };
+        k.setTurboPeriod = [this](int v) { gState.turboPeriod = v; saveTurboSettings(); };
+    }
+
+    {
+        NetApi& n = h.net;
+        n.state       = [this]() { return netState(); };
+        n.host        = [this]() { netHost(); };
+        n.join        = [this]() { netJoin(); };
+        n.start       = [this]() { netplayStartGame(); };
+        n.disconnect  = [this]() { netDisconnect(); };
+        n.setPort     = [this](int p) { gSettings.netplayPort = p; gSettings.save(); };
+        n.setDelay    = [this](int d) { m_netDelay = d; gSettings.netplayInputDelay = d; gSettings.save(); };
+        n.setJoinCode = [this](const QString& s) { m_net.joinCode = s.trimmed().toUpper(); };
+        n.setJoinIp   = [this](const QString& s) { m_net.joinIp = s.trimmed(); };
+        n.copyCode    = [this]() { netCopyRoomCode(); };
+        n.setRelay    = [this](const QString& s) { netSetRelay(s); };
+    }
+
+    {
+        VideoApi& v = h.video;
+        v.setShader       = [this](const QString& p) { return applyShaderFile(p); };
+        v.clearShader     = [this]() { clearShaderFile(); };
+        v.bezelKey        = [this](const QString& sc) { return bezelKeyFor(sc); };
+        v.bezelScopeLabel = [this](const QString& sc) { return bezelScopeLabel(sc); };
+        v.bezelInfo       = [this]() { return bezelInfoText(); };
+        v.assignBezel     = [this](const QString& k, const QString& val) { assignBezel(k, val); };
+        v.clearBezel      = [this](const QString& k) { clearBezelAssign(k); };
+    }
+
+    m_netDelay = gSettings.netplayInputDelay;
+    fetchPublicIp();
+
+    m_menu = new ShellMenu(m_shell, this);
+
+    // 등록 순서 = 화면의 카테고리 순서
+    m_menu->addPage(makeControlsPage(h),                       "CONTROLS");
+    m_menu->addPage(makeDirectoriesPage(h),                    "DIRECTORIES");
+    m_menu->addPage(makeVideoPage(h),                          "VIDEO OPTIONS");
+    m_menu->addPage(makeAudioPage(h),                          "AUDIO OPTIONS");
+    m_menu->addPage(makeMachinePage(h),                        "MACHINE SETTINGS");
+    m_menu->addPage(makeShotsPage(h),                          "SHOTS FACTORY");
+    m_menu->addPage(makeCheatsPage(h),                         "CHEATS");
+    m_menu->addPage(makeNetplayPage(h),                        "MULTIPLAYER");
+    m_menu->addPage(makeSystemPage(h),                         "SYSTEM");
+    m_menu->setKoreanProvider([]() { return !isEn(); });
+    m_menu->install();
+    m_menu->retranslate();
+}
+
+// 프리뷰 영상 재생기.
+//   PREVIEW 박스는 셸이 그린다. 여기서는 영상을 디코딩해 프레임을 셸(또는 화면보호기)로
+//   넘기기만 한다. Linux 는 자체 소프트웨어 디코더, Windows 는 QMediaPlayer 를 쓰고
+//   둘 다 같은 onPreviewFrame() 으로 모인다.
+void MainWindow::buildPreviewPlayers() {
 #if HAVE_FFMPEG
     // Linux(스팀덱): Qt 멀티미디어 대신 자체 소프트웨어 디코더 사용.
     //   Qt FFmpeg 백엔드가 VAAPI/Vulkan 하드웨어 디코더를 잡다가 죽는 문제를
     //   근본 차단한다(하드웨어 탐색 경로 자체가 없음). 프리뷰는 무음 재생.
     m_previewVideo = new PreviewVideo(this);
-    connect(m_previewVideo, &PreviewVideo::frameReady, this, [this](const QImage& img){
-        if (!m_previewLabel || img.isNull()) return;
-        // 영상도 박스를 원본 비율에 맞춘 뒤 잘림 없이 표시
-        if (img.size() != m_previewMedia) applyPreviewAspect(img.size());
-        m_previewLabel->setPixmap(fitPreviewPixmap(QPixmap::fromImage(img)));
-    });
+    connect(m_previewVideo, &PreviewVideo::frameReady, this,
+            [this](const QImage& img) { onPreviewFrame(img); });
     connect(m_previewVideo, &PreviewVideo::failed, this, [this](const QString& why){
         log("⚠ 프리뷰 영상 재생 불가: " + why);
     });
-    // 영상이 끝나면 다시 프리뷰 이미지로 → 3초 뒤 영상 → 다시 이미지 …
-    //   (타 에뮬레이터와 같은 이미지↔영상 순환 표시)
     // 영상이 끝나면 프리뷰 이미지로 돌아가고, 다시 재생하지는 않는다.
-    //   (예전에는 이미지↔영상을 계속 반복해 산만했다)
     connect(m_previewVideo, &PreviewVideo::finished, this, [this]{
+        if (m_ssActive) { playRandomScreensaverVideo(); return; }  // 다음 영상 무작위
         m_previewVideoDone = true;          // 이 게임은 이미 한 번 재생함
         if (!m_selectedGame.isEmpty()) loadPreview(m_selectedGame);
     });
 #endif
     m_mediaPlayer = new QMediaPlayer(this);
-    m_mediaPlayer->setVideoOutput(m_videoWidget);
+    m_videoSink   = new QVideoSink(this);
+    m_mediaPlayer->setVideoSink(m_videoSink);
+    connect(m_videoSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& f) {
+        if (f.isValid()) onPreviewFrame(f.toImage());
+    });
     { auto* ao = new QAudioOutput(this); m_mediaPlayer->setAudioOutput(ao); }
-    // 영상이 끝나면 프리뷰 이미지로 복귀 → 3초 뒤 다시 영상 (이미지↔영상 순환)
+    // 영상이 끝나면 프리뷰 이미지로 복귀
     connect(m_mediaPlayer, &QMediaPlayer::mediaStatusChanged, this,
             [this](QMediaPlayer::MediaStatus s){
-        if (s == QMediaPlayer::EndOfMedia && !m_selectedGame.isEmpty())
-            loadPreview(m_selectedGame);
+        if (s != QMediaPlayer::EndOfMedia) return;
+        if (m_ssActive) { playRandomScreensaverVideo(); return; }  // 다음 영상 무작위
+        if (!m_selectedGame.isEmpty()) loadPreview(m_selectedGame);
     });
     // 재생 오류는 조용히 죽지 않고 이벤트 로그로 알린다.
-    //   (멀티미디어 백엔드 플러그인 누락/코덱 문제 진단용 — Linux 에서 백엔드가
-    //    없으면 재생 시점에 프로그램이 튕기던 문제를 표면화)
+    //   (멀티미디어 백엔드 플러그인 누락/코덱 문제 진단용)
     connect(m_mediaPlayer, &QMediaPlayer::errorOccurred, this,
             [this](QMediaPlayer::Error, const QString& msg){
         log("⚠ 프리뷰 영상 재생 오류: " + msg);
         if (m_mediaPlayer) m_mediaPlayer->stop();
-        if (m_previewStack) m_previewStack->setCurrentIndex(0);   // 이미지 모드 복귀
+        // 화면보호기 중이면 검은 화면으로 멈추지 않게 해제한다
+        if (m_ssActive) { stopScreensaver(); return; }
+        if (!m_selectedGame.isEmpty()) syncShellPreview();      // 이미지로 복귀
     });
     m_previewVidTimer = new QTimer(this);
     m_previewVidTimer->setSingleShot(true);
     m_previewVidTimer->setInterval(3000);
     connect(m_previewVidTimer, &QTimer::timeout, this, [this]{ loadPreviewVideo(m_selectedGame); });
-    // 좌측 패널: 오른쪽 코너는 EVENTS 와 맞닿으므로 직각
-    m_previewPanel->setRoundedCorners(BorderPanel::CornerTL | BorderPanel::CornerBL);
-    // 프리뷰 : 이벤트 = 4 : 5 (기존 3:5 → 프리뷰 박스를 더 크게)
-    hBot->addWidget(m_previewPanel, 4);
-
-    m_eventsPanel = new BorderPanel("EVENTS");
-    m_logEdit = new QTextEdit;
-    m_logEdit->setReadOnly(true);
-    // QTextEdit 완전 투명 — BorderPanel 알파만 색조 담당 (m_gameList 와 동일)
-    m_logEdit->viewport()->setAutoFillBackground(false);
-    m_logEdit->viewport()->setStyleSheet("background:transparent;");
-    m_logEdit->setStyleSheet(
-        "QTextEdit{background:transparent;border:none;color:#99ccee;"
-        "font-family:'Courier New';font-size:10px;}"
-        "QScrollBar:vertical{background:#000022;width:8px;}"
-        "QScrollBar::handle:vertical{background:#224466;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
-    m_eventsPanel->innerLayout()->addWidget(m_logEdit);
-    // 우측 패널: 왼쪽 코너는 PREVIEW 와 맞닿으므로 직각
-    m_eventsPanel->setRoundedCorners(BorderPanel::CornerTR | BorderPanel::CornerBR);
-    hBot->addWidget(m_eventsPanel, 5);
-
-    // 아래(프리뷰+이벤트) : 위 = 4 : 5 (프리뷰/이벤트 박스를 더 크게)
-    vRoot->addLayout(hBot, 4);
-
-    // ── 하단 푸터 (원본 NeoRageX 의 "Ver 0.6b … NeoRAGE ©1999" 자리) ──
-    {
-        QHBoxLayout* footer = new QHBoxLayout;
-        footer->setContentsMargins(6, 2, 6, 2);
-        const QString css = "color:#5577bb;font-family:'Courier New';"
-                            "font-size:10px;background:transparent;";
-        QLabel* verLbl = new QLabel("Ver 2.1");
-        verLbl->setStyleSheet(css);
-        QLabel* brandLbl = new QLabel("FBNeoRageX");
-        brandLbl->setStyleSheet(css);
-        brandLbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        footer->addWidget(verLbl);
-        footer->addStretch();
-        footer->addWidget(brandLbl);
-        vRoot->addLayout(footer, 0);
-    }
-
-    // ════════════════════════════════════════════════
-    //  박스 크기 고정 — 오직 스트레치 비율로만 결정
-    // ════════════════════════════════════════════════
-    //  기본 정책(Preferred)에서는 각 패널이 "내용물의 sizeHint" 만큼을 요구하고,
-    //  레이아웃이 그 요구를 반영해 공간을 나눈다. 그래서 게임리스트에 항목이
-    //  채워지거나 이벤트 로그가 길어지면 그 패널이 더 넓은 공간을 가져가
-    //  처음과 다른 크기가 됐다(아래 키를 누르는 순간 위가 커지던 증상).
-    //
-    //  → sizeHint 를 무시(Ignored)하게 만들면 배분은 스트레치 값만 따르므로
-    //    내용이 아무리 늘어나도 비율이 그대로 유지되고, 창 크기를 바꾸면
-    //    같은 비율로 자연스럽게 함께 커지고 작아진다.
-    //  → 내부 위젯의 최소 크기도 풀어야 한다. 최소 크기가 크면 레이아웃이
-    //    그만큼은 보장하려 해서 다시 비율이 틀어진다.
-    for (BorderPanel* p : { m_gamelistPanel, m_optionsPanel,
-                            m_previewPanel,  m_eventsPanel }) {
-        if (!p) continue;
-        p->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        p->setMinimumSize(0, 0);
-        // NeoRageX 0.6b 스타일 (각진 얇은 파란 테두리 + 좌상단 제목)
-        p->setClassicStyle(true);
-    }
-    // 내용물(목록/로그/옵션 스택/프리뷰)도 자기 크기를 주장하지 않도록
-    for (QWidget* w : { static_cast<QWidget*>(m_gameList),
-                        static_cast<QWidget*>(m_logEdit),
-                        static_cast<QWidget*>(m_optionsStack),
-                        static_cast<QWidget*>(m_previewStack) }) {
-        if (!w) continue;
-        w->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        w->setMinimumSize(0, 0);
-    }
-
-    // 옵션 패널 안의 모든 스크롤 영역도 최소 크기를 풀어, 내용이 많아져도
-    // 바깥 비율에 영향을 주지 않게 한다 (치트/머신세팅 진입 시 비율 흔들림 방지)
-    if (m_optionsStack) {
-        const QList<QScrollArea*> areas = m_optionsStack->findChildren<QScrollArea*>();
-        for (QScrollArea* sa : areas) {
-            sa->setMinimumSize(0, 0);
-            sa->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        }
-    }
-
-    // 옵션 페이지의 콤보/스핀/슬라이더가 휠을 가로채지 않도록 (스크롤 보장)
-    applyWheelGuard(m_optionsStack);
-
-    // 이미 연결돼 있는 패드에 프로필·배정을 적용하고 목록을 채운다
-    applyPadProfiles();
-    rebuildPadAssignUi();
 }
 
+// 재생 중인 프리뷰 영상의 한 프레임. 화면보호기 중이면 전체화면 페이지에, 아니면 셸의
+//   PREVIEW 박스에 그린다.
+void MainWindow::onPreviewFrame(const QImage& img) {
+    if (img.isNull()) return;
+    if (m_ssActive && m_ssLabel) {
+        const QSize t = m_ssLabel->size();
+        if (t.width() > 4 && t.height() > 4)
+            m_ssLabel->setPixmap(QPixmap::fromImage(img).scaled(
+                t, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        return;
+    }
+    if (m_shell) m_shell->setPreview(img);
+}
+
+// 게임을 멈추고 메뉴로 돌아온다 (STOP GAME).
+void MainWindow::stopGame() {
+    if (!gState.gameLoaded && !gState.isPaused) return;
+    m_timer->stop();
+    gState.isPaused = false;
+    if (m_core) m_core->unloadGame();
+    m_loadedGame.clear();
+    leaveGameScreen();
+    log("■ 게임 종료");
+}
+
+void MainWindow::resetGame() {
+    if (m_core) m_core->reset();
+}
+
+// TATE(세로형 화면 회전) 상태를 짧은 문구로.
+QString MainWindow::tateLabel() const {
+    if (!m_canvas) return QStringLiteral("AUTO");
+    switch (m_canvas->rotation()) {
+    case  1: return QStringLiteral("90 CCW");
+    case  3: return QStringLiteral("90 CW");
+    case  0: return QStringLiteral("OFF");
+    default: return QStringLiteral("AUTO");
+    }
+}
 // ════════════════════════════════════════════════════════════
 //  OPTIONS 패널 페이지 빌더들
 // ════════════════════════════════════════════════════════════
 
-// ── 공통 액션 정의 (3개 테이블 공유) ─────────────────────────
-static const struct { int id; const char* name; } kCtrlActions[] = {
-    { 4, "UP"            },
-    { 5, "DOWN"          },
-    { 6, "LEFT"          },
-    { 7, "RIGHT"         },
-    { 1, "BTN A  (Y)"    },
-    { 0, "BTN B  (B)"    },
-    { 8, "BTN C  (A)"    },
-    { 9, "BTN D  (X)"    },
-    {10, "BTN E  (L)"    },
-    {11, "BTN F  (R)"    },
-    { 3, "START"         },
-    { 2, "SELECT / COIN" },
+// ── 액션 목록 — 코어가 알려준 정의로 만든다 ─────────────────
+//   ★ libretro 인덱스의 뜻은 게임마다 다르다. 그래서 이름을 코드에 고정하면
+//     반드시 어긋난다(실제로 UI 이름과 인게임 동작이 따로 놀았다).
+//     게임이 실행 중이면 코어 정의로 이름을 만들고, 6버튼 격투는 인덱스가
+//     아니라 "의미"(약손/중손/…)를 행 id 로 쓴다.
+struct CtrlAction {
+    int     id;                 // 행 id (일반 버튼 = libretro 인덱스, 6버튼 격투 = 의미 id)
+    QString name;               // 컨트롤 표에 보이는 이름
+    QString shortName;          // 터보 표 같은 데 쓰는 짧은 이름 ("A", "약손" ...)
+    int     libIdx = -1;        // 실제 libretro 인덱스 (얼굴 버튼일 때)
 };
-static const int kCtrlActionCount = (int)(sizeof(kCtrlActions)/sizeof(kCtrlActions[0]));
 
-// XInput 버튼 bitmask → 표시 이름
+// 얼굴 버튼의 표시 순서: A B C D 다음에 동시 입력 매크로.
+//   libretro 인덱스 순으로 늘어놓으면 A(0) C(1) B(8) D(9) 로 뒤섞여 보인다.
+static int faceRank(int id) {
+    static const int order[] = {0, 8, 1, 9, 10, 11, 12, 13};
+    for (int i = 0; i < 8; ++i) if (order[i] == id) return i;
+    return 100 + id;
+}
+// CPS 2~3버튼 게임에서 얼굴 버튼에 붙이는 이름 (인덱스 0,8,1,9 = A,B,C,D)
+static QString faceLetter(int id) {
+    switch (id) {
+    case 0: return QStringLiteral("A");
+    case 8: return QStringLiteral("B");
+    case 1: return QStringLiteral("C");
+    case 9: return QStringLiteral("D");
+    default: return QString();
+    }
+}
+static bool isChordName(const QString& n) {
+    return n.contains(QLatin1String("Buttons"), Qt::CaseInsensitive) || n.contains(QLatin1String("3x"));
+}
+
+// 6버튼 격투의 인덱스 찾기.
+//   코어가 "Weak Punch" 같은 이름을 보내면 그대로 쓴다. 이름이 다르게 오는 기판(CPS 체인저, CPS3,
+//   일부 클론)이라도 6버튼 격투로 분류된 롬이고 여섯 인덱스가 다 있으면 FBNeo 의 표준 배치를 쓴다:
+//   약손=1 중손=9 강손=10 / 약발=0 중발=8 강발=11.
+static CoreSixButtons resolveSixButtons(const QHash<int,QString>& d, bool romIsSix) {
+    CoreSixButtons cb = parseCoreSixButtons(d);
+    if (cb.valid || !romIsSix) return cb;
+    for (int id : {0, 1, 8, 9, 10, 11})
+        if (!d.contains(id)) return cb;
+    cb.lp = 1; cb.mp = 9; cb.hp = 10; cb.lk = 0; cb.mk = 8; cb.hk = 11;
+    cb.valid = true;
+    return cb;
+}
+
+// 게임 실행 전(메뉴)에 쓰는 표.
+//   이때는 코어 정의가 없어 버튼의 진짜 뜻을 알 수 없다. 그래서 의미(약손 등)로
+//   보여주지 않고 인덱스 그대로 보여준다 — 저장된 키보드 설정도 그대로 보인다.
+//   게임을 실행하면 코어 정의로 실제 이름이 채워진다.
+static QVector<CtrlAction> fallbackActions(bool /*six*/, bool en) {
+    QVector<CtrlAction> v;
+    v << CtrlAction{4, "UP", "UP"} << CtrlAction{5, "DOWN", "DOWN"}
+      << CtrlAction{6, "LEFT", "LEFT"} << CtrlAction{7, "RIGHT", "RIGHT"}
+      << CtrlAction{0, "BTN 1", "A", 0} << CtrlAction{8, "BTN 2", "B", 8}
+      << CtrlAction{1, "BTN 3", "C", 1} << CtrlAction{9, "BTN 4", "D", 9}
+      << CtrlAction{10, "BTN 5", "CD", 10} << CtrlAction{11, "BTN 6", "AB", 11}
+      << CtrlAction{3, "START", "START"}
+      << CtrlAction{2, en ? "SELECT / COIN" : "SELECT / 코인", "SELECT"};
+    return v;
+}
+
+// 코어 정의(있으면)로 실제 액션 목록을 만든다
+//   cps: CPS 기판 게임이면 true. CPS 는 두 버튼 동시 입력 매크로(CD, AB, 3연타)가 먹지 않으므로
+//        표에서 뺀다. 6버튼 격투는 의미(약손…)로, 2~3버튼 게임은 그냥 A B C 로 보여 준다.
+static QVector<CtrlAction> buildCtrlActions(PadLayout lay, bool en, bool cps) {
+    const QHash<int,QString>& d = gState.inputDesc;
+    const CoreSixButtons cb = resolveSixButtons(d, lay == PadLayout::SixButton);
+    if (d.isEmpty()) return fallbackActions(lay == PadLayout::SixButton, en);
+
+    QVector<CtrlAction> v;
+    v << CtrlAction{4, "UP", "UP"} << CtrlAction{5, "DOWN", "DOWN"}
+      << CtrlAction{6, "LEFT", "LEFT"} << CtrlAction{7, "RIGHT", "RIGHT"};
+
+    QSet<int> used = {2, 3, 4, 5, 6, 7};
+    if (cb.valid) {
+        // 6버튼 격투 — 약손 중손 강손 / 약발 중발 강발 순서로 의미를 보여 주고 실제 인덱스를 괄호로 붙인다
+        const int idx[SEM_COUNT] = {cb.lp, cb.mp, cb.hp, cb.lk, cb.mk, cb.hk};
+        for (int i = 0; i < SEM_COUNT; ++i) {
+            v << CtrlAction{padSemId(i),
+                            QString("%1  (%2)").arg(padSemName(i, en)).arg(idx[i]),
+                            en ? padSemName(i, en).section(QLatin1String("  "), 0, 0)      // "LP"
+                               : padSemName(i, en).section(QLatin1String("  "), -1),      // "약손"
+                            idx[i]};
+            used.insert(idx[i]);
+        }
+    }
+    // 나머지 버튼: A B C D 순서로, 그 밖에는 인덱스 순
+    QList<int> ids = d.keys();
+    std::sort(ids.begin(), ids.end(), [](int x, int y) { return faceRank(x) < faceRank(y); });
+    for (int id : ids) {
+        if (used.contains(id) || id >= 16) continue;
+        const QString core = d.value(id);
+        if ((cps || cb.valid) && isChordName(core)) continue;   // CPS·6버튼 격투: 동시 입력 매크로는 뺀다
+        const QString letter = cps ? faceLetter(id) : QString();
+        if (!letter.isEmpty()) {                                // CPS 2~3버튼: 그냥 A B C
+            v << CtrlAction{id, letter, letter, id};
+            continue;
+        }
+        QString shortName = core;
+        shortName.remove(QRegularExpression(QStringLiteral("^Buttons?\\s+")));
+        v << CtrlAction{id, QString("%1  (%2)").arg(core).arg(id), shortName, id};
+    }
+    v << CtrlAction{3, "START", "START"} << CtrlAction{2, en ? "SELECT / COIN" : "SELECT / 코인", "SELECT"};
+    return v;
+}
+
+// 터보를 걸 수 있는 버튼 (libretro 인덱스, 이름). 컨트롤 표와 같은 이름·순서를 쓴다.
+QVector<QPair<int,QString>> MainWindow::turboButtons() const {
+    QVector<QPair<int,QString>> out;
+    const bool cps = gamePlatform(m_loadedGame) == QLatin1String("cps");
+    const QVector<CtrlAction> acts = buildCtrlActions(
+        m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard, isEn(), cps);
+    for (const CtrlAction& a : acts) {
+        if (a.libIdx < 0) continue;
+        // 방향·START·SELECT 는 터보 대상이 아니다. 얼굴 버튼(0,1,8,9,10,11)과 6버튼 격투의 여섯 개만.
+        const int i = a.libIdx;
+        if (i == 0 || i == 1 || i == 8 || i == 9 || i == 10 || i == 11)
+            out.append({i, a.shortName});
+    }
+    return out;
+}
+
+// 버튼 이름은 GamepadManager::buttonName() 하나만 쓴다.
+//   (플랫폼마다 원시 비트 의미가 달라 여기서 따로 표를 두면 반드시 어긋난다)
 static QString xinputBtnName(int bitmask) {
-    switch (bitmask) {
-    case 0x0001:  return "D-Pad Up";
-    case 0x0002:  return "D-Pad Down";
-    case 0x0004:  return "D-Pad Left";
-    case 0x0008:  return "D-Pad Right";
-    case 0x0010:  return "Start";
-    case 0x0020:  return "Back / Select";
-    case 0x0040:  return "L3  (LS Click)";
-    case 0x0080:  return "R3  (RS Click)";
-    case 0x0100:  return "LB  (L1)";
-    case 0x0200:  return "RB  (R1)";
-    case 0x1000:  return "A";
-    case 0x2000:  return "B";
-    case 0x4000:  return "X";
-    case 0x8000:  return "Y";
-    case 0x10000: return "LT  (L2)";
-    case 0x20000: return "RT  (R2)";
-    default:      return QString("Btn 0x%1").arg(bitmask, 0, 16);
-    }
+    return GamepadManager::buttonName(bitmask);
 }
 
-// ── 페이지 0: CONTROLS (키 매핑) ─────────────────────────────
-void MainWindow::buildControlsPage(QWidget* page) {
-    // ★ 전체를 스크롤 영역으로 감싼다 — 키 매핑 표 + 터보 + 저장범위 +
-    //   핫키 표 + 리셋 버튼이 옵션 패널 높이를 넘쳐도 모두 접근 가능하게.
-    //   (이전엔 스크롤이 없어 키 매핑 표가 찌부러져 안 보이던 문제)
-    QVBoxLayout* root = new QVBoxLayout(page);
-    root->setContentsMargins(0, 0, 0, 0);
-    QScrollArea* scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setStyleSheet(
-        "QScrollArea{background:#000410;border:none;}"
-        "QScrollBar:vertical{background:#000022;width:9px;border:none;}"
-        "QScrollBar::handle:vertical{background:#224466;border-radius:4px;min-height:30px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-        "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}");
-    QWidget* inner = new QWidget;
-    inner->setStyleSheet("background:#000410;");
-    QVBoxLayout* v = new QVBoxLayout(inner);
-    v->setContentsMargins(10, 8, 10, 8);
-    v->setSpacing(6);
-    scroll->setWidget(inner);
-    root->addWidget(scroll);
+// ── CONTROLS 셸 페이지 창구 ──────────────────────────────────
+//   표를 그리는 일은 셸 페이지(ShellPageControls)가 하고, 여기는 데이터와 저장만 다룬다.
+//   저장·해석 로직(PadMapping/PadRawBits/ArcadeLayout)은 그대로다.
+void MainWindow::refreshControlsUi() {
+    if (m_menu) m_menu->refreshOpen();
+}
 
-    // 헤더
-    QLabel* title = new QLabel("KEY BINDINGS — PLAYER 1");
-    title->setStyleSheet("color:#aaccff;font-family:'Courier New';"
-                         "font-size:11px;font-weight:bold;border-bottom:1px solid #223366;padding-bottom:4px;");
-    v->addWidget(title);
+QVector<ControlSlot> MainWindow::controlSlots(int dev) {
+    QVector<ControlSlot> out;
+    const QVector<CtrlAction> acts = buildCtrlActions(
+        m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard, isEn(),
+        gamePlatform(m_loadedGame) == QLatin1String("cps"));
 
-    QLabel* hint = new QLabel;
-    trText(hint, "[REMAP] 버튼 클릭 후 키보드 키 또는 게임패드 버튼을 눌러 재설정 / Esc = 취소",
-                 "Click [REMAP], then press a keyboard key or gamepad button / Esc = cancel");
-    hint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-    v->addWidget(hint);
-
-    // ── 공통 테이블 스타일 ──────────────────────────────────
-    const QString tblStyle =
-        "QTableWidget{background:#000410;border:1px solid #223366;"
-        "color:#aaccff;font-family:'Courier New';font-size:10px;gridline-color:#112233;outline:none;}"
-        "QHeaderView::section{background:#001133;color:#6688aa;border:none;"
-        "border-bottom:1px solid #223366;padding:3px;"
-        "font-family:'Courier New';font-size:9px;font-weight:bold;}"
-        "QTableWidget::item{padding:3px 6px;border:none;}"
-        "QTableWidget::item:selected{background:#001a66;color:#ffffff;}"
-        "QScrollBar:vertical{background:#000022;width:8px;border:none;}"
-        "QScrollBar::handle:vertical{background:#224466;border-radius:3px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}";
-    const QString remapBtnStyle =
-        "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-        "padding:2px;font-family:'Courier New';font-size:9px;}"
-        "QPushButton:hover{background:#002255;color:#aaccff;}";
-
-    auto makeTable = [&](QTableWidget*& tbl, const QString& col1) {
-        tbl = new QTableWidget;
-        tbl->setColumnCount(3);
-        tbl->setHorizontalHeaderLabels({"ACTION", col1, ""});
-        tbl->setStyleSheet(tblStyle);
-        tbl->setSelectionBehavior(QAbstractItemView::SelectRows);
-        tbl->setSelectionMode(QAbstractItemView::SingleSelection);
-        tbl->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        tbl->verticalHeader()->setVisible(false);
-        tbl->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        tbl->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
-        tbl->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-        tbl->setColumnWidth(1, 110);
-        tbl->setColumnWidth(2, 68);
-        tbl->verticalHeader()->setDefaultSectionSize(26);
-    };
-
-    // ── 탭 위젯 ─────────────────────────────────────────────
-    QTabWidget* tabs = new QTabWidget;
-    tabs->setStyleSheet(
-        "QTabWidget::pane{background:#000410;border:1px solid #223366;border-top:none;}"
-        "QTabBar::tab{background:#000820;color:#446688;border:1px solid #223366;"
-        "padding:5px 14px;font-family:'Courier New';font-size:9px;"
-        "border-bottom:none;margin-right:2px;}"
-        "QTabBar::tab:selected{background:#001133;color:#aaccff;"
-        "border-bottom:1px solid #001133;}"
-        "QTabBar::tab:hover{background:#001133;color:#8899cc;}");
-
-    // ── Tab 0: KEYBOARD ──────────────────────────────────────
-    {
-        QWidget* kbPage = new QWidget; kbPage->setStyleSheet("background:#000410;");
-        QVBoxLayout* kbV = new QVBoxLayout(kbPage);
-        kbV->setContentsMargins(0, 0, 0, 0); kbV->setSpacing(0);
-        makeTable(m_ctrlTable, "KEY");
-        kbV->addWidget(m_ctrlTable);
-        refreshControlsTable();
-        tabs->addTab(kbPage, "KEYBOARD");
+    // 이 장치의 매핑 (키/버튼 → libretro id)
+    QHash<int,int> mapping;
+    if (dev == 0) {
+        mapping = m_keymap;
+    } else if (dev == 1 && m_gamepad) {
+        // ★ "대상"으로 고른 패드의 표를 보여 준다 (장치마다 번호 체계가 다르다).
+        //   패드가 없으면 공용 표가 아니라 배치 기본값을 미리보기로 보여 준다.
+        mapping = m_gamepad->padPresent(m_remapPad) ? m_padUiMap[m_remapPad]
+                                                    : layoutDefaultMap();
+    } else if (dev == 2 && m_gamepad) {
+        mapping = m_gamepad->getWinMMMapping();
     }
 
-    // ── Tab 1: GAMEPAD (XInput) ──────────────────────────────
-    {
-        QWidget* padPage = new QWidget; padPage->setStyleSheet("background:#000410;");
-        QVBoxLayout* padV = new QVBoxLayout(padPage);
-        padV->setContentsMargins(0, 0, 0, 0); padV->setSpacing(0);
-        makeTable(m_padTable, "BUTTON");
-        padV->addWidget(m_padTable);
-        refreshPadTable();
-        tabs->addTab(padPage, "GAMEPAD  (XInput)");
-    }
+    for (const CtrlAction& a : acts) {
+        int cur = -1;
+        for (auto it = mapping.constBegin(); it != mapping.constEnd(); ++it)
+            if (it.value() == a.id) { cur = it.key(); break; }
 
-    // ── Tab 2: ARCADE STICK (WinMM) ─────────────────────────
-    {
-        QWidget* arcPage = new QWidget; arcPage->setStyleSheet("background:#000410;");
-        QVBoxLayout* arcV = new QVBoxLayout(arcPage);
-        arcV->setContentsMargins(0, 0, 0, 0); arcV->setSpacing(0);
-        makeTable(m_winmmTable, "BUTTON");
-        arcV->addWidget(m_winmmTable);
-        refreshWinMMTable();
-        tabs->addTab(arcPage, "ARCADE STICK  (DirectInput)");
-    }
-
-    // 스크롤 영역 안에서는 스트레치가 무한정 늘리지 못하므로, 모든 키 매핑
-    // 행(액션 12개 × 26px + 헤더 + 탭바)이 항상 보이도록 최소 높이를 준다.
-    tabs->setMinimumHeight(360);
-    v->addWidget(tabs, 1);
-
-    // ── 게임패드 입력 모드 선택 ─────────────────────────────
-    QHBoxLayout* padRow = new QHBoxLayout;
-    QLabel* padLbl = new QLabel("GAMEPAD MODE:");
-    padLbl->setStyleSheet(labelStyle());
-    padRow->addWidget(padLbl);
-    QComboBox* padCombo = new QComboBox;
-    padCombo->setStyleSheet(editStyle());
-    padCombo->addItem("Auto  (XInput → DirectInput)", "auto");
-    padCombo->addItem("XInput  (Xbox / 표준 게임패드)", "xinput");
-    padCombo->addItem("DirectInput / WinMM  (아케이드 스틱)", "winmm");
-    {
-        int idx = padCombo->findData(gSettings.inputMode);
-        if (idx >= 0) padCombo->setCurrentIndex(idx);
-    }
-    connect(padCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-        [this, padCombo](int) {
-            gSettings.inputMode = padCombo->currentData().toString();
-            gSettings.save();
-            log("게임패드 모드: " + gSettings.inputMode);
-        });
-    padRow->addWidget(padCombo, 1);
-    v->addLayout(padRow);
-
-    // ── TURBO BUTTONS 그룹 ───────────────────────────────────
-    {
-        const QString grpStyleCtrl =
-            "QGroupBox{color:#4488cc;border:1px solid #223366;"
-            "border-radius:2px;margin-top:14px;padding:6px;"
-            "font-family:'Courier New';font-size:10px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
-        const QString ckStyleCtrl =
-            "QCheckBox{color:#aaccff;font-family:'Courier New';font-size:10px;}"
-            "QCheckBox::indicator{width:14px;height:14px;}";
-
-        QGroupBox* turboGroup = new QGroupBox("TURBO BUTTONS");
-        turboGroup->setStyleSheet(grpStyleCtrl);
-        QVBoxLayout* turboV = new QVBoxLayout(turboGroup);
-        turboV->setSpacing(4);
-
-        static const struct { int idx; const char* name; } turboMap[] = {
-            {0,"B(Z)"},{8,"A(X)"},{1,"Y(A)"},{9,"X(S)"},{10,"L(D)"},{11,"R(C)"}
-        };
-        QHBoxLayout* turboH1 = new QHBoxLayout;
-        QHBoxLayout* turboH2 = new QHBoxLayout;
-        for (int k = 0; k < 6; ++k) {
-            auto* cb = new QCheckBox(turboMap[k].name);
-            cb->setStyleSheet(ckStyleCtrl);
-            int idx = turboMap[k].idx;
-            cb->setChecked(gState.turboBtns.value(idx, false));
-            connect(cb, &QCheckBox::toggled, this, [idx](bool on){ gState.turboBtns[idx] = on; });
-            (k < 3 ? turboH1 : turboH2)->addWidget(cb);
+        QString bound = QStringLiteral("---");
+        if (cur >= 0) {
+            if (dev == 0)      bound = QKeySequence(cur).toString();
+            else if (dev == 1) bound = xinputBtnName(cur);
+            else               bound = QString("Button %1").arg(cur + 1);   // 1부터 표시
         }
-        turboH1->addStretch(); turboH2->addStretch();
-        turboV->addLayout(turboH1); turboV->addLayout(turboH2);
-
-        QHBoxLayout* periodH = new QHBoxLayout; periodH->setSpacing(6);
-        QLabel* periodLbl = new QLabel; periodLbl->setStyleSheet(labelStyle());
-        trText(periodLbl, "주기(프레임):", "Period (frames):");
-        QSpinBox* periodSpin = new QSpinBox;
-        periodSpin->setStyleSheet(editStyle());
-        periodSpin->setRange(1, 30); periodSpin->setValue(gSettings.turboPeriod);
-        periodSpin->setFixedWidth(70);
-        connect(periodSpin, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [](int v){ gState.turboPeriod = v; });
-        periodH->addWidget(periodLbl); periodH->addWidget(periodSpin); periodH->addStretch();
-        turboV->addLayout(periodH);
-        v->addWidget(turboGroup);
+        out.append(ControlSlot{a.name, bound});
     }
+    return out;
+}
 
-    // ── 연결된 패드 / 플레이어 배정 ─────────────────────────────
-    //   장치마다 버튼 번호가 다르므로 리매핑은 "선택한 패드"에만 적용된다.
-    {
-        const QString grpCss =
-            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
-            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
-        QGroupBox* padGroup = new QGroupBox;
-        trText(padGroup, "연결된 게임패드 / 플레이어 배정",
-                         "Connected Gamepads / Player Assignment");
-        padGroup->setStyleSheet(grpCss);
-        QVBoxLayout* pgV = new QVBoxLayout(padGroup);
+void MainWindow::remapControl(int dev, int slot) {
+    const QVector<CtrlAction> acts = buildCtrlActions(
+        m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard, isEn(),
+        gamePlatform(m_loadedGame) == QLatin1String("cps"));
+    if (slot < 0 || slot >= acts.size()) return;
+    const int     libId = acts[slot].id;
+    const QString act   = acts[slot].name;
 
-        QLabel* padHint = new QLabel;
-        trText(padHint,
-            "패드마다 버튼 번호 체계가 달라 리매핑은 [대상] 으로 고른 패드에만 적용됩니다.\n"
-            "같은 장치를 다시 연결해도 설정이 유지됩니다. (0P = 사용 안 함)",
-            "Pads number their buttons differently, so remapping applies only to the pad\n"
-            "chosen as [target]. Settings persist per device. (Off = unused)");
-        padHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-        pgV->addWidget(padHint);
-
-        m_padAssignBox = new QWidget;
-        m_padAssignBox->setStyleSheet("background:transparent;");
-        m_padAssignLayout = new QVBoxLayout(m_padAssignBox);
-        m_padAssignLayout->setContentsMargins(0, 0, 0, 0);
-        m_padAssignLayout->setSpacing(3);
-        pgV->addWidget(m_padAssignBox);
-        v->addWidget(padGroup);
-    }
-
-    // ── 컨트롤 저장 범위 (전역/기종별/게임별) ───────────────────
-    {
-        const QString grpStyleCtrl =
-            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
-            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
-        QGroupBox* scopeGroup = new QGroupBox;
-        trText(scopeGroup, "저장 범위 (현재 매핑을 어디에 저장할지)",
-                           "Save Scope (where to store the current mapping)");
-        scopeGroup->setStyleSheet(grpStyleCtrl);
-        QVBoxLayout* sgV = new QVBoxLayout(scopeGroup);
-
-        QLabel* scopeHint = new QLabel;
-        trText(scopeHint,
-            "전역=모든 게임 / 기종별=같은 기종 게임 공통 / 게임별=이 게임 전용\n"
-            "적용 우선순위:  게임별 > 기종별 > 전역 > 기본",
-            "Global = all games / Platform = games of the same hardware / Game = this game only\n"
-            "Priority:  Game > Platform > Global > Default");
-        scopeHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-        sgV->addWidget(scopeHint);
-
-        QHBoxLayout* sh = new QHBoxLayout; sh->setSpacing(6);
-        auto* saveGlobalBtn = new QPushButton;
-        auto* savePlatBtn   = new QPushButton;
-        auto* saveGameBtn   = new QPushButton;
-        trText(saveGlobalBtn, "전역 저장",   "Save Global");
-        trText(savePlatBtn,   "기종별 저장", "Save Platform");
-        trText(saveGameBtn,   "게임별 저장", "Save Game");
-        for (auto* b : {saveGlobalBtn, savePlatBtn, saveGameBtn}) {
-            b->setStyleSheet(btnStyle(true)); b->setFixedHeight(26);
+    if (dev == 0) {
+        // 캡처가 끝난 뒤에만 기존 배정을 바꾼다 (취소하면 그대로 둔다)
+        CaptureGuard cg(&m_captureActive);
+        KeyCaptureDialog dlg(act, this);
+        if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
+            for (auto it = m_keymap.begin(); it != m_keymap.end(); )
+                it.value() == libId ? it = m_keymap.erase(it) : ++it;
+            m_keymap.remove(dlg.capturedKey);          // 충돌 제거
+            m_keymap.insert(dlg.capturedKey, libId);
+            autoSaveKeyboard();
+            log(QString("키 재설정: %1 → %2").arg(act, QKeySequence(dlg.capturedKey).toString()));
         }
-        connect(saveGlobalBtn, &QPushButton::clicked, this, [this]{ saveControlsToScope("global"); });
-        connect(savePlatBtn,   &QPushButton::clicked, this, [this]{ saveControlsToScope("plat");   });
-        connect(saveGameBtn,   &QPushButton::clicked, this, [this]{ saveControlsToScope("game");   });
-        sh->addWidget(saveGlobalBtn); sh->addWidget(savePlatBtn); sh->addWidget(saveGameBtn);
-        sgV->addLayout(sh);
-        v->addWidget(scopeGroup);
+    } else if (dev == 1 && m_gamepad) {
+        // ★ 리매핑은 "대상으로 고른 패드"의 프로필에만 적용한다.
+        //   게임용(인덱스로 바뀐) 표가 아니라 "저장용 표"를 편집해야 6버튼의 의미가 보존된다.
+        const QString padName = m_gamepad->padName(m_remapPad);
+        QHash<int,int> map2 = m_padUiMap[m_remapPad].isEmpty()
+                              ? layoutDefaultMap() : m_padUiMap[m_remapPad];
+        for (auto it = map2.begin(); it != map2.end(); )
+            it.value() == libId ? it = map2.erase(it) : ++it;
+
+        m_gamepad->setCapturePad(m_remapPad);          // 그 패드 입력만 캡처
+        CaptureGuard cg(&m_captureActive);
+        GamepadCaptureDialog dlg(act, m_gamepad, false, this);
+        const bool ok = (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0);
+        m_gamepad->setCapturePad(-1);
+        if (ok) {
+            map2.remove(dlg.capturedBtn);              // 충돌 제거
+            map2.insert(dlg.capturedBtn, libId);
+            // 이 패드의 프로필에만 저장한다 (공용 매핑을 덮어쓰면 다른 패드까지 바뀐다).
+            m_padUiMap[m_remapPad] = map2;
+            m_gamepad->setPadMapping(m_remapPad, materializePadMap(map2, m_coreBtns));
+            autoSavePad(m_remapPad);
+            log(QString("게임패드 재설정 [%1]: %2 → %3")
+                .arg(padName.isEmpty() ? QString("PAD") : padName,
+                     act, xinputBtnName(dlg.capturedBtn)));
+        }
+    } else if (dev == 2 && m_gamepad) {
+        QHash<int,int> map2 = m_gamepad->getWinMMMapping();
+        for (auto it = map2.begin(); it != map2.end(); )
+            it.value() == libId ? it = map2.erase(it) : ++it;
+
+        CaptureGuard cg(&m_captureActive);
+        GamepadCaptureDialog dlg(act, m_gamepad, true, this);
+        if (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0) {
+            map2.remove(dlg.capturedBtn);              // 충돌 제거
+            map2.insert(dlg.capturedBtn, libId);
+            m_gamepad->setWinMMMapping(map2);
+            autoSaveStick();
+            log(QString("아케이드 스틱 재설정: %1 → Button %2").arg(act).arg(dlg.capturedBtn + 1));
+        }
     }
+    refreshControlsUi();
+}
 
-    // ── 핫키 설정 ────────────────────────────────────────────
-    {
-        const QString grpStyleCtrl =
-            "QGroupBox{color:#4488cc;border:1px solid #223366;border-radius:2px;"
-            "margin-top:14px;padding:6px;font-family:'Courier New';font-size:10px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
-        QGroupBox* hkGroup = new QGroupBox;
-        trText(hkGroup, "핫키 설정", "Hotkey Settings");
-        hkGroup->setStyleSheet(grpStyleCtrl);
-        QVBoxLayout* hkV = new QVBoxLayout(hkGroup);
-
-        QLabel* hkHint = new QLabel;
-        trText(hkHint,
-            "[REMAP] 클릭 후 원하는 키(조합)를 누르세요. F1~F8(세이브스테이트)은 고정.\n"
-            "잘못되면 [기본값 복원]으로 언제든 되돌릴 수 있습니다.",
-            "Click [REMAP], then press the key (or combo) you want. F1-F8 (save states) are fixed.\n"
-            "Use [Restore Defaults] to undo at any time.");
-        hkHint->setStyleSheet("color:#446688;font-family:'Courier New';font-size:9px;");
-        hkV->addWidget(hkHint);
-
-        m_hotkeyTable = new QTableWidget;
-        m_hotkeyTable->setColumnCount(3);
-        m_hotkeyTable->setHorizontalHeaderLabels({"기능", "현재 키", ""});
-        m_hotkeyTable->setStyleSheet(tblStyle);
-        m_hotkeyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        m_hotkeyTable->setSelectionMode(QAbstractItemView::NoSelection);
-        m_hotkeyTable->verticalHeader()->setVisible(false);
-        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
-        m_hotkeyTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-        m_hotkeyTable->setColumnWidth(1, 110);
-        m_hotkeyTable->setColumnWidth(2, 68);
-        m_hotkeyTable->verticalHeader()->setDefaultSectionSize(26);
-        m_hotkeyTable->setFixedHeight(26 * 11 + 28);   // 행 수에 맞춤
-        hkV->addWidget(m_hotkeyTable);
-        rebuildHotkeyTable();
-
-        QHBoxLayout* hkBtns = new QHBoxLayout; hkBtns->setSpacing(6);
-        auto* hkResetBtn = new QPushButton;
-        auto* hkSaveBtn  = new QPushButton;
-        trText(hkResetBtn, "기본값 복원", "Restore Defaults");
-        trText(hkSaveBtn,  "저장",        "Save");
-        hkResetBtn->setStyleSheet(btnStyle(false)); hkResetBtn->setFixedHeight(26);
-        hkSaveBtn->setStyleSheet(btnStyle(true));   hkSaveBtn->setFixedHeight(26);
-        connect(hkResetBtn, &QPushButton::clicked, this, [this]{
-            gSettings.hotkeyMap.clear();   // 비우면 기본값 사용
-            gSettings.save();
-            rebuildHotkeyTable();
-            log("핫키 기본값으로 복원됨");
-        });
-        connect(hkSaveBtn, &QPushButton::clicked, this, [this]{
-            gSettings.save();
-            log("핫키 설정 저장됨");
-        });
-        hkBtns->addStretch();
-        hkBtns->addWidget(hkResetBtn);
-        hkBtns->addWidget(hkSaveBtn);
-        hkV->addLayout(hkBtns);
-        v->addWidget(hkGroup);
-    }
-
-    // ── 하단 리셋 버튼 ───────────────────────────────────────
-    //  ★ 전역만 지우면 게임별/기종별로 저장해 둔 설정이 그대로 남아 우선 적용되어
-    //    "리셋했는데 그대로"가 된다. 지금 보고 있는 게임의 스코프도 함께 지운다.
-    auto clearScopesFor = [this](QHash<QString, QHash<int,int>>& scoped) {
-        const QString rom = !m_loadedGame.isEmpty() ? m_loadedGame : m_selectedGame;
-        if (rom.isEmpty()) return QString();
-        const QString gk = "game:" + rom;
-        const QString pk = "plat:" + gamePlatform(rom);
-        QStringList removed;
-        if (scoped.remove(gk) > 0) removed << "게임별";
-        if (scoped.remove(pk) > 0) removed << "기종별";
-        return removed.join("+");
-    };
-
-    QPushButton* resetKbBtn = new QPushButton("RESET KEYBOARD");
-    resetKbBtn->setStyleSheet(btnStyle(false)); resetKbBtn->setFixedHeight(26);
-    connect(resetKbBtn, &QPushButton::clicked, this, [this, clearScopesFor]{
-        m_keymap = buildDefaultKeymap();
-        gSettings.keyboardMapping.clear();
-        const QString cleared = clearScopesFor(gSettings.kbScoped);
-        gSettings.save(); refreshControlsTable();
-        log("키보드 매핑 기본값으로 초기화됨"
-            + (cleared.isEmpty() ? QString() : QString(" (%1 설정도 삭제)").arg(cleared)));
-    });
-
-    QPushButton* resetPadBtn = new QPushButton("RESET GAMEPAD");
-    resetPadBtn->setStyleSheet(btnStyle(false)); resetPadBtn->setFixedHeight(26);
-    connect(resetPadBtn, &QPushButton::clicked, this, [this, clearScopesFor]{
-        m_gamepad->resetDefaultMapping();
-        gSettings.xinputMapping.clear();
-        const QString cleared = clearScopesFor(gSettings.xiScoped);
-        gSettings.save(); refreshPadTable();
-        log("게임패드 매핑 기본값으로 초기화됨"
-            + (cleared.isEmpty() ? QString() : QString(" (%1 설정도 삭제)").arg(cleared)));
-    });
-
-    QPushButton* resetArcBtn = new QPushButton("RESET ARCADE");
-    resetArcBtn->setStyleSheet(btnStyle(false)); resetArcBtn->setFixedHeight(26);
-    connect(resetArcBtn, &QPushButton::clicked, this, [this]{
+void MainWindow::resetControlDevice(int dev) {
+    // 기본값으로 되돌린 표를 이 게임 범위에 그대로 저장한다 (자동 저장과 같은 규칙).
+    //   기종별로 저장해 둔 표가 있어도 이 게임은 기본값이 된다.
+    if (dev == 0) {
+        m_keymap = buildDefaultKeymap(sixLayoutNow());
+        autoSaveKeyboard();
+        log("키보드 매핑 기본값으로 초기화됨");
+    } else if (dev == 1 && m_gamepad) {
+        if (m_gamepad->padPresent(m_remapPad)) {
+            m_padUiMap[m_remapPad] = layoutDefaultMap();
+            m_gamepad->setPadMapping(m_remapPad, materializePadMap(m_padUiMap[m_remapPad], m_coreBtns));
+            autoSavePad(m_remapPad);
+            applyPadProfiles();
+        }
+        log("게임패드 매핑 기본값으로 초기화됨");
+    } else if (dev == 2 && m_gamepad) {
         m_gamepad->resetDefaultWinMM();
-        gSettings.winmmMapping.clear();
-        gSettings.save(); refreshWinMMTable();
+        autoSaveStick();
         log("아케이드 스틱(WinMM) 매핑 기본값으로 초기화됨");
-    });
-
-    QHBoxLayout* bh = new QHBoxLayout;
-    bh->addStretch();
-    bh->addWidget(resetKbBtn);
-    bh->addWidget(resetPadBtn);
-    bh->addWidget(resetArcBtn);
-    v->addLayout(bh);
-}
-
-// 컨트롤 테이블 UI 갱신
-void MainWindow::refreshControlsTable() {
-    if (!m_ctrlTable) return;
-
-    m_ctrlTable->setRowCount(kCtrlActionCount);
-    m_ctrlTable->blockSignals(true);
-
-    for (int row = 0; row < kCtrlActionCount; ++row) {
-        int libId = kCtrlActions[row].id;
-
-        // 현재 이 libId에 매핑된 Qt 키 역방향 조회
-        int curKey = 0;
-        for (auto it = m_keymap.constBegin(); it != m_keymap.constEnd(); ++it)
-            if (it.value() == libId) { curKey = it.key(); break; }
-
-        QString keyStr = curKey ? QKeySequence(curKey).toString() : "---";
-
-        // Col 0: Action
-        auto* actItem = new QTableWidgetItem(kCtrlActions[row].name);
-        actItem->setData(Qt::UserRole, libId);
-        actItem->setForeground(QColor("#99ccee"));
-        m_ctrlTable->setItem(row, 0, actItem);
-
-        // Col 1: Key
-        auto* keyItem = new QTableWidgetItem(keyStr);
-        keyItem->setTextAlignment(Qt::AlignCenter);
-        keyItem->setForeground(QColor("#44ffaa"));
-        keyItem->setFont(QFont("Courier New", 10, QFont::Bold));
-        m_ctrlTable->setItem(row, 1, keyItem);
-
-        // Col 2: REMAP 버튼
-        QPushButton* remapBtn = new QPushButton("REMAP");
-        remapBtn->setStyleSheet(
-            "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-            "padding:2px;font-family:'Courier New';font-size:9px;}"
-            "QPushButton:hover{background:#002255;color:#aaccff;}");
-        connect(remapBtn, &QPushButton::clicked, this, [this, row]{
-            if (!m_ctrlTable) return;
-            auto* actItm = m_ctrlTable->item(row, 0);
-            if (!actItm) return;
-            int libId2  = actItm->data(Qt::UserRole).toInt();
-            QString act = actItm->text();
-
-            // 기존 매핑 키 제거
-            for (auto it = m_keymap.begin(); it != m_keymap.end(); ) {
-                if (it.value() == libId2) it = m_keymap.erase(it);
-                else ++it;
-            }
-
-            // 키 캡처 다이얼로그
-            CaptureGuard cg(&m_captureActive);
-            KeyCaptureDialog dlg(act, this);
-            if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
-                // 충돌 제거
-                m_keymap.remove(dlg.capturedKey);
-                m_keymap.insert(dlg.capturedKey, libId2);
-                // 설정 저장
-                gSettings.keyboardMapping = m_keymap;
-                gSettings.save();
-                refreshControlsTable();
-                log(QString("키 재설정: %1 → %2")
-                    .arg(act)
-                    .arg(QKeySequence(dlg.capturedKey).toString()));
-            } else {
-                refreshControlsTable(); // 복원
-            }
-        });
-        m_ctrlTable->setCellWidget(row, 2, remapBtn);
     }
-    m_ctrlTable->blockSignals(false);
+    refreshControlsUi();
 }
 
-// 게임패드(XInput) 테이블 갱신
-void MainWindow::refreshPadTable() {
-    if (!m_padTable) return;
-
-    const QString remapStyle =
-        "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-        "padding:2px;font-family:'Courier New';font-size:9px;}"
-        "QPushButton:hover{background:#002255;color:#aaccff;}";
-
-    // ★ "대상"으로 고른 패드의 매핑을 보여준다 (장치마다 다르므로)
-    QHash<int,int> mapping = m_gamepad->padPresent(m_remapPad)
-                             ? m_gamepad->padMapping(m_remapPad)
-                             : m_gamepad->getXInputMapping();
-
-    m_padTable->setRowCount(kCtrlActionCount);
-    m_padTable->blockSignals(true);
-
-    for (int row = 0; row < kCtrlActionCount; ++row) {
-        int libId = kCtrlActions[row].id;
-
-        // 역방향 조회: libId에 매핑된 버튼 bitmask
-        int curBtn = -1;
-        for (auto it = mapping.constBegin(); it != mapping.constEnd(); ++it)
-            if (it.value() == libId) { curBtn = it.key(); break; }
-
-        QString btnStr = (curBtn >= 0) ? xinputBtnName(curBtn) : "---";
-
-        auto* actItem = new QTableWidgetItem(kCtrlActions[row].name);
-        actItem->setData(Qt::UserRole, libId);
-        actItem->setForeground(QColor("#99ccee"));
-        m_padTable->setItem(row, 0, actItem);
-
-        auto* btnItem = new QTableWidgetItem(btnStr);
-        btnItem->setTextAlignment(Qt::AlignCenter);
-        btnItem->setForeground(QColor("#ffcc44"));
-        btnItem->setFont(QFont("Courier New", 10, QFont::Bold));
-        m_padTable->setItem(row, 1, btnItem);
-
-        QPushButton* remapBtn = new QPushButton("REMAP");
-        remapBtn->setStyleSheet(remapStyle);
-        connect(remapBtn, &QPushButton::clicked, this, [this, row] {
-            if (!m_padTable) return;
-            auto* actItm = m_padTable->item(row, 0);
-            if (!actItm) return;
-            int libId2  = actItm->data(Qt::UserRole).toInt();
-            QString act = actItm->text();
-
-            // ★ 리매핑은 "대상으로 고른 패드"의 프로필에만 적용한다.
-            //   장치마다 버튼 번호가 달라 공용 매핑으로는 맞출 수 없다.
-            const QString padName = m_gamepad->padName(m_remapPad);
-            QHash<int,int> map2 = m_gamepad->padMapping(m_remapPad);
-            // 기존 매핑 제거
-            for (auto it = map2.begin(); it != map2.end(); )
-                it.value() == libId2 ? it = map2.erase(it) : ++it;
-
-            m_gamepad->setCapturePad(m_remapPad);   // 그 패드 입력만 캡처
-            CaptureGuard cg(&m_captureActive);
-            GamepadCaptureDialog dlg(act, m_gamepad, false, this);
-            const bool ok = (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0);
-            m_gamepad->setCapturePad(-1);
-            if (ok) {
-                map2.remove(dlg.capturedBtn);  // 충돌 제거
-                map2.insert(dlg.capturedBtn, libId2);
-                // ★ 이 패드의 프로필에만 저장한다.
-                //   예전에는 공용 매핑(gSettings.xinputMapping)까지 같이 덮어써서,
-                //   한 패드를 리매핑하면 프로필이 없는 다른 패드(스팀덱 내장 등)의
-                //   설정까지 통째로 바뀌어 버렸다.
-                m_gamepad->setPadMapping(m_remapPad, map2);
-                if (!padName.isEmpty()) gSettings.padProfiles[padName] = map2;
-                gSettings.save();
-                refreshPadTable();
-                log(QString("게임패드 재설정 [%1]: %2 → %3")
-                    .arg(padName.isEmpty() ? QString("PAD") : padName,
-                         act, xinputBtnName(dlg.capturedBtn)));
-            } else {
-                refreshPadTable();
-            }
-        });
-        m_padTable->setCellWidget(row, 2, remapBtn);
-    }
-    m_padTable->blockSignals(false);
+// "지금 무엇이 적용 중인가" 안내
+QString MainWindow::padSourceText() const {
+    if (!m_gamepad || !m_gamepad->padPresent(m_remapPad))
+        return isEn() ? "NO PAD CONNECTED - SHOWING THE DEFAULT LAYOUT"
+                      : "패드 없음 - 기본 배치 미리보기";
+    const QString dev = m_gamepad->padName(m_remapPad);
+    const QString src = m_padMapSource[m_remapPad];
+    const QString lay = padLayoutLabel(m_gamepad->padLayout(), isEn());
+    return isEn() ? QString("APPLIED: %1 | %2 | %3").arg(dev, src, lay)
+                  : QString("적용 중: %1 | 출처 %2 | 배치 %3").arg(dev, src, lay);
 }
 
-// 아케이드 스틱(WinMM) 테이블 갱신
-void MainWindow::refreshWinMMTable() {
-    if (!m_winmmTable) return;
-
-    const QString remapStyle =
-        "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-        "padding:2px;font-family:'Courier New';font-size:9px;}"
-        "QPushButton:hover{background:#002255;color:#aaccff;}";
-
-    QHash<int,int> mapping = m_gamepad->getWinMMMapping();
-
-    m_winmmTable->setRowCount(kCtrlActionCount);
-    m_winmmTable->blockSignals(true);
-
-    for (int row = 0; row < kCtrlActionCount; ++row) {
-        int libId = kCtrlActions[row].id;
-
-        // 역방향 조회: libId에 매핑된 버튼 0-based 인덱스
-        int curBtn = -1;
-        for (auto it = mapping.constBegin(); it != mapping.constEnd(); ++it)
-            if (it.value() == libId) { curBtn = it.key(); break; }
-
-        QString btnStr = (curBtn >= 0)
-                         ? QString("Button %1").arg(curBtn + 1)  // 1-based 표시
-                         : "---";
-
-        auto* actItem = new QTableWidgetItem(kCtrlActions[row].name);
-        actItem->setData(Qt::UserRole, libId);
-        actItem->setForeground(QColor("#99ccee"));
-        m_winmmTable->setItem(row, 0, actItem);
-
-        auto* btnItem = new QTableWidgetItem(btnStr);
-        btnItem->setTextAlignment(Qt::AlignCenter);
-        btnItem->setForeground(QColor("#ff9944"));
-        btnItem->setFont(QFont("Courier New", 10, QFont::Bold));
-        m_winmmTable->setItem(row, 1, btnItem);
-
-        QPushButton* remapBtn = new QPushButton("REMAP");
-        remapBtn->setStyleSheet(remapStyle);
-        connect(remapBtn, &QPushButton::clicked, this, [this, row] {
-            if (!m_winmmTable) return;
-            auto* actItm = m_winmmTable->item(row, 0);
-            if (!actItm) return;
-            int libId2  = actItm->data(Qt::UserRole).toInt();
-            QString act = actItm->text();
-
-            QHash<int,int> map2 = m_gamepad->getWinMMMapping();
-            // 기존 매핑 제거
-            for (auto it = map2.begin(); it != map2.end(); )
-                it.value() == libId2 ? it = map2.erase(it) : ++it;
-
-            CaptureGuard cg(&m_captureActive);
-            GamepadCaptureDialog dlg(act, m_gamepad, true, this);
-            if (dlg.exec() == QDialog::Accepted && dlg.capturedBtn >= 0) {
-                map2.remove(dlg.capturedBtn);  // 충돌 제거
-                map2.insert(dlg.capturedBtn, libId2);
-                m_gamepad->setWinMMMapping(map2);
-                gSettings.winmmMapping = map2;
-                gSettings.save();
-                refreshWinMMTable();
-                log(QString("아케이드 스틱 재설정: %1 → Button %2")
-                    .arg(act).arg(dlg.capturedBtn + 1));
-            } else {
-                refreshWinMMTable();
-            }
-        });
-        m_winmmTable->setCellWidget(row, 2, remapBtn);
-    }
-    m_winmmTable->blockSignals(false);
-}
 
 // ── 핫키 테이블 갱신 ─────────────────────────────────────────
-void MainWindow::rebuildHotkeyTable() {
-    if (!m_hotkeyTable) return;
-    const QString remapStyle =
-        "QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-        "padding:2px;font-family:'Courier New';font-size:9px;}"
-        "QPushButton:hover{background:#002255;color:#aaccff;}";
 
-    int n = 0; const HotkeyDef* defs = hotkeyDefs(&n);
-    m_hotkeyTable->setRowCount(n);
-    m_hotkeyTable->blockSignals(true);
-
-    // 헤더도 현재 언어로 (retranslateUi 가 이 함수를 다시 호출한다)
-    m_hotkeyTable->setHorizontalHeaderLabels(
-        isEn() ? QStringList{"ACTION", "CURRENT KEY", ""}
-               : QStringList{"기능",   "현재 키",     ""});
-
-    for (int row = 0; row < n; ++row) {
-        const QString action = defs[row].action;
-
-        auto* actItem = new QTableWidgetItem(isEn() ? defs[row].labelEn : defs[row].label);
-        actItem->setForeground(QColor("#99ccee"));
-        m_hotkeyTable->setItem(row, 0, actItem);
-
-        auto* keyItem = new QTableWidgetItem(hotkeyText(hotkeyOf(action)));
-        keyItem->setTextAlignment(Qt::AlignCenter);
-        keyItem->setForeground(QColor("#ffcc44"));
-        keyItem->setFont(QFont("Courier New", 10, QFont::Bold));
-        m_hotkeyTable->setItem(row, 1, keyItem);
-
-        QPushButton* remapBtn = new QPushButton("REMAP");
-        remapBtn->setStyleSheet(remapStyle);
-        connect(remapBtn, &QPushButton::clicked, this, [this, action]{
-            int n2 = 0; const HotkeyDef* d = hotkeyDefs(&n2);
-            QString label = action;
-            for (int i = 0; i < n2; ++i)
-                if (action == d[i].action) { label = isEn() ? d[i].labelEn : d[i].label; break; }
-
-            CaptureGuard cg(&m_captureActive);
-            KeyCaptureDialog dlg(label, this, /*withMods=*/true);
-            if (dlg.exec() == QDialog::Accepted && dlg.capturedKey != 0) {
-                gSettings.hotkeyMap[action] =
-                    hotkeyEncode(dlg.capturedKey, dlg.capturedMods);
-                gSettings.save();
-                rebuildHotkeyTable();
-                log(QString("핫키 재설정: %1 → %2")
-                    .arg(label, hotkeyText(hotkeyOf(action))));
-            }
-        });
-        m_hotkeyTable->setCellWidget(row, 2, remapBtn);
-    }
-    m_hotkeyTable->blockSignals(false);
+// ── 우선순위대로 모드를 골라 오디오에 반영 ───────────────────
+void MainWindow::applyResolvedSoundMode() {
+    if (!m_audio) return;
+    const QString rom  = m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+    const QString key  = gSettings.resolvedSoundMode(rom, gamePlatform(rom));
+    const SoundModeId id = soundModeFromKey(key);
+    if (m_audio->soundMode() == id) return;   // 같은 모드면 상태를 건드리지 않는다
+    m_audio->setSoundMode(id);
+    log(QString("🎚 사운드 모드: %1").arg(soundModeLabel(id, isEn())));
 }
 
-// ── 페이지 1: DIRECTORIES (경로 설정) ────────────────────────
-void MainWindow::buildDirectoriesPage(QWidget* page) {
-    // 스크롤 래퍼
-    QVBoxLayout* root = new QVBoxLayout(page);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto* scroll = new QScrollArea; scroll->setWidgetResizable(true);
-    scroll->setStyleSheet("QScrollArea{background:#000410;border:none;}");
-    auto* inner = new QWidget; inner->setStyleSheet("background:#000410;");
-    QVBoxLayout* v = new QVBoxLayout(inner);
-    v->setContentsMargins(12, 10, 12, 10); v->setSpacing(8);
-
-    auto makeLabel = [](const QString& t) {
-        QLabel* l = new QLabel(t);
-        l->setStyleSheet("color:#6688aa;font-family:'Courier New';font-size:10px;");
-        return l;
-    };
-    auto browseBtn = [](QLineEdit* edit, QWidget* par) {
-        QPushButton* b = new QPushButton("...");
-        b->setFixedWidth(32);
-        b->setStyleSheet("QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;"
-                         "padding:3px;font-size:10px;}"
-                         "QPushButton:hover{background:#002255;color:#aaccff;}");
-        QObject::connect(b, &QPushButton::clicked, par, [edit]{
-            QString d = QFileDialog::getExistingDirectory(nullptr, "폴더 선택", edit->text());
-            if (!d.isEmpty()) edit->setText(d);
-        });
-        return b;
-    };
-    auto makePathRow = [&](QFormLayout* fl, const QString& lbl, QLineEdit*& out) {
-        out = new QLineEdit; out->setStyleSheet(editStyle());
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(4);
-        h->addWidget(out); h->addWidget(browseBtn(out, page));
-        fl->addRow(makeLabel(lbl), h);
-    };
-
-    QGroupBox* pathGroup = new QGroupBox("PATHS");
-    pathGroup->setStyleSheet("QGroupBox{color:#4488cc;border:1px solid #223366;"
-        "border-radius:2px;margin-top:14px;padding:6px;"
-        "font-family:'Courier New';font-size:10px;}"
-        "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}");
-    QFormLayout* pathForm = new QFormLayout(pathGroup);
-    pathForm->setLabelAlignment(Qt::AlignRight); pathForm->setSpacing(6);
-    // ROM Path / Preview Path 만 사용자 설정 가능
-    // 나머지(saves/screenshots/cheats/records)는 프로그램 위치 기준 자동 설정
-    makePathRow(pathForm, "ROM Path",     m_romPathEdit);
-    makePathRow(pathForm, "Preview Path", m_previewPathEdit);
-    v->addWidget(pathGroup);
-
-    // 자동 경로 안내
-    QString base = AppSettings::baseDir();
-    QLabel* autoNote = new QLabel(
-        QString("<span style='color:#446688;font-family:Courier New;font-size:9px;'>"
-                "자동 경로 (변경 불가):<br>"
-                "  Save      → %1/saves/<br>"
-                "  Screenshot→ %1/screenshots/<br>"
-                "  Cheat     → %1/cheats/<br>"
-                "  Record    → %1/recordings/<br>"
-                "  Shader    → %1/shaders/</span>").arg(base));
-    autoNote->setTextFormat(Qt::RichText);
-    autoNote->setWordWrap(true);
-    v->addWidget(autoNote);
-
-    // APPLY 버튼
-    QPushButton* applyBtn = new QPushButton("APPLY & SAVE");
-    applyBtn->setStyleSheet(btnStyle(true)); applyBtn->setFixedHeight(30);
-    connect(applyBtn, &QPushButton::clicked, this, &MainWindow::applySettings);
-    QHBoxLayout* bh = new QHBoxLayout; bh->addStretch(); bh->addWidget(applyBtn);
-    v->addLayout(bh);
-    v->addStretch();
-
-    scroll->setWidget(inner);
-    root->addWidget(scroll);
-    refreshSettingsUi();
+// ════════════════════════════════════════════════════════════
+//  MULTIPLAYER 셸 페이지 창구
+//   화면은 셸 페이지(ShellPageNetplay)가 그리고, 여기는 연결 동작과 상태만 가진다.
+//   상태 문자열·버튼 가능 여부는 m_net 하나에 모아 두고, 바뀔 때마다 refreshNetUi().
+// ════════════════════════════════════════════════════════════
+void MainWindow::refreshNetUi() {
+    if (m_menu) m_menu->refreshOpen();
 }
 
-// ── 페이지 2: VIDEO OPTIONS ──────────────────────────────────
-void MainWindow::buildVideoPage(QWidget* page) {
-    QVBoxLayout* root = new QVBoxLayout(page);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto* scroll = new QScrollArea; scroll->setWidgetResizable(true);
-    scroll->setStyleSheet("QScrollArea{background:#000410;border:none;}");
-    auto* inner = new QWidget; inner->setStyleSheet("background:#000410;");
-    QVBoxLayout* v = new QVBoxLayout(inner);
-    v->setContentsMargins(12, 10, 12, 10); v->setSpacing(8);
-
-    auto makeLabel = [](const QString& t) {
-        QLabel* l = new QLabel(t);
-        l->setStyleSheet("color:#6688aa;font-family:'Courier New';font-size:10px;");
-        return l;
-    };
-    const QString ckStyle = "QCheckBox{color:#aaccff;font-family:'Courier New';font-size:10px;}"
-                            "QCheckBox::indicator{width:14px;height:14px;}";
-    const QString slStyle = "QSlider::groove:horizontal{background:#001133;height:4px;}"
-                            "QSlider::handle:horizontal{background:#4466ff;width:12px;height:12px;margin:-4px 0;border-radius:6px;}"
-                            "QSlider::sub-page:horizontal{background:#2244aa;}";
-
-    QGroupBox* vidGroup = new QGroupBox("VIDEO");
-    vidGroup->setStyleSheet("QGroupBox{color:#4488cc;border:1px solid #223366;"
-        "border-radius:2px;margin-top:14px;padding:6px;"
-        "font-family:'Courier New';font-size:10px;}"
-        "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}");
-    QFormLayout* vidForm = new QFormLayout(vidGroup);
-    vidForm->setLabelAlignment(Qt::AlignRight); vidForm->setSpacing(6);
-
-    m_scaleCombo = new QComboBox; m_scaleCombo->setStyleSheet(editStyle());
-    m_scaleCombo->addItems({"Fill", "Fit", "1:1"});
-    vidForm->addRow(makeLabel("Scale Mode"), m_scaleCombo);
-
-    m_smoothCheck = new QCheckBox("Smooth Filter"); m_smoothCheck->setStyleSheet(ckStyle);
-    vidForm->addRow(makeLabel(""), m_smoothCheck);
-
-    m_crtCheck = new QCheckBox("CRT Scanline Effect"); m_crtCheck->setStyleSheet(ckStyle);
-    vidForm->addRow(makeLabel(""), m_crtCheck);
-
-    QHBoxLayout* crtH = new QHBoxLayout;
-    m_crtSlider = new QSlider(Qt::Horizontal);
-    m_crtSlider->setRange(0, 100); m_crtSlider->setValue(40);
-    m_crtSlider->setStyleSheet(slStyle);
-    QLabel* crtValLbl = new QLabel("40%");
-    crtValLbl->setStyleSheet(labelStyle()); crtValLbl->setFixedWidth(36);
-    connect(m_crtSlider, &QSlider::valueChanged, this, [crtValLbl](int v){
-        crtValLbl->setText(QString("%1%").arg(v));
-    });
-    crtH->addWidget(m_crtSlider); crtH->addWidget(crtValLbl);
-    vidForm->addRow(makeLabel("CRT Intensity"), crtH);
-
-    // ── 플래시 감소 (눈 보호) ────────────────────────────────
-    m_flashGuardCheck = new QCheckBox;
-    trText(m_flashGuardCheck, "플래시 감소 (눈 보호)", "Flash Reduction (eye care)");
-    m_flashGuardCheck->setStyleSheet(ckStyle);
-    trTip(m_flashGuardCheck,
-        "화면 전체가 하얗게 번쩍이는 프레임을 감지해, 그 프레임만 최근\n"
-        "화면 밝기에 맞춰 눌러줍니다. 번쩍임 프레임에만 적용되므로 잔상이\n"
-        "없고, 색을 반전하지 않아 캐릭터 색이 그대로 유지됩니다.",
-        "Detects frames where the whole screen flashes white and pulls just\n"
-        "those frames down to the recent screen brightness. Applied only to the\n"
-        "flash frame (no trailing), and colors are never inverted.");
-    vidForm->addRow(makeLabel(""), m_flashGuardCheck);
-
-    QHBoxLayout* flashH = new QHBoxLayout;
-    m_flashSlider = new QSlider(Qt::Horizontal);
-    m_flashSlider->setRange(0, 100);
-    m_flashSlider->setValue(gSettings.videoFlashStrength);
-    m_flashSlider->setStyleSheet(slStyle);
-    QLabel* flashValLbl = new QLabel(QString("%1%").arg(gSettings.videoFlashStrength));
-    flashValLbl->setStyleSheet(labelStyle()); flashValLbl->setFixedWidth(36);
-    connect(m_flashSlider, &QSlider::valueChanged, this, [flashValLbl](int v){
-        flashValLbl->setText(QString("%1%").arg(v));
-    });
-    // 실시간 반영: 슬라이더/체크 변경 즉시 캔버스에 적용
-    connect(m_flashSlider, &QSlider::valueChanged, this, [this](int v){
-        if (m_canvas) m_canvas->setFlashGuard(
-            m_flashGuardCheck && m_flashGuardCheck->isChecked(), v / 100.0f);
-    });
-    connect(m_flashGuardCheck, &QCheckBox::toggled, this, [this](bool on){
-        if (m_canvas) m_canvas->setFlashGuard(
-            on, (m_flashSlider ? m_flashSlider->value() : 80) / 100.0f);
-    });
-    flashH->addWidget(m_flashSlider); flashH->addWidget(flashValLbl);
-    QLabel* flashStrLbl = makeLabel("플래시 강도");
-    trText(flashStrLbl, "플래시 강도", "Flash Strength");
-    trTip(m_flashSlider,
-        "번쩍임을 주변 밝기에 얼마나 맞출지.\n"
-        "100% = 주변 밝기와 완전히 동일 → 번쩍임이 완전히 사라집니다.\n"
-        "낮출수록 번쩍임이 일부 남습니다.",
-        "How closely a flash is matched to the surrounding brightness.\n"
-        "100% = exactly the surrounding brightness → the flash disappears.\n"
-        "Lower values leave part of the flash visible.");
-    vidForm->addRow(flashStrLbl, flashH);
-
-    m_vsyncCheck = new QCheckBox("VSync"); m_vsyncCheck->setStyleSheet(ckStyle);
-#ifdef Q_OS_LINUX
-    // Linux(GameScope): swapInterval은 항상 0 고정 → VSync 옵션 비활성화
-    m_vsyncCheck->setEnabled(false);
-    trTip(m_vsyncCheck,
-        "Steam Deck(GameScope)에서는 컴포지터가 VSync를 처리합니다.\n이 설정은 Linux에서 비활성화됩니다.",
-        "On Steam Deck (GameScope) the compositor handles VSync.\nThis setting is disabled on Linux.");
-#endif
-    vidForm->addRow(makeLabel(""), m_vsyncCheck);
-
-    // GLSL 셰이더
-    QHBoxLayout* shaderH = new QHBoxLayout; shaderH->setSpacing(4);
-    QLineEdit* shaderEdit = new QLineEdit;
-    shaderEdit->setStyleSheet(editStyle());
-    trPlaceholder(shaderEdit, "(기본 CRT 셰이더)", "(built-in CRT shader)");
-    shaderEdit->setReadOnly(true);
-    if (!gSettings.videoShaderPath.isEmpty()) shaderEdit->setText(gSettings.videoShaderPath);
-    QPushButton* shaderLoadBtn = new QPushButton("📂");
-    shaderLoadBtn->setFixedWidth(32);
-    shaderLoadBtn->setStyleSheet("QPushButton{background:#001133;color:#6688aa;border:1px solid #334488;padding:3px;}"
-                                 "QPushButton:hover{background:#002255;color:#aaccff;}");
-    QPushButton* shaderClearBtn = new QPushButton("✖");
-    shaderClearBtn->setFixedWidth(28); shaderClearBtn->setStyleSheet(shaderLoadBtn->styleSheet());
-    connect(shaderLoadBtn, &QPushButton::clicked, this, [this, shaderEdit]{
-        QString p = QFileDialog::getOpenFileName(this, "GLSL 셰이더 선택",
-            gSettings.videoShaderPath.isEmpty() ? QCoreApplication::applicationDirPath() : gSettings.videoShaderPath,
-            "GLSL Shader (*.glsl *.vert *.frag);;All Files (*)");
-        if (!p.isEmpty()) {
-            shaderEdit->setText(p);
-            gSettings.videoShaderPath = p;
-            bool ok = m_canvas ? m_canvas->setShaderPath(p) : true;
-            if (ok) {
-                log("✔ 셰이더 로드: " + QFileInfo(p).fileName());
-            } else {
-                // 컴파일/링크 실패 — 에러를 눈에 띄게 표시
-                shaderEdit->setText("(로드 실패 — 로그 확인)");
-                gSettings.videoShaderPath.clear();
-                QMessageBox::warning(this, "셰이더 오류",
-                    "셰이더 컴파일/링크에 실패했습니다.\n\n파일: " + QFileInfo(p).fileName() +
-                    "\n\n아래 로그 패널에서 오류 내용을 확인하세요.");
-            }
-            gSettings.save();
-        }
-    });
-    connect(shaderClearBtn, &QPushButton::clicked, this, [this, shaderEdit]{
-        shaderEdit->clear(); gSettings.videoShaderPath.clear();
-        if (m_canvas) m_canvas->setShaderPath({}); gSettings.save();
-        log("셰이더 해제");
-    });
-    shaderH->addWidget(shaderEdit, 1); shaderH->addWidget(shaderLoadBtn); shaderH->addWidget(shaderClearBtn);
-    vidForm->addRow(makeLabel("GLSL Shader"), shaderH);
-
-    m_frameskipSpin = new QSpinBox; m_frameskipSpin->setStyleSheet(editStyle());
-    m_frameskipSpin->setRange(-1, 5); m_frameskipSpin->setSpecialValueText("AUTO(-1)");
-    vidForm->addRow(makeLabel("Frameskip"), m_frameskipSpin);
-    v->addWidget(vidGroup);
-
-    QPushButton* applyBtn = new QPushButton("✔  APPLY & SAVE");
-    applyBtn->setStyleSheet(btnStyle(true)); applyBtn->setFixedHeight(30);
-    connect(applyBtn, &QPushButton::clicked, this, &MainWindow::applySettings);
-    QHBoxLayout* bh = new QHBoxLayout; bh->addStretch(); bh->addWidget(applyBtn);
-    v->addLayout(bh); v->addStretch();
-
-    scroll->setWidget(inner); root->addWidget(scroll);
+NetState MainWindow::netState() const {
+    NetState s = m_net;
+    s.port  = gSettings.netplayPort;
+    s.delay = m_netDelay;
+    s.relayBuiltin = gSettings.netplayRelayUrl.isEmpty() ||
+                     gSettings.netplayRelayUrl == AppSettings::builtinRelayUrl();
+    return s;
 }
 
-// ── 페이지 3: AUDIO OPTIONS ──────────────────────────────────
-void MainWindow::buildAudioPage(QWidget* page) {
-    QVBoxLayout* root = new QVBoxLayout(page);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto* scroll = new QScrollArea; scroll->setWidgetResizable(true);
-    scroll->setStyleSheet("QScrollArea{background:#000410;border:none;}");
-    auto* inner = new QWidget; inner->setStyleSheet("background:#000410;");
-    QVBoxLayout* v = new QVBoxLayout(inner);
-    v->setContentsMargins(12, 10, 12, 10); v->setSpacing(8);
-
-    const QString grpStyle = "QGroupBox{color:#4488cc;border:1px solid #223366;"
-        "border-radius:2px;margin-top:14px;padding:6px;"
-        "font-family:'Courier New';font-size:10px;}"
-        "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}";
-    auto makeLabel = [](const QString& t) {
-        QLabel* l = new QLabel(t);
-        l->setStyleSheet("color:#6688aa;font-family:'Courier New';font-size:10px;");
-        return l;
-    };
-    const QString slStyle = "QSlider::groove:horizontal{background:#001133;height:4px;}"
-                            "QSlider::handle:horizontal{background:#4466ff;width:12px;height:12px;margin:-4px 0;border-radius:6px;}"
-                            "QSlider::sub-page:horizontal{background:#2244aa;}";
-
-    // AUDIO 그룹
-    QGroupBox* audGroup = new QGroupBox("AUDIO"); audGroup->setStyleSheet(grpStyle);
-    QFormLayout* audForm = new QFormLayout(audGroup);
-    audForm->setLabelAlignment(Qt::AlignRight); audForm->setSpacing(6);
-
-    QHBoxLayout* volH = new QHBoxLayout;
-    m_volumeSlider = new QSlider(Qt::Horizontal);
-    m_volumeSlider->setRange(0, 100); m_volumeSlider->setValue(100);
-    m_volumeSlider->setStyleSheet(slStyle);
-    m_volumeLabel = new QLabel("100%");
-    m_volumeLabel->setStyleSheet(labelStyle()); m_volumeLabel->setFixedWidth(36);
-    connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int v){
-        m_volumeLabel->setText(QString("%1%").arg(v));
-        if (m_audio) m_audio->setVolume(v / 100.0);
-    });
-    volH->addWidget(m_volumeSlider); volH->addWidget(m_volumeLabel);
-    audForm->addRow(makeLabel("Volume"), volH);
-
-    m_sampleRateCombo = new QComboBox; m_sampleRateCombo->setStyleSheet(editStyle());
-    m_sampleRateCombo->addItems({"22050", "44100", "48000"});
-    m_sampleRateCombo->setCurrentText("48000");
-    audForm->addRow(makeLabel("Sample Rate"), m_sampleRateCombo);
-
-    m_bufferMsSpin = new QSpinBox; m_bufferMsSpin->setStyleSheet(editStyle());
-    m_bufferMsSpin->setRange(16, 512); m_bufferMsSpin->setSingleStep(16);
-    m_bufferMsSpin->setSuffix(" ms");
-    audForm->addRow(makeLabel("Buffer"), m_bufferMsSpin);
-    v->addWidget(audGroup);
-
-    // APPLY / RESET 버튼
-    QHBoxLayout* btnH = new QHBoxLayout;
-    QPushButton* resetBtn = new QPushButton("↺  RESET DEFAULT"); resetBtn->setStyleSheet(btnStyle(false));
-    QPushButton* applyBtn = new QPushButton("✔  APPLY & SAVE");  applyBtn->setStyleSheet(btnStyle(true));
-    connect(applyBtn, &QPushButton::clicked, this, &MainWindow::applySettings);
-    connect(resetBtn, &QPushButton::clicked, this, [this]{
-        QString base = AppSettings::baseDir();
-        gSettings.romPath = base+"/roms"; gSettings.previewPath = base+"/previews";
-        gSettings.screenshotPath = base+"/screenshots"; gSettings.savePath = base+"/saves";
-        gSettings.audioVolume = 100; gSettings.audioSampleRate = 48000;
-        gSettings.audioBufferMs = 80;  gSettings.videoScaleMode = "Fit";
-        gSettings.videoSmooth = false; gSettings.videoCrtMode = false;
-        gSettings.videoCrtIntensity = 0.4; gSettings.videoVsync = true;
-        gSettings.videoFrameskip = 0; gSettings.region = "USA";
-        gSettings.netplayPort = 7845;
-        refreshSettingsUi(); log("설정이 기본값으로 초기화됨");
-    });
-    btnH->addStretch(); btnH->addWidget(resetBtn); btnH->addWidget(applyBtn);
-    v->addLayout(btnH); v->addStretch();
-
-    scroll->setWidget(inner); root->addWidget(scroll);
-    refreshSettingsUi();
+// 릴레이 주소는 계정 ID 를 포함하므로 화면에 실제 값을 절대 보여 주지 않는다.
+//   비워서 저장하면 내장 서버로 복귀한다.
+void MainWindow::netSetRelay(const QString& typed) {
+    const QString t = typed.trimmed();
+    gSettings.netplayRelayUrl = t.isEmpty() ? AppSettings::builtinRelayUrl() : t;
+    gSettings.save();
 }
 
-// ── 페이지 4: MACHINE SETTINGS (DIP 스위치) ──────────────────
-void MainWindow::buildMachinePage(QWidget* page) {
-    QVBoxLayout* vRoot = new QVBoxLayout(page);
-    vRoot->setContentsMargins(0, 0, 0, 0);
-    vRoot->setSpacing(0);
-
-    // ── Region 선택 (상단 고정) ──────────────────────────────
-    auto* regionBar = new QWidget;
-    regionBar->setStyleSheet("background:#000820;border-bottom:1px solid #223366;");
-    regionBar->setFixedHeight(38);
-    auto* rbH = new QHBoxLayout(regionBar);
-    rbH->setContentsMargins(14, 4, 14, 4); rbH->setSpacing(10);
-    auto* rbLabel = new QLabel("Region");
-    rbLabel->setStyleSheet("color:#6688aa;font-family:'Courier New';font-size:10px;");
-    m_regionCombo = new QComboBox; m_regionCombo->setStyleSheet(editStyle());
-    m_regionCombo->addItems({"USA", "JPN", "EUR", "ASIA"});
-    auto* rbApply = new QPushButton("APPLY"); rbApply->setStyleSheet(btnStyle(true));
-    rbApply->setFixedWidth(70);
-    connect(rbApply, &QPushButton::clicked, this, [this]{
-        applySettings();
-        log("Region: " + gSettings.region);
-    });
-    rbH->addWidget(rbLabel);
-    rbH->addWidget(m_regionCombo, 1);
-    rbH->addWidget(rbApply);
-    vRoot->addWidget(regionBar);
-
-    m_machineScroll = new QScrollArea;
-    m_machineScroll->setWidgetResizable(true);
-    m_machineScroll->setStyleSheet(
-        "QScrollArea{background:#000410;border:none;}"
-        "QScrollBar:vertical{background:#000022;width:8px;border:none;}"
-        "QScrollBar::handle:vertical{background:#224466;min-height:20px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
-
-    m_machineContent = new QWidget;
-    m_machineContent->setStyleSheet("background:#000410;");
-    auto* ph = new QVBoxLayout(m_machineContent);
-    ph->setContentsMargins(16, 12, 16, 12);
-    auto* lbl = new QLabel;
-    trText(lbl, "게임을 실행하면 DIP 스위치가 표시됩니다",
-                "DIP switches appear once a game is running");
-    lbl->setStyleSheet("color:#446688;font-family:'Courier New';font-size:10px;");
-    ph->addWidget(lbl); ph->addStretch();
-
-    m_machineScroll->setWidget(m_machineContent);
-    vRoot->addWidget(m_machineScroll);
+void MainWindow::netCopyRoomCode() {
+    if (!m_net.roomCode.isEmpty()) QApplication::clipboard()->setText(m_net.roomCode);
 }
 
-// ── 페이지 5: SHOTS FACTORY ──────────────────────────────────
-void MainWindow::buildShotsPage(QWidget* page) {
-    QVBoxLayout* v = new QVBoxLayout(page);
-    v->setContentsMargins(16, 16, 16, 16);
-    v->setSpacing(12);
-
-    QLabel* title = new QLabel("SHOTS FACTORY");
-    title->setStyleSheet("color:#aaccff;font-family:'Courier New';"
-                         "font-size:13px;font-weight:bold;letter-spacing:2px;");
-    v->addWidget(title);
-
-    auto* line = new QFrame; line->setFrameShape(QFrame::HLine);
-    line->setStyleSheet("color:#223366;"); v->addWidget(line);
-
-    auto groupStyle = []{
-        return QString(
-            "QGroupBox{color:#4488cc;border:1px solid #223366;"
-            "border-radius:2px;margin-top:14px;padding:6px;"
-            "font-family:'Courier New';font-size:10px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 6px;}");
-    };
-    auto hintStyle = []{ return QString("color:#446688;font-family:'Courier New';font-size:9px;"); };
-
-    // ── 스크린샷 ──────────────────────────────────────────
-    QGroupBox* shotGroup = new QGroupBox("SCREENSHOT");
-    shotGroup->setStyleSheet(groupStyle());
-    QVBoxLayout* sgV = new QVBoxLayout(shotGroup); sgV->setSpacing(6);
-    QLabel* shotHint = new QLabel;
-    trText(shotHint, "F12 — screenshots/{rom}_{timestamp}.png 저장",
-                     "F12 — saves to screenshots/{rom}_{timestamp}.png");
-    shotHint->setStyleSheet(hintStyle()); shotHint->setWordWrap(true);
-    sgV->addWidget(shotHint);
-    QPushButton* shotBtn = new QPushButton("📷  TAKE SCREENSHOT  (F12)");
-    shotBtn->setStyleSheet(btnStyle(false)); shotBtn->setFixedHeight(34);
-    connect(shotBtn, &QPushButton::clicked, this, &MainWindow::takeScreenshot);
-    sgV->addWidget(shotBtn);
-
-    QLabel* prevShotHint = new QLabel;
-    trText(prevShotHint, "Ctrl+F12 — 현재 프레임을 previews/{rom}.png 로 저장 (기존 덮어씌움)",
-                         "Ctrl+F12 — saves current frame to previews/{rom}.png (overwrites)");
-    prevShotHint->setStyleSheet(hintStyle()); prevShotHint->setWordWrap(true);
-    sgV->addWidget(prevShotHint);
-    QPushButton* prevShotBtn = new QPushButton("🖼  SAVE AS PREVIEW IMAGE  (Ctrl+F12)");
-    prevShotBtn->setStyleSheet(btnStyle(true)); prevShotBtn->setFixedHeight(34);
-    connect(prevShotBtn, &QPushButton::clicked, this, &MainWindow::savePreviewShot);
-    sgV->addWidget(prevShotBtn);
-    v->addWidget(shotGroup);
-
-    // ── 녹화 ─────────────────────────────────────────────
-    QGroupBox* recGroup = new QGroupBox("VIDEO RECORD");
-    recGroup->setStyleSheet(groupStyle());
-    QVBoxLayout* rgV = new QVBoxLayout(recGroup); rgV->setSpacing(6);
-    QLabel* recHint = new QLabel;
-    trText(recHint, "F9 — recordings/{rom}_{timestamp}.mp4 저장",
-                    "F9 — saves to recordings/{rom}_{timestamp}.mp4");
-    recHint->setStyleSheet(hintStyle()); recHint->setWordWrap(true);
-    rgV->addWidget(recHint);
-    QPushButton* recBtn = new QPushButton("⏺  START / STOP RECORDING  (F9)");
-    recBtn->setStyleSheet(btnStyle(false)); recBtn->setFixedHeight(34);
-    connect(recBtn, &QPushButton::clicked, this, &MainWindow::toggleRecording);
-    rgV->addWidget(recBtn);
-
-    QLabel* prevRecHint = new QLabel;
-    trText(prevRecHint, "Ctrl+F9 — 녹화 시작 → 다시 누르면 previews/{rom}.mp4 로 저장 (기존 덮어씌움)",
-                        "Ctrl+F9 — starts recording; press again to save previews/{rom}.mp4 (overwrites)");
-    prevRecHint->setStyleSheet(hintStyle()); prevRecHint->setWordWrap(true);
-    rgV->addWidget(prevRecHint);
-    QPushButton* prevRecBtn = new QPushButton("🎬  RECORD PREVIEW VIDEO  (Ctrl+F9)");
-    prevRecBtn->setStyleSheet(btnStyle(true)); prevRecBtn->setFixedHeight(34);
-    connect(prevRecBtn, &QPushButton::clicked, this, &MainWindow::togglePreviewRecord);
-    rgV->addWidget(prevRecBtn);
-    v->addWidget(recGroup);
-
-    v->addStretch();
-}
-
-// ── 페이지 6: CHEATS ─────────────────────────────────────────
-void MainWindow::buildCheatsPage(QWidget* page) {
-    QVBoxLayout* vRoot = new QVBoxLayout(page);
-    vRoot->setContentsMargins(12, 10, 12, 10);
-    vRoot->setSpacing(8);
-
-    // ── 상단 버튼 행 ────────────────────────────────────────────
-    QHBoxLayout* topH = new QHBoxLayout; topH->setSpacing(6);
-    QPushButton* loadBtn = new QPushButton;
-    trText(loadBtn, "📂  INI 로드", "📂  LOAD INI");
-    loadBtn->setStyleSheet(btnStyle(true));
-    connect(loadBtn, &QPushButton::clicked, this, [this]{
-        QString path = QFileDialog::getOpenFileName(
-            this, "치트 INI 선택", gSettings.cheatPath, "Cheat INI (*.ini);;All Files (*)");
-        if (!path.isEmpty() && m_cheat) { m_cheat->loadIni(path); refreshCheatList(); }
-    });
-    QPushButton* clearBtn = new QPushButton;
-    trText(clearBtn, "✖  전체 해제", "✖  CLEAR ALL");
-    clearBtn->setStyleSheet(btnStyle(false));
-    connect(clearBtn, &QPushButton::clicked, this, [this]{
-        if (m_cheat) { m_cheat->clearAll(); refreshCheatList(); }
-    });
-    QPushButton* applyAllBtn = new QPushButton;
-    trText(applyAllBtn, "✔  전체 활성화", "✔  ENABLE ALL");
-    applyAllBtn->setStyleSheet(btnStyle(false));
-    connect(applyAllBtn, &QPushButton::clicked, this, [this]{
-        if (!m_cheat) return;
-        for (int i = 0; i < m_cheat->count(); ++i) m_cheat->setActive(i, true);
-        refreshCheatList();
-        log(QString("치트 %1개 전체 활성화").arg(m_cheat->count()));
-    });
-    topH->addWidget(loadBtn); topH->addWidget(clearBtn); topH->addWidget(applyAllBtn); topH->addStretch();
-    vRoot->addLayout(topH);
-
-    // ── 상태 레이블 ─────────────────────────────────────────────
-    m_cheatStatusLabel = new QLabel("게임을 실행하면 치트가 자동 로드됩니다");
-    m_cheatStatusLabel->setStyleSheet("color:#446688;font-family:'Courier New';font-size:10px;");
-    vRoot->addWidget(m_cheatStatusLabel);
-
-    // ── 스크롤 영역 + 행 컨테이너 ─────────────────────────────
-    m_cheatScroll = new QScrollArea;
-    m_cheatScroll->setWidgetResizable(true);
-    m_cheatScroll->setStyleSheet(
-        "QScrollArea{background:rgba(0,0,8,210);border:1px solid #223366;}"
-        "QScrollBar:vertical{background:#000022;width:8px;border:none;}"
-        "QScrollBar::handle:vertical{background:#224466;border-radius:4px;}"
-        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}");
-
-    m_cheatRows = new QWidget;
-    m_cheatRows->setStyleSheet("background:transparent;");
-    QVBoxLayout* rowsLayout = new QVBoxLayout(m_cheatRows);
-    rowsLayout->setContentsMargins(4, 4, 4, 4);
-    rowsLayout->setSpacing(3);
-    rowsLayout->addStretch();   // placeholder, refreshCheatList() 에서 채움
-
-    m_cheatScroll->setWidget(m_cheatRows);
-    vRoot->addWidget(m_cheatScroll, 1);
-
-    // ── 하단 힌트 ───────────────────────────────────────────────
-    QLabel* hint = new QLabel;
-    trText(hint, "게임 선택 시 cheats/{rom}.ini 자동 로드 | 포맷: N \"Label\", 0, ADDR, VAL",
-                 "cheats/{rom}.ini loads automatically on game select | Format: N \"Label\", 0, ADDR, VAL");
-    hint->setStyleSheet("color:#335566;font-family:'Courier New';font-size:9px;");
-    hint->setWordWrap(true);
-    vRoot->addWidget(hint);
-}
-
-// ── 페이지 7: NETPLAY (MULTIPLAYER) — Fightcade Style ───────
-void MainWindow::buildNetplayPage(QWidget* page) {
-    QVBoxLayout* vRoot = new QVBoxLayout(page);
-    vRoot->setContentsMargins(16, 10, 16, 10);
-    vRoot->setSpacing(6);
-
-    auto mkLbl = [](const QString& t, bool bold = false, const QString& col = "") {
-        QLabel* l = new QLabel(t);
-        QString c = col.isEmpty() ? (bold ? "#aaccff" : "#6688aa") : col;
-        l->setStyleSheet(QString("color:%1;font-family:'Courier New';font-size:%2px;%3")
-                         .arg(c).arg(bold ? 12 : 10).arg(bold ? "font-weight:bold;" : ""));
-        return l;
-    };
-    auto mkLine = [&]{
-        QFrame* f = new QFrame; f->setFrameShape(QFrame::HLine);
-        f->setStyleSheet("color:#1a2a4a;"); vRoot->addWidget(f);
-    };
-
-    // ── 상태 · IP 헤더 ──────────────────────────────────────
-    m_npStatusLabel = new QLabel("● OFFLINE");
-    m_npStatusLabel->setStyleSheet(
-        "color:#cc4444;font-family:'Courier New';font-size:11px;font-weight:bold;");
-    m_npStatusLabel->setAlignment(Qt::AlignCenter);
-    vRoot->addWidget(m_npStatusLabel);
-
-    // RTT 레이블 (연결 후 표시)
-    m_npRttLabel = new QLabel("");
-    m_npRttLabel->setStyleSheet(
-        "color:#aaaaff;font-family:'Courier New';font-size:9px;");
-    m_npRttLabel->setAlignment(Qt::AlignCenter);
-    vRoot->addWidget(m_npRttLabel);
-
-    mkLine();
-
-    // ── 공개 IP 표시 ────────────────────────────────────────
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        h->addWidget(mkLbl("YOUR IP :"));
-        m_npPublicIpLabel = new QLabel("조회 중...");
-        m_npPublicIpLabel->setStyleSheet(
-            "color:#44ffaa;font-family:'Courier New';font-size:11px;font-weight:bold;");
-        m_npPublicIpLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        h->addWidget(m_npPublicIpLabel);
-        h->addStretch();
-
-        // 로컬 IP도 숨겨두기 (localIp() 조회용 — localIpLabel은 더 이상 UI에 표시 안 함)
-        m_npLocalIpLabel = new QLabel(gNetplay().localIp());
-        m_npLocalIpLabel->hide();
-        vRoot->addLayout(h);
-    }
-
-    // 공개 IP 비동기 조회
-    {
-        auto* nam = new QNetworkAccessManager(this);
+// 공개 IP 비동기 조회 (화면에 "YOUR IP" 로 보여 준다)
+void MainWindow::fetchPublicIp() {
+            auto* nam = new QNetworkAccessManager(this);
         connect(nam, &QNetworkAccessManager::finished, this,
                 [this, nam](QNetworkReply* reply){
             if (reply->error() == QNetworkReply::NoError) {
                 m_publicIp = reply->readAll().trimmed();
-                if (m_npPublicIpLabel) m_npPublicIpLabel->setText(m_publicIp);
+                m_net.publicIp = m_publicIp;
             } else {
                 m_publicIp = gNetplay().localIp();
-                if (m_npPublicIpLabel) m_npPublicIpLabel->setText(m_publicIp + " (local)");
+                m_net.publicIp = m_publicIp + " (local)";
             }
+            refreshNetUi();
             reply->deleteLater();
             nam->deleteLater();
 
@@ -2536,43 +1546,19 @@ void MainWindow::buildNetplayPage(QWidget* page) {
             // ipify 결과는 STUN 실패 시 폴백용으로만 사용.
         });
         nam->get(QNetworkRequest(QUrl("https://api.ipify.org")));
-    }
+    
+}
 
-    mkLine();
-
-    // ── HOST 섹션 ────────────────────────────────────────────
-    vRoot->addWidget(mkLbl("— HOST —", true));
-
-    // Port + Input Delay + HOST GAME
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        h->addWidget(mkLbl("Port:"));
-        m_npPortSpin = new QSpinBox; m_npPortSpin->setStyleSheet(editStyle());
-        m_npPortSpin->setRange(1024, 65535);
-        m_npPortSpin->setValue(gSettings.netplayPort);
-        m_npPortSpin->setFixedWidth(80); h->addWidget(m_npPortSpin);
-
-        h->addWidget(mkLbl("Delay:"));
-        m_npDelaySpinBox = new QSpinBox; m_npDelaySpinBox->setStyleSheet(editStyle());
-        m_npDelaySpinBox->setRange(0, 8);
-        m_npDelaySpinBox->setValue(gSettings.netplayInputDelay);
-        m_npDelaySpinBox->setSuffix("f");
-        m_npDelaySpinBox->setFixedWidth(60); h->addWidget(m_npDelaySpinBox);
-        h->addWidget(mkLbl("(권장: 해외 2~4f)"));
-
-        m_npHostBtn = new QPushButton("📡  HOST GAME");
-        m_npHostBtn->setStyleSheet(btnStyle(true));
-        connect(m_npHostBtn, &QPushButton::clicked, this, [this]{
-            // 중복 클릭 방지 (룸코드 갱신되어 매칭 깨지는 문제 차단)
+void MainWindow::netHost() {
+                // 중복 클릭 방지 (룸코드 갱신되어 매칭 깨지는 문제 차단)
             // 재시도하려면 DISCONNECT 후 다시 HOST GAME.
-            m_npHostBtn->setEnabled(false);
-            if (m_npConnectBtn) m_npConnectBtn->setEnabled(false);
-            if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
+            m_net.canHost = false;
+            m_net.canJoin = false;
+            m_net.canDisc = true;
             // 버튼 비활성화 시 포커스가 Relay URL 로 튀는 것 방지
-            if (m_npDisconnBtn) m_npDisconnBtn->setFocus(Qt::OtherFocusReason);
 
-            int port  = m_npPortSpin->value();
-            int delay = m_npDelaySpinBox->value();
+            int port  = gSettings.netplayPort;
+            int delay = m_netDelay;
             gSettings.netplayPort       = port;
             gSettings.netplayInputDelay = delay;
             gSettings.save();
@@ -2583,7 +1569,7 @@ void MainWindow::buildNetplayPage(QWidget* page) {
 
             // 2. 토큰 룸 코드 생성 (워커가 토큰→IP:Port 매핑 관리)
             QString code = generateRoomCode();
-            if (m_npRoomCodeLabel) m_npRoomCodeLabel->setText(code);
+            m_net.roomCode = code;
             log("🎫 룸 코드: " + code + "  (상대에게 공유하세요)");
             log(QString("포트 %1 대기 중 (딜레이 %2f)").arg(port).arg(delay));
 
@@ -2628,94 +1614,35 @@ void MainWindow::buildNetplayPage(QWidget* page) {
             m_upnp = new UPnpMapper(this);
             connect(m_upnp, &UPnpMapper::mapped, this, [this, port](int){
                 log(QString("✓ UPnP: %1/UDP 개방 — 직접 IP 접속도 가능").arg(port));
-                if (m_npStatusLabel)
-                    m_npStatusLabel->setText(QString("● 대기 중 (UPnP %1)").arg(port));
+                m_net.status = QString("● 대기 중 (UPnP %1)").arg(port);
             });
             connect(m_upnp, &UPnpMapper::failed, this, [this](const QString& reason){
                 log("· UPnP 미지원: " + reason.split('\n').first()
                     + "  (릴레이 홀펀칭으로 진행)");
             });
             m_upnp->map(port, gNetplay().localIp());
-        });
-        h->addWidget(m_npHostBtn); h->addStretch();
-        vRoot->addLayout(h);
-    }
+        
+}
 
-    // 룸 코드 표시 (HOST GAME 클릭 후 onNetConnected에서 갱신)
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        h->addWidget(mkLbl("Room Code:"));
-        m_npRoomCodeLabel = new QLabel("—");
-        m_npRoomCodeLabel->setStyleSheet(
-            "color:#ffdd44;font-family:'Courier New';font-size:13px;font-weight:bold;"
-            "letter-spacing:2px;");
-        m_npRoomCodeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        h->addWidget(m_npRoomCodeLabel);
-
-        QPushButton* copyBtn = new QPushButton("⎘ COPY");
-        copyBtn->setStyleSheet(
-            "QPushButton{background:#001133;color:#aaccff;border:1px solid #334488;"
-            "padding:3px 8px;font-family:'Courier New';font-size:10px;}"
-            "QPushButton:hover{background:#002255;}");
-        connect(copyBtn, &QPushButton::clicked, this, [this]{
-            if (m_npRoomCodeLabel && m_npRoomCodeLabel->text() != "—")
-                QApplication::clipboard()->setText(m_npRoomCodeLabel->text());
-        });
-        h->addWidget(copyBtn); h->addStretch();
-        vRoot->addLayout(h);
-    }
-
-    mkLine();
-
-    // ── JOIN 섹션 ────────────────────────────────────────────
-    vRoot->addWidget(mkLbl("— JOIN —", true));
-
-    // 룸 코드 입력
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        h->addWidget(mkLbl("Room Code:"));
-        m_npRoomCodeEdit = new QLineEdit;
-        m_npRoomCodeEdit->setStyleSheet(editStyle());
-        m_npRoomCodeEdit->setPlaceholderText("XXXXXX");
-        m_npRoomCodeEdit->setMaxLength(kTokenLen);
-        // 입력 마스크 제거 — 6자 영숫자만 (대문자 자동 변환은 toUpper)
-        m_npRoomCodeEdit->setFixedWidth(90); h->addWidget(m_npRoomCodeEdit);
-
-        // 직접 IP 입력 (룸 코드 없을 때 대안)
-        h->addWidget(mkLbl("or IP:"));
-        m_npIpEdit = new QLineEdit("127.0.0.1");
-        m_npIpEdit->setStyleSheet(editStyle());
-        m_npIpEdit->setFixedWidth(120); h->addWidget(m_npIpEdit);
-
-        h->addStretch();
-        vRoot->addLayout(h);
-    }
-
-    // CONNECT 버튼
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        m_npConnectBtn = new QPushButton("🔌  JOIN GAME");
-        m_npConnectBtn->setStyleSheet(btnStyle(true));
-        connect(m_npConnectBtn, &QPushButton::clicked, this, [this]{
-            // 중복 클릭 방지 (재시도는 DISCONNECT 후 다시 JOIN GAME)
-            m_npConnectBtn->setEnabled(false);
-            if (m_npHostBtn)    m_npHostBtn->setEnabled(false);
-            if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
+void MainWindow::netJoin() {
+                // 중복 클릭 방지 (재시도는 DISCONNECT 후 다시 JOIN GAME)
+            m_net.canJoin = false;
+            m_net.canHost = false;
+            m_net.canDisc = true;
             // 버튼 비활성화 시 Qt 가 포커스를 다음 위젯(Relay URL)으로 옮기는 것 방지
-            if (m_npDisconnBtn) m_npDisconnBtn->setFocus(Qt::OtherFocusReason);
 
-            log("[JOIN] 버튼 클릭 — 핸들러 진입");   // ← 진단: 핸들러 진입 확인
 
-            QString rawCode = m_npRoomCodeEdit ? m_npRoomCodeEdit->text().trimmed() : QString();
+
+            QString rawCode = m_net.joinCode.trimmed();
             QString code    = rawCode.toUpper();
-            log(QString("[JOIN] 입력 룸코드='%1'").arg(code));
+            qDebug().noquote() << QString("[join] 룸코드 %1").arg(code);
 
             // ── 직접 IP 입력 모드 (룸 코드 비어있음) ──
             // 동일 LAN 테스트 / 포트포워딩 직결 환경용. 릴레이/STUN 미사용.
             if (code.isEmpty()) {
-                QString ip = m_npIpEdit->text().trimmed();
+                QString ip = m_net.joinIp.trimmed();
                 int port   = gSettings.netplayPort;
-                log(QString("[JOIN] 직접 연결 모드 → %1:%2").arg(ip).arg(port));
+                qDebug().noquote() << QString("[join] 직접 연결 %1:%2").arg(ip).arg(port);
                 gNetplay().clientConnect(ip, port);
                 log(QString("(직접) %1:%2 연결 중...").arg(ip).arg(port));
                 return;
@@ -2732,7 +1659,7 @@ void MainWindow::buildNetplayPage(QWidget* page) {
             }
 
             // 1. UDP 소켓 바인드만 (HELLO 미발사 — 호스트 주소를 아직 모름)
-            log("[JOIN] clientPrepare() 호출 직전");
+
             if (!gNetplay().clientPrepare()) {
                 log("❌ UDP 소켓 바인드 실패");
                 return;
@@ -2749,10 +1676,10 @@ void MainWindow::buildNetplayPage(QWidget* page) {
             connect(&gNetplay(), &NetplayManager::externalAddressDiscovered, this,
                 [this, code](const QString& extIp, int extPort){
                     log(QString("✓ STUN: 내 외부 주소 %1:%2").arg(extIp).arg(extPort));
-                    log("[DIAG] JOIN extAddr 람다 — singleShot 스케줄 직전");
+
                     // ★ 네트워크 호출을 다음 이벤트 루프 틱으로 지연 (재진입 차단)
                     QTimer::singleShot(0, this, [this, code, extIp, extPort]{
-                        log("[DIAG] JOIN 지연 람다 실행 — relayRegister 호출 직전");
+
                         relayRegister(code, "client", extIp, extPort);
                         relayPollPeer(code, "client");
                     });
@@ -2771,447 +1698,39 @@ void MainWindow::buildNetplayPage(QWidget* page) {
 
             log("STUN 외부 주소 조회 중...");
             gNetplay().discoverExternalAddress();
-        });
-        h->addWidget(m_npConnectBtn); h->addStretch();
-        vRoot->addLayout(h);
-    }
+        
+}
 
-    mkLine();
-
-    // ── 게임 제어 버튼 ─────────────────────────────────────
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(8);
-        m_npStartBtn = new QPushButton("▶  START GAME (HOST)");
-        m_npStartBtn->setStyleSheet(btnStyle(true));
-        m_npStartBtn->setEnabled(false);
-        connect(m_npStartBtn, &QPushButton::clicked, this, &MainWindow::netplayStartGame);
-        h->addWidget(m_npStartBtn);
-
-        m_npDisconnBtn = new QPushButton("✖  DISCONNECT");
-        m_npDisconnBtn->setStyleSheet(btnStyle(false));
-        m_npDisconnBtn->setEnabled(false);
-        connect(m_npDisconnBtn, &QPushButton::clicked, this, [this]{
-            log("✖ DISCONNECT — 연결 완전 해제 중...");
+void MainWindow::netDisconnect() {
+                log("✖ DISCONNECT — 연결 완전 해제 중...");
             // 게임 중이면 상대에게도 종료 통지
             if (gNetplay().playing()) gNetplay().sendGameOver();
             cleanupNetplay();               // 릴레이 폴링·게임 상태 완전 정리
             gNetplay().shutdown();          // 소켓 완전 종료
             m_relayPeerHandled = false;     // 다음 연결을 위해 피어 플래그 리셋
-            if (m_npRoomCodeLabel) m_npRoomCodeLabel->setText("—");
-            if (m_npRttLabel)      m_npRttLabel->setText("");
+            m_net.roomCode.clear();
+            m_net.rtt.clear();
             // 상태 라벨도 OFFLINE 으로 되돌린다 (안 하면 'CONNECTED' 로 남음)
-            if (m_npStatusLabel) {
-                m_npStatusLabel->setText("● OFFLINE");
-                m_npStatusLabel->setStyleSheet(
-                    "color:#cc4444;font-family:'Courier New';font-size:11px;");
-            }
+            m_net.status = "● OFFLINE";
             // 버튼 상태 복구 (HOST/JOIN 재시도 가능하게)
-            if (m_npHostBtn)    m_npHostBtn->setEnabled(true);
-            if (m_npConnectBtn) m_npConnectBtn->setEnabled(true);
-            if (m_npStartBtn)   m_npStartBtn->setEnabled(false);
-            m_npDisconnBtn->setEnabled(false);
+            m_net.canHost = true;
+            m_net.canJoin = true;
+            m_net.canStart = false;
+            m_net.canDisc = false;
             log("✖ 연결 해제됨");
-        });
-        h->addWidget(m_npDisconnBtn); h->addStretch();
-        vRoot->addLayout(h);
-    }
-
-    vRoot->addStretch();
-
-    // ── 릴레이 서버 (URL 완전 숨김 — 프라이버시) ────────────────
-    // 내장 릴레이 주소는 계정 ID 를 포함하므로 GUI 에 실제 값을 절대 넣지 않는다.
-    //   ★ 내장 서버 사용 중이면 입력창을 '비워' 두고 placeholder 만 보여준다.
-    //     (마스킹된 점조차 없음 → 스팀덱 터치 키보드로도 노출 불가)
-    //   ★ 사용자가 커스텀 릴레이를 직접 입력한 경우에만 그 값을 Password 로 표시.
-    //   ★ 비워서 저장하면 내장 서버로 복귀한다.
-    {
-        QHBoxLayout* h = new QHBoxLayout; h->setSpacing(6);
-        h->addWidget(mkLbl("Relay:"));
-        const bool usingBuiltin =
-            gSettings.netplayRelayUrl.isEmpty() ||
-            gSettings.netplayRelayUrl == AppSettings::builtinRelayUrl();
-        m_npRelayUrlEdit = new QLineEdit(usingBuiltin ? QString() : gSettings.netplayRelayUrl);
-        m_npRelayUrlEdit->setEchoMode(QLineEdit::Password);   // 커스텀 입력 시 ● 로 표시
-        trPlaceholder(m_npRelayUrlEdit, "(내장 릴레이 서버 사용 중)",
-                                        "(using built-in relay server)");
-        m_npRelayUrlEdit->setStyleSheet(editStyle());
-        connect(m_npRelayUrlEdit, &QLineEdit::editingFinished, this, [this]{
-            const QString typed = m_npRelayUrlEdit->text().trimmed();
-            // 비우면 내장 서버로 복귀, 입력하면 커스텀 릴레이로 사용
-            gSettings.netplayRelayUrl = typed.isEmpty()
-                ? AppSettings::builtinRelayUrl() : typed;
-            gSettings.save();
-        });
-        // 연결 상태만 간단히 표시 (URL 미노출)
-        //   내장 기본값(또는 빈 값) → "내장 서버", 그 외 → "커스텀 릴레이"
-        QLabel* relayState = new QLabel(usingBuiltin ? "● 내장 서버 사용 중"
-                                                     : "● 커스텀 릴레이");
-        relayState->setStyleSheet("color:#44aa66;font-family:'Courier New';font-size:9px;");
-        h->addWidget(relayState);
-        h->addWidget(m_npRelayUrlEdit, 1);
-        vRoot->addLayout(h);
-    }
-
-    // ── 사용 안내 ────────────────────────────────────────────
-    QLabel* hint = new QLabel(
-        "[ HOST ]  Delay 설정 → HOST GAME → 6자 룸 코드 공유 → 게임 선택 → START GAME\n"
-        "[ JOIN ]  6자 룸 코드 입력 → JOIN GAME  (또는 직접 IP 입력)\n"
-        "Delay: 국내 0~1f / 아시아 2~3f / 해외 4~6f  |  롤백: 최대 30f\n"
-        "게임 중 ESC = 양쪽 게임 종료(Lobby 복귀) / DISCONNECT = 연결 완전 해제");
-    hint->setStyleSheet("color:#2a3a5a;font-family:'Courier New';font-size:9px;");
-    hint->setWordWrap(true);
-    vRoot->addWidget(hint);
+        
 }
 
-// ── DIP 스위치 재빌드 (게임 로드 후 300ms 후 호출) ────────────
-void MainWindow::rebuildMachineSettings() {
-    if (!m_machineContent) return;
-
-    // 기존 레이아웃/위젯 모두 제거
-    if (QLayout* old = m_machineContent->layout()) {
-        QLayoutItem* item;
-        while ((item = old->takeAt(0)) != nullptr) {
-            if (QWidget* w = item->widget()) w->deleteLater();
-            delete item;
-        }
-        delete old;
-    }
-
-    QVBoxLayout* v = new QVBoxLayout(m_machineContent);
-    v->setContentsMargins(16, 12, 16, 12);
-    v->setSpacing(10);
-
-    auto makeLabel = [](const QString& t, bool bold = false) {
-        QLabel* l = new QLabel(t);
-        l->setStyleSheet(QString("color:%1;font-family:'Courier New';font-size:%2px;")
-                         .arg(bold ? "#aaccff" : "#6688aa").arg(bold ? 11 : 10));
-        l->setWordWrap(true);
-        return l;
-    };
-
-    if (gState.variableOptions.isEmpty()) {
-        v->addWidget(makeLabel("게임을 실행하면 DIP 스위치가 표시됩니다"));
-        v->addStretch();
-        return;
-    }
-
-    v->addWidget(makeLabel("— DIP SWITCHES —", true));
-
-    // ── 저장 범위 선택 (게임별 / 기종별) ──────────────────────
-    {
-        QHBoxLayout* sh = new QHBoxLayout; sh->setSpacing(6);
-        sh->addWidget(makeLabel("저장 범위:"));
-        QComboBox* scopeCombo = new QComboBox;
-        scopeCombo->setStyleSheet(editStyle());
-        scopeCombo->addItem("게임별 (이 게임 전용)", "game");
-        scopeCombo->addItem(QString("기종별 (%1 공통)")
-                            .arg(gamePlatform(m_loadedGame.isEmpty()
-                                              ? m_selectedGame : m_loadedGame)), "plat");
-        int si = scopeCombo->findData(m_machineScope);
-        if (si >= 0) scopeCombo->setCurrentIndex(si);
-        connect(scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [this, scopeCombo](int){
-            m_machineScope = scopeCombo->currentData().toString();
-            log("머신세팅 저장 범위: " + m_machineScope);
-        });
-        sh->addWidget(scopeCombo, 1);
-        v->addLayout(sh);
-    }
-
-    // 안내
-    auto* hint = new QLabel;
-    trText(hint,
-        "변경 사항은 즉시 적용·저장됩니다. 일부 설정은 리셋 후 반영됩니다.\n"
-        "적용 우선순위:  게임별 > 기종별 > 코어 기본",
-        "Changes apply and save immediately. Some settings take effect after a reset.\n"
-        "Priority:  Game > Platform > Core default");
-    hint->setStyleSheet("color:#334455;font-family:'Courier New';font-size:9px;");
-    hint->setWordWrap(true);
-    v->addWidget(hint);
-
-    // 구분선
-    auto* line = new QFrame; line->setFrameShape(QFrame::HLine);
-    line->setStyleSheet("color:#223366;"); v->addWidget(line);
-
-    // 변수별 QFormLayout
-    QFormLayout* form = new QFormLayout;
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    form->setSpacing(8);
-    form->setContentsMargins(0, 4, 0, 4);
-
-    QList<QString> keys = gState.variableOptions.keys();
-    std::sort(keys.begin(), keys.end());
-
-    for (const QString& key : keys) {
-        const QStringList& options = gState.variableOptions.value(key);
-        if (options.isEmpty()) continue;
-        // 치트 옵션은 CHEATS 페이지에서 따로 다루므로 머신 설정에서는 제외
-        if (key.startsWith("fbneo-cheat-")) continue;
-
-        QString desc = gState.variableDescriptions.value(key, key);
-        QString cur  = gState.variables.value(key, options.first());
-
-        QLabel* lbl = makeLabel(desc);
-        lbl->setFixedWidth(260);
-        lbl->setToolTip(key);  // 내부 키 이름은 툴팁으로
-
-        QComboBox* combo = new QComboBox;
-        combo->setStyleSheet(editStyle());
-        combo->setMinimumWidth(160);
-        for (const QString& opt : options) combo->addItem(opt);
-        int idx = options.indexOf(cur);
-        if (idx >= 0) combo->setCurrentIndex(idx);
-
-        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [this, key, options](int i) {
-            if (i >= 0 && i < options.size()) {
-                gState.variables[key] = options[i];
-                gState.variablesUpdated.store(true);
-                // 머신 세팅 즉시 저장 — 선택된 범위(게임별/기종별)에
-                if (m_machineScope == "plat") {
-                    QString plat = gamePlatform(m_loadedGame);
-                    gSettings.machineVarsByPlatform[plat][key] = options[i];
-                } else {
-                    gSettings.machineVars[m_loadedGame][key] = options[i];
-                }
-                gSettings.save();
-            }
-        });
-
-        form->addRow(lbl, combo);
-    }
-
-    v->addLayout(form);
-    v->addStretch();
-
-    // 새로 만든 콤보박스들에도 휠 가드 적용 (스크롤이 막히지 않도록)
-    applyWheelGuard(m_machineContent);
-
-    log(QString("🖥 DIP 스위치 %1개 로드됨").arg(keys.size()));
-}
-
-void MainWindow::refreshCheatList() {
-    if (!m_cheatRows) return;
-
-    // ── 기존 행 모두 제거 ───────────────────────────────────────
-    QLayout* layout = m_cheatRows->layout();
-    QLayoutItem* child;
-    while ((child = layout->takeAt(0)) != nullptr) {
-        if (child->widget()) child->widget()->deleteLater();
-        delete child;
-    }
-
-    // ── FBNeo 네이티브 치트 (코어 옵션) 우선 ────────────────────
-    //   코어가 <system_dir>/fbneo/cheats/{rom}.ini 를 읽어 등록한 옵션들.
-    //   키 형식: fbneo-cheat-<n>-<드라이버>-<옵션명>
-    //   코어 자체 엔진(CheatEnable)이 적용하므로 RetroArch 와 동일하게 동작하며,
-    //   주소/엔디언을 추측할 필요가 없다 → 기종 무관하게 정확.
-    //   ★ 네이티브 치트가 있으면 수동 엔진 행은 만들지 않는다(이중 적용 방지).
-    {
-        QStringList nativeKeys;
-        for (auto it = gState.variableOptions.constBegin();
-             it != gState.variableOptions.constEnd(); ++it)
-            if (it.key().startsWith("fbneo-cheat-")) nativeKeys << it.key();
-        nativeKeys.sort();
-        m_nativeCheatsActive = !nativeKeys.isEmpty();   // 수동 엔진 on/off 판단
-
-        if (!nativeKeys.isEmpty()) {
-            QVBoxLayout* nvl = qobject_cast<QVBoxLayout*>(layout);
-            if (m_cheatStatusLabel)
-                m_cheatStatusLabel->setText(
-                    QString("✔ 코어 네이티브 치트 %1개 (FBNeo 엔진)").arg(nativeKeys.size()));
-
-            for (const QString& key : std::as_const(nativeKeys)) {
-                const QStringList opts = gState.variableOptions.value(key);
-                if (opts.isEmpty()) continue;
-
-                QWidget* row = new QWidget;
-                row->setStyleSheet("background:rgba(0,0,8,180);"
-                                   "border:1px solid #1a2a3a;border-radius:4px;");
-                QHBoxLayout* hl = new QHBoxLayout(row);
-                hl->setContentsMargins(8, 5, 8, 5);
-                hl->setSpacing(8);
-
-                QLabel* nameLbl = new QLabel(gState.variableDescriptions.value(key, key));
-                nameLbl->setStyleSheet("color:#8899aa;font-family:'Courier New';"
-                                       "font-size:11px;font-weight:bold;"
-                                       "background:transparent;border:none;");
-                nameLbl->setWordWrap(true);
-                nameLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-                hl->addWidget(nameLbl, 1);
-
-                QComboBox* cb = new QComboBox;
-                cb->setStyleSheet(editStyle());
-                cb->addItems(opts);
-                cb->setFixedWidth(150);
-                const int cur = opts.indexOf(gState.variables.value(key));
-                if (cur >= 0) cb->setCurrentIndex(cur);
-                connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                        [this, key, opts](int idx){
-                    if (idx < 0 || idx >= opts.size()) return;
-                    gState.variables[key] = opts[idx];
-                    gState.variablesUpdated.store(true);   // 코어가 다음 프레임에 반영
-                    log("🧩 치트: " + gState.variableDescriptions.value(key, key)
-                        + " → " + opts[idx]);
-                });
-                hl->addWidget(cb);
-
-                nvl->addWidget(row);
-            }
-            nvl->addStretch();
-            applyWheelGuard(m_cheatRows);   // 치트 콤보도 휠 가드
-            return;
-        }
-    }
-
-    if (!m_cheat || m_cheat->count() == 0) {
-        if (m_cheatStatusLabel) {
-            // 게임이 실행 중이 아니면 → 실행 후 확인 안내
-            if (!gState.gameLoaded && m_loadedGame.isEmpty())
-                m_cheatStatusLabel->setText("게임을 실행하면 치트가 자동 로드됩니다");
-            else
-                m_cheatStatusLabel->setText("치트 없음 (" + m_selectedGame + ".ini)");
-        }
-        // 빈 stretch 복원
-        qobject_cast<QVBoxLayout*>(layout)->addStretch();
-        return;
-    }
-
-    if (m_cheatStatusLabel)
-        m_cheatStatusLabel->setText(
-            QString("✔ %1개 치트 로드됨 — %2")
-            .arg(m_cheat->count())
-            .arg(QFileInfo(m_cheat->loadedPath()).fileName()));
-
-    // ── 치트별 행 생성 ──────────────────────────────────────────
-    QVBoxLayout* vl = qobject_cast<QVBoxLayout*>(layout);
-    for (int i = 0; i < m_cheat->count(); ++i) {
-        const CheatEntry& e = m_cheat->entries().at(i);
-
-        // 행 컨테이너
-        QWidget* row = new QWidget;
-        row->setStyleSheet(
-            e.active
-            ? "background:rgba(0,30,10,200);border:1px solid #226644;border-radius:4px;"
-            : "background:rgba(0,0,8,180);border:1px solid #1a2a3a;border-radius:4px;");
-        QHBoxLayout* hl = new QHBoxLayout(row);
-        hl->setContentsMargins(8, 5, 8, 5);
-        hl->setSpacing(8);
-
-        // 활성 상태 표시 (● / ○)
-        QLabel* dot = new QLabel(e.active ? "●" : "○");
-        dot->setFixedWidth(14);
-        dot->setStyleSheet(
-            e.active
-            ? "color:#44ff88;font-size:12px;background:transparent;border:none;"
-            : "color:#334455;font-size:12px;background:transparent;border:none;");
-        dot->setAlignment(Qt::AlignCenter);
-        hl->addWidget(dot);
-
-        // 텍스트 영역: description(메인) + label(서브, "Enabled"이 아닌 경우만)
-        QWidget* textCol = new QWidget;
-        textCol->setStyleSheet("background:transparent;border:none;");
-        QVBoxLayout* textVl = new QVBoxLayout(textCol);
-        textVl->setContentsMargins(0, 0, 0, 0);
-        textVl->setSpacing(1);
-
-        // 메인 텍스트: cheat "..." 그룹 이름 (description)
-        QString mainText = e.description.isEmpty() ? e.label : e.description;
-        QLabel* descLbl = new QLabel(mainText);
-        descLbl->setStyleSheet(
-            e.active
-            ? "color:#aaffcc;font-family:'Courier New';font-size:11px;font-weight:bold;"
-              "background:transparent;border:none;"
-            : "color:#8899aa;font-family:'Courier New';font-size:11px;font-weight:bold;"
-              "background:transparent;border:none;");
-        descLbl->setWordWrap(true);
-        textVl->addWidget(descLbl);
-
-        // 서브 텍스트: 옵션 레이블 ("Enabled" 제외, 의미 있는 옵션명만)
-        bool showLabel = !e.label.isEmpty()
-                      && !e.description.isEmpty()
-                      && !e.label.contains("enabled", Qt::CaseInsensitive);
-        if (showLabel) {
-            QLabel* optLbl = new QLabel("▸ " + e.label);
-            optLbl->setStyleSheet(
-                e.active
-                ? "color:#55cc88;font-family:'Courier New';font-size:9px;"
-                  "background:transparent;border:none;"
-                : "color:#445566;font-family:'Courier New';font-size:9px;"
-                  "background:transparent;border:none;");
-            optLbl->setWordWrap(true);
-            textVl->addWidget(optLbl);
-        }
-
-        textCol->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        hl->addWidget(textCol, 1);
-
-        // 패치 수 표시
-        QLabel* patchCount = new QLabel(
-            QString("[%1p]").arg(e.patches.size()));
-        patchCount->setStyleSheet(
-            "color:#334455;font-family:'Courier New';font-size:9px;background:transparent;border:none;");
-        patchCount->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        hl->addWidget(patchCount);
-
-        // [ON] 버튼
-        QPushButton* onBtn = new QPushButton("ON");
-        onBtn->setFixedSize(42, 22);
-        onBtn->setEnabled(!e.active);
-        onBtn->setStyleSheet(
-            e.active
-            ? "QPushButton{background:#113322;color:#336644;border:1px solid #224433;"
-              "font-family:'Courier New';font-size:10px;border-radius:3px;}"
-            : "QPushButton{background:#114422;color:#44cc88;border:1px solid #33aa66;"
-              "font-family:'Courier New';font-size:10px;border-radius:3px;}"
-              "QPushButton:hover{background:#1a6633;}");
-        // log에 description 우선 표시
-        QString cheatName = e.description.isEmpty() ? e.label : e.description;
-        if (showLabel) cheatName += " ▸ " + e.label;
-        connect(onBtn, &QPushButton::clicked, this, [this, i, cheatName]{
-            if (m_cheat && i < m_cheat->count()) {
-                m_cheat->setActive(i, true);
-                log("치트 ON: " + cheatName);
-                refreshCheatList();
-            }
-        });
-        hl->addWidget(onBtn);
-
-        // [OFF] 버튼
-        QPushButton* offBtn = new QPushButton("OFF");
-        offBtn->setFixedSize(42, 22);
-        offBtn->setEnabled(e.active);
-        offBtn->setStyleSheet(
-            !e.active
-            ? "QPushButton{background:#221122;color:#443355;border:1px solid #332244;"
-              "font-family:'Courier New';font-size:10px;border-radius:3px;}"
-            : "QPushButton{background:#331122;color:#cc4466;border:1px solid #aa3355;"
-              "font-family:'Courier New';font-size:10px;border-radius:3px;}"
-              "QPushButton:hover{background:#551122;}");
-        connect(offBtn, &QPushButton::clicked, this, [this, i, cheatName]{
-            if (m_cheat && i < m_cheat->count()) {
-                m_cheat->setActive(i, false);
-                log("치트 OFF: " + cheatName);
-                refreshCheatList();
-            }
-        });
-        hl->addWidget(offBtn);
-
-        vl->addWidget(row);
-    }
-    vl->addStretch();
-}
-
-// ════════════════════════════════════════════════════════════
-//  ROM 관리
-// ════════════════════════════════════════════════════════════
 void MainWindow::scanRoms() {
-    if (!m_gameList) return;
-    m_gameList->clear();
+    m_rows.clear();
     m_allRoms.clear();
 
     QDir dir(gSettings.romPath);
-    if (!dir.exists()) { log("⚠ ROM 폴더 없음: " + gSettings.romPath); return; }
+    if (!dir.exists()) {
+        log("⚠ ROM 폴더 없음: " + gSettings.romPath);
+        syncShellList();          // 비어 있는 목록을 셸에도 반영한다
+        return;
+    }
 
     for (const QFileInfo& fi :
          dir.entryInfoList({"*.zip","*.7z","*.rar"}, QDir::Files, QDir::Name)) {
@@ -3230,156 +1749,65 @@ void MainWindow::scanRoms() {
         });
 
     // 선택 게임이 아직 없으면(=프로그램 시작 직후) 마지막 플레이 게임을 복원.
-    //   filterRoms() 가 m_selectedGame 기준으로 행을 선택·스크롤해 주므로
+    //   filterRoms() 가 m_selectedGame 기준으로 목록 위치를 잡아 주므로
     //   목록이 맨 위로 초기화되지 않는다.
+    bool restoredLast = false;
     if (m_selectedGame.isEmpty() && !gSettings.lastGame.isEmpty()) {
         for (const auto& [disp, rom] : m_allRoms) {
-            if (rom == gSettings.lastGame) { m_selectedGame = rom; break; }
+            if (rom == gSettings.lastGame) { m_selectedGame = rom; restoredLast = true; break; }
         }
     }
 
-    rebuildFilterBar();   // 보유 기종 기준으로 탭 재구성 (개수 포함)
-    filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
+    filterRoms();
 
     // 복원된 게임의 프리뷰도 함께 표시 (선택 상태와 화면을 일치시킴)
-    if (!m_selectedGame.isEmpty() && m_previewLabel &&
-        m_previewLabel->pixmap().isNull() && m_loadedGame.isEmpty()) {
+    if (restoredLast && m_loadedGame.isEmpty()) {
         loadPreview(m_selectedGame);
-        log("마지막 플레이 게임 복원: " + getGameDisplayName(m_selectedGame));
+        qDebug().noquote() << "[list] 마지막 게임 복원 " + m_selectedGame;
+        // 복원 경로는 selectGame() 을 거치지 않으므로 직접 갱신한다.
+        resolveAndApplyControls(m_selectedGame);   // 버튼 배치·매핑도 함께
+        applyBezel();                              // 이 게임에 맞는 베젤
     }
 
     log(QString("ROM %1개 검색됨 (%2)").arg(m_allRoms.size()).arg(gSettings.romPath));
 }
-
-// ════════════════════════════════════════════════════════════
-//  게임목록 필터 바 — ALL / ★FAV / ☆ + 기종별 탭
-//  · 기종 탭은 실제 보유 ROM 에 존재하는 기종만 만든다 (개수도 함께 표시)
-//  · ★FAV 는 기종과 무관하게 즐겨찾기 전체를 보여준다
-// ════════════════════════════════════════════════════════════
-void MainWindow::rebuildFilterBar() {
-    if (!m_filterGrid) return;
-
-    // 기존 버튼 제거
-    while (QLayoutItem* it = m_filterGrid->takeAt(0)) {
-        if (it->widget()) it->widget()->deleteLater();
-        delete it;
-    }
-
-    // 기종별 보유 개수 집계
-    QHash<QString, int> hwCount;
-    int favCount = 0;
-    for (const auto& [disp, rom] : m_allRoms) {
-        ++hwCount[gameHardwareGroup(gameHardwareOf(rom))];
-        if (isFavorite(rom)) ++favCount;
-    }
-
-    const QString btnCss =
-        "QPushButton{background:#000033;color:#6688bb;border:1px solid #224488;"
-        "padding:2px 4px;font-family:'Courier New';font-size:9px;font-weight:bold;}"
-        "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}"
-        "QPushButton:hover{background:#00004d;color:#99ccff;}";
-
-    int col = 0, row = 0;
-    const int kCols = 4;                       // 좁은 패널에 맞춰 4열로 줄바꿈
-    auto addBtn = [&](const QString& label, int glFilter, const QString& hwId) {
-        QPushButton* b = new QPushButton(label);
-        b->setCheckable(true);
-        b->setStyleSheet(btnCss);
-        b->setFixedHeight(22);
-        // 현재 선택 상태 반영
-        b->setChecked(m_glFilter == glFilter && m_hwFilter == hwId);
-        connect(b, &QPushButton::clicked, this, [this, glFilter, hwId]{
-            m_glFilter = glFilter;
-            m_hwFilter = hwId;
-            rebuildFilterBar();                // 체크 상태 갱신
-            filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
-            log("필터: " + (hwId.isEmpty()
-                    ? (glFilter == 1 ? QString("★FAV") : glFilter == 2 ? QString("☆") : QString("ALL"))
-                    : gameHardwareLabel(hwId)));
-        });
-        m_filterGrid->addWidget(b, row, col);
-        if (++col >= kCols) { col = 0; ++row; }
-    };
-
-    // ※ 라벨은 ASCII 로만 쓴다. ★/☆ 는 Courier New 에 글리프가 없어
-    //    폰트 대체가 일어나며 "*B2" 처럼 깨져 보였다.
-    addBtn(QString("ALL %1").arg(m_allRoms.size()), 0, QString());
-    addBtn(QString("FAV %1").arg(favCount),         1, QString());
-    addBtn(QStringLiteral("NOFAV"),                 2, QString());
-
-    // 보유한 기종만 정의된 순서대로
-    for (const auto& d : gameHardwareList()) {
-        const QString id = QString::fromLatin1(d.id);
-        const int n = hwCount.value(id, 0);
-        if (n <= 0) continue;
-        addBtn(QString("%1 %2").arg(QString::fromLatin1(d.label)).arg(n), 0, id);
-    }
-}
-
-void MainWindow::filterRoms(const QString& text) {
-    if (!m_gameList) return;
-    m_gameList->clear();
-    QString filter = text.trimmed().toLower();
+// 필터(ALL/FAV/NOFAV/기종)를 적용해 화면에 보일 목록(m_rows)을 만들고 셸에 넘긴다.
+void MainWindow::filterRoms() {
+    m_rows.clear();
     int shown = 0;
+    const QString q = m_searchText.trimmed().toLower();
     for (const auto& [disp, rom] : m_allRoms) {
-        bool fav = isFavorite(rom);
+        const bool fav = isFavorite(rom);
 
         // ── 탭 필터 ──────────────────────────────────────
-        if (m_glFilter == 1 && !fav) continue;  // ★ FAV: 즐겨찾기만
-        if (m_glFilter == 2 &&  fav) continue;  // ☆: 미즐겨찾기만
+        if (m_glFilter == 1 && !fav) continue;  // FAV: 즐겨찾기만
+        if (m_glFilter == 2 &&  fav) continue;  // NOFAV: 미즐겨찾기만
 
         // ── 기종 필터 ────────────────────────────────────
-        //   ★FAV 탭에서는 기종을 무시한다 (즐겨찾기는 기종 상관없이 전부 표시)
+        //   FAV 탭에서는 기종을 무시한다 (즐겨찾기는 기종 상관없이 전부 표시)
         if (m_glFilter != 1 && !m_hwFilter.isEmpty()
             && gameHardwareGroup(gameHardwareOf(rom)) != m_hwFilter) continue;
 
-        // ── 검색어 필터 ───────────────────────────────────
-        if (!filter.isEmpty()
-            && !disp.toLower().contains(filter)
-            && !rom.toLower().contains(filter)) continue;
+        // ── 검색어 필터 (게임 이름 또는 롬 이름에 포함) ──
+        if (!q.isEmpty() && !disp.toLower().contains(q) && !rom.toLower().contains(q)) continue;
 
-        bool running = (rom == m_selectedGame);
-
-        // 즐겨찾기 표시도 ASCII 로 (Courier New 에 ★ 글리프가 없어 깨짐)
-        QString label = (fav ? "* " : "  ") + disp;
-        auto* item = new QListWidgetItem(label);
-        item->setData(Qt::UserRole, rom);
-        item->setData(Qt::UserRole + 1, fav);
-
-        if (running) {
-            item->setForeground(QColor("#44ffaa"));
-            item->setFont(QFont("Courier New", 12, QFont::Bold));
-        } else if (fav) {
-            item->setForeground(QColor("#ffdd44"));
-        }
-        m_gameList->addItem(item);
+        m_rows.append(ListRow{rom, disp, fav});
         ++shown;
     }
-    // 원본 NeoRageX 처럼 제목에 "표시개수/전체개수" 를 보여준다
-    if (m_gamelistPanel)
-        m_gamelistPanel->setTitle(QString("GAMELIST (%1/%2)")
-                                  .arg(shown).arg(m_allRoms.size()));
 
     // 로그: 필터 적용 시 결과 개수 확인용
     if (m_glFilter != 0 || !m_hwFilter.isEmpty())
-        log(QString("  → %1개 표시").arg(shown));
+        qDebug().noquote() << QString("[list] %1개 표시").arg(shown);
 
-    // 필터 후 선택 복원: 이전에 선택된 게임 항목 유지, 없으면 첫 번째 행 선택
+    // 필터 후 선택 복원: 이전에 선택된 게임이 목록에 있으면 유지, 없으면 첫 번째 게임을 고른다
     bool selRestored = false;
-    if (!m_selectedGame.isEmpty()) {
-        for (int i = 0; i < m_gameList->count(); ++i) {
-            if (m_gameList->item(i)->data(Qt::UserRole).toString() == m_selectedGame) {
-                m_gameList->setCurrentRow(i);
-                m_gameList->scrollToItem(m_gameList->item(i), QAbstractItemView::EnsureVisible);
-                selRestored = true;
-                break;
-            }
-        }
-    }
-    if (!selRestored && m_gameList->count() > 0)
-        m_gameList->setCurrentRow(0);
-}
+    for (const ListRow& r : m_rows)
+        if (r.rom == m_selectedGame) { selRestored = true; break; }
+    if (!selRestored && !m_rows.isEmpty())
+        selectGame(m_rows.first().rom);
 
+    syncShellList();
+}
 void MainWindow::selectGame(const QString& romName) {
     if (m_selectedGame == romName) return;
     m_selectedGame = romName;
@@ -3395,68 +1823,31 @@ void MainWindow::selectGame(const QString& romName) {
     if (!gState.gameLoaded && !gState.isPaused)
         resolveAndApplyControls(romName);
 
+    // 선택이 바뀌면 사운드 모드도 그 게임 기준으로 다시 해석·표시한다
+    applyResolvedSoundMode();
+    applyBezel();            // 선택 게임에 맞는 베젤로 갱신
+
     loadPreview(romName);
 }
 
-// 프리뷰 표시 — 잘라내지 않는다.
-//   박스 자체를 원본 비율에 맞춰 놓았으므로(applyPreviewAspect) 비율을 유지한
-//   채 키우기만 하면 남는 여백 없이 꽉 찬다.
-//   ※ 예전에는 확대 후 중앙을 잘라내(KeepAspectRatioByExpanding) 위아래가
-//     날아가 어색했다 → 크롭 제거.
-QPixmap MainWindow::fitPreviewPixmap(const QPixmap& src) const {
-    if (src.isNull() || !m_previewLabel) return src;
-    const QSize target = m_previewLabel->size();
-    if (target.width() < 4 || target.height() < 4) return src;
-    // 박스는 고정, 이미지를 박스 크기에 맞춰 늘리거나 줄인다.
-    //   잘리는 부분도 남는 여백도 없다. (원본 비율과 다르면 약간 늘어난다)
-    return src.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-}
-
-// 프리뷰 박스는 레이아웃이 정한 크기로 고정한다.
-//   (박스가 원본 비율을 따라 폭이 변하면 하단 레이아웃이 계속 흔들려 어색했다)
-//   이미지/영상은 fitPreviewPixmap 이 박스 크기에 맞춰 늘려 채운다.
-void MainWindow::applyPreviewAspect(const QSize& mediaSize) {
-    m_previewMedia = mediaSize;
-}
-
 void MainWindow::loadPreview(const QString& romName) {
-    // 이전 영상 정지 + 이미지 모드로 복귀
+    Q_UNUSED(romName);          // 선택 게임(m_selectedGame)의 그림을 셸이 찾는다
+    // 이전 영상 정지 + 이미지로 복귀
 #if HAVE_FFMPEG
     if (m_previewVideo) m_previewVideo->stop();
 #endif
     if (m_mediaPlayer)     m_mediaPlayer->stop();
     if (m_previewVidTimer) m_previewVidTimer->stop();
-    if (m_previewStack)    m_previewStack->setCurrentIndex(0);
 
-    if (!m_previewLabel) return;
+    syncShellPreview();
 
     // 영상을 자동 재생할 상황인지 판단한다.
     //   · 이미 이 게임의 영상을 한 번 재생했으면 다시 틀지 않는다 (1회만)
     //   · 게임이 로드된 상태(플레이 중 메뉴로 나온 경우)에는 이미지만 보여준다
     const bool inGame  = gState.gameLoaded || gState.isPaused;
     const bool playVid = !m_previewVideoDone && !inGame;
-
-    for (const QString ext : {"png","jpg","jpeg","bmp","gif"}) {
-        QString path = gSettings.previewPath + "/" + romName + "." + ext;
-        if (QFile::exists(path)) {
-            QPixmap px(path);
-            if (!px.isNull()) {
-                applyPreviewAspect(px.size());      // 박스를 이미지 비율로
-                m_previewLabel->setPixmap(fitPreviewPixmap(px));
-                if (playVid && m_previewVidTimer) m_previewVidTimer->start();
-                return;
-            }
-        }
-    }
-    m_previewMedia = QSize();
-    m_previewLabel->setPixmap(QPixmap());
-    m_previewLabel->setText("NO PREVIEW\n" + romName.toUpper());
-    m_previewLabel->setStyleSheet(
-        "color:#335577;background:#000008;font-family:'Courier New';font-size:9px;");
-    // 이미지는 없어도 영상이 있을 수 있음 → 같은 조건으로 타이머 시작
     if (playVid && m_previewVidTimer) m_previewVidTimer->start();
 }
-
 void MainWindow::loadPreviewVideo(const QString& romName) {
     if (romName.isEmpty()) return;
     for (const QString ext : {"mp4","avi","mkv","webm","mov"}) {
@@ -3469,7 +1860,7 @@ void MainWindow::loadPreviewVideo(const QString& romName) {
         if (m_previewVideo) {
             m_previewVideo->setVolume(gSettings.audioVolume);   // 앱 볼륨 연동
             if (m_previewVideo->open(path)) {
-                log("▶ 프리뷰 영상: " + romName);
+                qDebug().noquote() << "[preview] 영상 " + romName;
                 return;
             }
         }
@@ -3480,8 +1871,7 @@ void MainWindow::loadPreviewVideo(const QString& romName) {
         m_mediaPlayer->setSource(QUrl::fromLocalFile(path));
         m_mediaPlayer->setLoops(1);       // 한 번만 재생 → 끝나면 이미지로 복귀
         m_mediaPlayer->play();
-        if (m_previewStack) m_previewStack->setCurrentIndex(1); // 영상 모드
-        log("▶ 프리뷰 영상: " + romName);
+        qDebug().noquote() << "[preview] 영상 " + romName;
         return;
 #endif
     }
@@ -3523,7 +1913,7 @@ void MainWindow::syncCheatsToSystemDir(const QString& romName) {
         QFile::remove(dst);
     }
     if (QFile::copy(src, dst))
-        log("🧩 치트 파일 코어 연동: fbneo/cheats/" + romName + ".ini");
+        qDebug().noquote() << "[cheat] 코어 연동: " + romName + ".ini";
 }
 
 bool MainWindow::loadRomInternal() {
@@ -3582,9 +1972,9 @@ bool MainWindow::loadRomInternal() {
     if (ok && m_cheat) {
         m_cheat->autoLoad(m_selectedGame, gSettings.cheatPath);
         if (m_cheat->count() == 0)
-            log("치트 없음 (" + m_selectedGame + ".ini)");
+            qDebug().noquote() << "[cheat] 없음 " + m_selectedGame;
         else
-            log(QString("치트 %1개 로드 (%2.ini)").arg(m_cheat->count()).arg(m_selectedGame));
+            qDebug().noquote() << QString("[cheat] %1개 로드").arg(m_cheat->count());
     }
 
     // 로딩 커서 해제 후 커스텀 커서 복원
@@ -3644,7 +2034,7 @@ void MainWindow::startEmu() {
             applyTate(-1);
         }
         if (gState.videoRotation != 0)
-            log(QString("⟳ 세로형 게임 감지 — 자동 회전 %1° 적용").arg(gState.videoRotation * 90));
+            qDebug().noquote() << QString("[video] 세로형 자동회전 %1도").arg(gState.videoRotation * 90);
     });
 
     m_frameAccum = 0.0;
@@ -3654,21 +2044,25 @@ void MainWindow::startEmu() {
     QTimer::singleShot(100, this, [this]{
         enterGameScreen();
     });
-    // 게임 첫 프레임 실행 후 DIP 스위치 탭 재빌드 (코어가 SET_VARIABLES 전달한 뒤)
-    QTimer::singleShot(300, this, &MainWindow::rebuildMachineSettings);
-    // 같은 시점에 치트 목록도 갱신 — 코어가 등록한 네이티브 치트 옵션을 표시
-    QTimer::singleShot(300, this, &MainWindow::refreshCheatList);
+    // 코어가 SET_VARIABLES 로 옵션(DIP·네이티브 치트)을 알려 주는 첫 프레임 뒤에
+    //   네이티브 치트 유무를 판정한다. DIP/치트 화면은 메뉴를 열 때 직접 읽는다.
+    QTimer::singleShot(300, this, [this]{
+        refreshNativeCheatFlag();
+        if (m_menu) m_menu->refreshOpen();
+    });
 
-    // 코어가 알려준 버튼 의미를 남긴다 (기종별 기본 배치를 맞추는 근거)
+    // 코어가 알려준 버튼 의미를 남기고, 그 값으로 기본 매핑을 확정한다.
+    //   ★ 이게 유일한 정답이다. 롬 이름 목록·소스 추정은 여기서 덮어써진다.
     QTimer::singleShot(320, this, [this]{
         if (gState.inputDesc.isEmpty()) return;
         QStringList parts;
         QList<int> ids = gState.inputDesc.keys();
         std::sort(ids.begin(), ids.end());
         for (int id : ids) parts << QString("%1=%2").arg(id).arg(gState.inputDesc.value(id));
-        log("🎮 코어 버튼 정의: " + parts.join(", "));
+        qDebug().noquote() << "[core] 버튼 정의: " + parts.join(", ");
+        applyCoreButtonDefs();
     });
-    log(QString("▶ 에뮬 시작 (%1 FPS)").arg(gState.coreFps, 0, 'f', 2));
+    qDebug().noquote() << QString("[emu] 시작 %1 FPS").arg(gState.coreFps, 0, 'f', 2);
 }
 
 void MainWindow::launchGame() {
@@ -3703,8 +2097,10 @@ void MainWindow::launchGame() {
         m_loadedGame = m_selectedGame;  // 로드된 게임 이름 기록
         // 코어의 실제 샘플레이트로 오디오 재초기화 (끊김 방지)
         int sr = static_cast<int>(gState.coreSampleRate > 8000 ? gState.coreSampleRate : 44100);
-        log(QString("🔊 오디오: %1 Hz, %2 ms").arg(sr).arg(gSettings.audioBufferMs));
+        qDebug().noquote() << QString("[audio] %1 Hz, %2 ms").arg(sr).arg(gSettings.audioBufferMs);
         m_audio->init(sr, gSettings.audioBufferMs);
+        applyResolvedSoundMode();   // 재초기화로 리셋된 모드 다시 적용
+        applyBezel();               // 이 게임의 베젤 (bezels/<롬>.png)
         startEmu();
     } else {
         log("✖ ROM 로드 실패: " + m_selectedGame);
@@ -3713,11 +2109,6 @@ void MainWindow::launchGame() {
 
 void MainWindow::toggleSwapPlayers() {
     gState.swapPlayers = !gState.swapPlayers;
-
-    if (m_swapBtn) {
-        m_swapBtn->setChecked(gState.swapPlayers);
-        m_swapBtn->setText(gState.swapPlayers ? "⇄  2P" : "⇄  1P");
-    }
 
     // ── 게임 화면 오버레이 업데이트 ──────────────────────────
     if (m_playerOverlay && m_canvas) {
@@ -3780,35 +2171,6 @@ void MainWindow::applyTate(int rot) {
     if (!m_canvas) return;
     m_canvas->setRotation(rot);
 
-    // 버튼 라벨 + 색상 업데이트
-    if (m_tateBtn) {
-        QString lbl;
-        QString activeStyle =
-            "QPushButton{background:#002200;color:#44ff88;border:2px solid #00cc44;"
-            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
-            "QPushButton:hover{background:#003300;}";
-        QString inactiveStyle =
-            "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
-            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
-            "QPushButton:hover{background:#00004d;}";
-
-        switch (rot) {
-        case  1: lbl = "⟳  90°CCW"; m_tateBtn->setStyleSheet(activeStyle);   break;
-        case  3: lbl = "⟲  90°CW";  m_tateBtn->setStyleSheet(activeStyle);   break;
-        case  0: lbl = "⟳  OFF";    m_tateBtn->setStyleSheet(inactiveStyle);  break;
-        default: // -1 = auto
-            {
-                int autoRot = gState.videoRotation;
-                if (autoRot == 0)
-                    lbl = "⟳  TATE";     // 코어가 회전 안 함 → 비활성
-                else
-                    lbl = "⟳  AUTO";     // 코어가 회전 지정 → 활성
-                m_tateBtn->setStyleSheet(autoRot != 0 ? activeStyle : inactiveStyle);
-            }
-            break;
-        }
-        m_tateBtn->setText(lbl);
-    }
 
     QString rotName;
     switch (rot) {
@@ -3839,14 +2201,28 @@ void MainWindow::togglePause() {
     }
 }
 
+// 지금 전체화면인가. Windows 는 창의 실제 상태를 본다. 스팀덱(gamescope)은 창이 처음부터
+//   전체화면으로 떠 있어도 Qt 가 그렇다고 알려 주지 않는 일이 있어, 우리가 기억한 상태도 함께 본다.
+bool MainWindow::fullscreenNow() const {
+#ifdef _WIN32
+    return isFullScreen();
+#else
+    return isFullScreen() || m_isFullscreen;
+#endif
+}
+
 void MainWindow::toggleFullscreen() {
-    m_isFullscreen = !m_isFullscreen;
-    if (m_isFullscreen) {
+    if (!fullscreenNow()) {
         m_windowedSize = size();
+        m_isFullscreen = true;
         showFullScreen();
     } else {
+        m_isFullscreen = false;
         showNormal();
-        resize(m_windowedSize);
+        // 창 크기가 화면보다 크면 오른쪽·아래가 잘린다 (스팀덱 1280x800 에서 그랬다)
+        QSize sz = m_windowedSize.isValid() ? m_windowedSize : QSize(1360, 840);
+        if (screen()) sz = sz.boundedTo(screen()->availableGeometry().size());
+        resize(sz);
     }
 }
 
@@ -3890,22 +2266,6 @@ void MainWindow::onEmuTimer() {
     // 넷플레이 첫 프레임 진입 진단 (frame=0일 때만 1회)
     if (gNetplay().playing() && gState.frameCount == 0) {
         qDebug("[NP] FIRST FRAME entered — playing=true frameCount=0 core=%p", (void*)m_core);
-    }
-
-    // ── 게임패드 메뉴 진입: SELECT+START 2초 홀드 ─────────────────
-    // · Start 단독은 게임으로 그대로 전달 (KOF 보스선택 커맨드 정상 작동)
-    // · SELECT+START 동시 홀드 → 2초 후 메인 GUI 복귀
-    {
-        bool combo = (gState.rawKeys[2] != 0) && (gState.rawKeys[3] != 0);
-        if (combo) {
-            if (++m_menuHoldCount >= 120) {
-                m_menuHoldCount = 0;
-                togglePause();
-                return;
-            }
-        } else {
-            m_menuHoldCount = 0;
-        }
     }
 
     // ── 서비스 모드 자동 해제 (5초 = 300프레임) ───────────────────
@@ -4241,6 +2601,7 @@ void MainWindow::onEmuTimer() {
         int runs = gState.fastForward ? 3 : 1;
         for (int i = 0; i < runs; ++i) m_core->run();
         gState.frameCount++;
+        pushFrameHistory();
     }
 
     // ── 치트 매 프레임 적용 ────────────────────────────────
@@ -4295,37 +2656,7 @@ void MainWindow::toggleFavorite(const QString& romName) {
     }
     gSettings.save();
 
-    // ★ 목록을 다시 만들지 않는다.
-    //   예전에는 scanRoms() 로 전체를 재정렬해서 즐겨찾기한 게임이 목록 맨 위로
-    //   올라가고 주변 항목도 전부 바뀌었다 → 연달아 즐겨찾기하려면 매번 다시
-    //   스크롤해 내려가야 했다.
-    //   → 지금은 해당 행의 별표/색만 제자리에서 갱신한다. 스크롤 위치와 주변
-    //     항목이 그대로라 옆 게임을 계속 즐겨찾기할 수 있다.
-    //     (즐겨찾기 상위 정렬은 다음 실행이나 필터 전환 때 반영된다)
-    if (m_glFilter != 0) {
-        // ★FAV / ☆ 필터 보는 중에는 목록 구성 자체가 바뀌어야 하므로 다시 채운다
-        //   (정렬은 그대로라 위치는 크게 튀지 않는다)
-        filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
-    } else if (m_gameList) {
-        const bool fav = isFavorite(romName);
-        for (int i = 0; i < m_gameList->count(); ++i) {
-            QListWidgetItem* it = m_gameList->item(i);
-            if (it->data(Qt::UserRole).toString() != romName) continue;
-
-            QString disp = it->text();
-            if (disp.startsWith("* ") || disp.startsWith("  ")) disp = disp.mid(2);
-            it->setText((fav ? "* " : "  ") + disp);
-            it->setData(Qt::UserRole + 1, fav);
-
-            if (romName == m_selectedGame)
-                it->setForeground(QColor("#44ffaa"));
-            else if (fav)
-                it->setForeground(QColor("#ffdd44"));
-            else
-                it->setForeground(QBrush());   // 기본색으로 되돌림
-            break;
-        }
-    }
+    filterRoms();      // 목록 위치는 셸이 유지한다 (선택 게임 기준)
     log(QString("즐겨찾기 저장 완료. 현재 %1개").arg(gSettings.favorites.size()));
 }
 
@@ -4364,25 +2695,74 @@ void MainWindow::loadState(int slot) {
         log(QString("📂 슬롯 %1 로드 완료").arg(slot));
 }
 
+// ── 프레임 기록 / FRAME LAB ─────────────────────────────────
+//   게임이 도는 동안 최근 프레임을 쌓아 둔다. FRAME LAB 에서 뒤로 한 프레임씩 볼 때 쓴다.
+static constexpr int kFrameHistory = 120;                 // 약 2초
+
+void MainWindow::pushFrameHistory() {
+    if (m_histGame != m_loadedGame) { m_frameHist.clear(); m_histGame = m_loadedGame; }
+    const QImage img = currentFrameImage();
+    if (img.isNull()) return;
+    m_frameHist.append(img);
+    while (m_frameHist.size() > kFrameHistory) m_frameHist.removeFirst();
+}
+
+// 게임이 멈춘 상태에서 코어를 정확히 한 프레임만 실행한다 (입력은 모두 뗀 상태로).
+QImage MainWindow::stepOneFrame() {
+    if (!gState.gameLoaded || !m_core || gNetplay().playing()) return QImage();
+    gState.keys.fill(0);  gState.p2Keys.fill(0);  gState.p3Keys.fill(0);  gState.p4Keys.fill(0);
+    m_core->run();
+    gState.frameCount++;
+    if (m_cheat && !m_nativeCheatsActive)
+        m_cheat->applyFrame(m_core, gState.frameCount, gState.gameLoadFrame);
+    const QImage img = currentFrameImage();
+    if (!img.isNull()) {
+        m_frameHist.append(img);
+        while (m_frameHist.size() > kFrameHistory) m_frameHist.removeFirst();
+    }
+    return img;
+}
+
+void MainWindow::openFrameLab() {
+    if (!gState.gameLoaded || m_frameHist.isEmpty() || m_histGame != m_loadedGame) {
+        log(isEn() ? "FRAME LAB: run a game first (then press Tab to open the menu)"
+                   : "프레임 랩: 먼저 게임을 실행한 뒤 Tab 으로 메뉴를 여세요");
+        return;
+    }
+    if (gNetplay().playing()) {
+        log(isEn() ? "FRAME LAB: not available during netplay"
+                   : "프레임 랩: 넷플레이 중에는 쓸 수 없습니다");
+        return;
+    }
+    m_lab->open(QVector<QImage>(m_frameHist.begin(), m_frameHist.end()),
+                [this] { return stepOneFrame(); },
+                [this](const QImage& img, int rel) {
+                    QDir().mkpath(gSettings.screenshotPath);
+                    const QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+                    const QString path = gSettings.screenshotPath + "/" + m_loadedGame + "_" + ts
+                                         + "_f" + (rel >= 0 ? "+" : "") + QString::number(rel) + ".png";
+                    if (!img.save(path)) return QString();
+                    log("📷 " + path);
+                    return path;
+                },
+                !isEn());
+    m_stack->setCurrentIndex(4);
+    m_lab->setFocus();
+}
+
+// 지금 코어가 내보낸 마지막 화면 (32비트로 통일). 프레임이 없으면 널 이미지.
+QImage MainWindow::currentFrameImage() const {
+    if (!gState.gameLoaded || gState.videoWidth == 0) return QImage();
+    const int w = int(gState.videoWidth), h = int(gState.videoHeight), pitch = int(gState.videoPitch);
+    const bool x8888 = gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888;
+    const QImage view(reinterpret_cast<const uchar*>(gState.videoBuffer.constData()), w, h, pitch,
+                      x8888 ? QImage::Format_RGB32 : QImage::Format_RGB16);
+    return x8888 ? view.copy() : view.convertToFormat(QImage::Format_RGB32);
+}
+
 void MainWindow::takeScreenshot() {
-    if (!gState.gameLoaded || gState.videoWidth == 0) {
-        log("스크린샷: 프레임 없음"); return;
-    }
-    int w = static_cast<int>(gState.videoWidth);
-    int h = static_cast<int>(gState.videoHeight);
-    QImage img;
-    if (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
-        img = QImage(
-            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-            w, h, static_cast<int>(gState.videoPitch),
-            QImage::Format_RGB32).copy();
-    } else {
-        img = QImage(
-            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-            w, h, static_cast<int>(gState.videoPitch),
-            QImage::Format_RGB16).copy();
-        img = img.convertToFormat(QImage::Format_RGB32);
-    }
+    const QImage img = currentFrameImage();
+    if (img.isNull()) { log("스크린샷: 프레임 없음"); return; }
     QDir().mkpath(gSettings.screenshotPath);
     QString ts   = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     QString path = gSettings.screenshotPath + "/" + m_selectedGame + "_" + ts + ".png";
@@ -4392,27 +2772,12 @@ void MainWindow::takeScreenshot() {
 
 // ── 프리뷰 이미지 저장 ───────────────────────────────────────
 void MainWindow::savePreviewShot() {
-    if (!gState.gameLoaded || gState.videoWidth == 0) {
+    const QImage img = currentFrameImage();
+    if (img.isNull()) {
         log("프리뷰 저장: 프레임 없음 (게임 실행 중이 아님)"); return;
     }
     if (m_selectedGame.isEmpty()) {
         log("프리뷰 저장: 선택된 게임 없음"); return;
-    }
-
-    int w = static_cast<int>(gState.videoWidth);
-    int h = static_cast<int>(gState.videoHeight);
-    QImage img;
-    if (gState.pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
-        img = QImage(
-            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-            w, h, static_cast<int>(gState.videoPitch),
-            QImage::Format_RGB32).copy();
-    } else {
-        img = QImage(
-            reinterpret_cast<const uchar*>(gState.videoBuffer.constData()),
-            w, h, static_cast<int>(gState.videoPitch),
-            QImage::Format_RGB16).copy();
-        img = img.convertToFormat(QImage::Format_RGB32);
     }
 
     QDir().mkpath(gSettings.previewPath);
@@ -4634,19 +2999,272 @@ void MainWindow::playClickSound() {
 //   장치 이름별로 저장해 두고, 연결될 때마다 해당 프로필을 적용한다.
 //   저장된 프로필이 없으면 기본 매핑으로 시작한다.
 // ════════════════════════════════════════════════════════════
+// 실제로 적용된 패드 매핑을 로그에 남긴다.
+//   기본값이 저장된 프로필에 덮여도 겉으로는 알 수 없어서, 무엇이 쓰이는지
+//   눈으로 확인할 수 있게 한다. (배치 문제를 두 번 놓친 뒤 추가)
+void MainWindow::logPadMappingSummary() {
+    if (!m_gamepad) return;
+    int pad = -1;
+    for (int i = 0; i < 4; ++i)
+        if (m_gamepad->padPresent(i)) { pad = i; break; }
+    if (pad < 0) return;
+
+    const QString name = m_gamepad->padName(pad);
+    const QString src  = m_padMapSource[pad].isEmpty() ? QString("?")
+                                                       : m_padMapSource[pad];
+    const QHash<int,int> m = m_gamepad->padMapping(pad);
+
+    // 패드 버튼 → libretro 인덱스 (사람이 읽을 수 있게)
+    struct { int bit; const char* nm; } btns[] = {
+#ifdef _WIN32
+        {0x4000,"X"}, {0x8000,"Y"}, {0x0200,"R1"},
+        {0x1000,"A"}, {0x2000,"B"}, {0x20000,"R2"}, {0x0100,"L1"},
+#else
+        {1<<2,"X"}, {1<<3,"Y"}, {1<<5,"R1"},
+        {1<<0,"A"}, {1<<1,"B"}, {1<<17,"R2"}, {1<<4,"L1"},
+#endif
+    };
+    QStringList parts;
+    for (const auto& b : btns)
+        parts << QString("%1=%2").arg(b.nm)
+                 .arg(m.contains(b.bit) ? QString::number(m.value(b.bit))
+                                        : QString("-"));
+    // 진단용 — 화면 로그가 아니라 crash_log 에만 남긴다
+    qDebug().noquote() << QString("[pad] %1 출처=%2 : %3")
+                          .arg(name, src, parts.join(" "));
+}
+
+// ── 패드 매핑: 해석은 PadMapping.cpp 한 곳에서만 한다 ────────
+QString MainWindow::padScopeKeyDev(const QString& device) const {
+    return ::padScopeKeyDev(device,
+        m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard);
+}
+
+// 코어가 보낸 버튼 정의로 6버튼 기본 매핑을 확정한다.
+//   사용자가 원하는 배치 그대로 채운다:
+//        X   Y   R1        LP  MP  HP
+//        A   B   R2        LK  MK  HK
+void MainWindow::applyCoreButtonDefs() {
+    if (!m_gamepad) return;
+    const CoreSixButtons cb = resolveSixButtons(gState.inputDesc, padLayoutOf(m_loadedGame) == PadLayout::SixButton);
+    m_coreBtns = cb;
+
+    if (!cb.valid) {
+        // 6버튼 게임이 아니다 → 일반 배치로 확정 (롬 목록 추정이 틀렸어도 교정된다)
+        if (m_gamepad->padLayout() != PadLayout::Standard) {
+            m_gamepad->setPadLayout(PadLayout::Standard);
+            qDebug().noquote() << "[pad] 배치=일반 (코어 정의 기준)";
+        }
+        applyPadProfiles();
+        reloadKeymap();
+        refreshControlsUi();
+        logPadMappingSummary();
+        return;
+    }
+
+    if (m_gamepad->padLayout() != PadLayout::SixButton) {
+        m_gamepad->setPadLayout(PadLayout::SixButton);
+        qDebug().noquote() << "[pad] 배치=6버튼 (코어 정의 기준)";
+    }
+    qDebug().noquote() << QString("[pad] 6버튼 LP=%1 MP=%2 HP=%3 / LK=%4 MK=%5 HK=%6")
+                          .arg(cb.lp).arg(cb.mp).arg(cb.hp).arg(cb.lk).arg(cb.mk).arg(cb.hk);
+
+    applyPadProfiles();      // 저장된 사용자 설정이 있으면 그게 여전히 우선
+    reloadKeymap();
+    refreshControlsUi();
+    logPadMappingSummary();
+}
+
+// 배치 기본값 — 코어가 알려준 인덱스가 있으면 그것을 쓴다.
+//   하드코딩된 표는 게임 실행 전(메뉴)에만 쓰이는 추정치다.
+QHash<int,int> MainWindow::layoutDefaultMap() const {
+    return GamepadManager::makeDefaultMapping(
+        m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard);
+}
+
+QHash<int,int> MainWindow::resolvePadMap(const QString& device,
+                                         const QString& rom,
+                                         QString* sourceOut) const {
+    const PadLayout lay = m_gamepad ? m_gamepad->padLayout() : PadLayout::Standard;
+    PadMapSource src = PadMapSource::Default;
+    // 우선순위: 이 게임(자동 저장) > 이 기종(직접 저장) > 이 장치의 배치별 표 > 배치 기본값.
+    //   어느 것이 적용 중인지는 컨트롤 화면의 "적용 중" 줄에 나온다.
+    PadMap m = ::resolvePadMap(gSettings.padMaps, device, rom, platScopeKey(rom), lay,
+                               layoutDefaultMap(), &src);
+    if (sourceOut) *sourceOut = padMapSourceLabel(src, isEn());
+    return m;
+}
+
+// 현재 대상 게임 (실행 중이면 그 게임, 아니면 목록에서 고른 게임)
+QString MainWindow::currentPadRom() const {
+    return m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+}
+
+// 범위("game"/"plat"/"all")의 저장 키: "game:<롬>" / "plat:<기종>" / "all". 게임이 없으면 "".
+QString MainWindow::bezelKeyFor(const QString& scope) const {
+    const QString rom = m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+    if (scope == "game") return rom.isEmpty() ? QString() : ("game:" + rom);
+    if (scope == "plat") {
+        const QString plat = gamePlatform(rom);
+        return plat.isEmpty() ? QString() : ("plat:" + plat);
+    }
+    return QStringLiteral("all");
+}
+
+QString MainWindow::bezelScopeLabel(const QString& scope) const {
+    const QString rom  = m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+    const QString plat = gamePlatform(rom);
+    const bool    en   = isEn();
+    if (scope == "game")
+        return rom.isEmpty() ? (en ? "THIS GAME" : "이 게임")
+                             : (en ? QString("THIS GAME (%1)").arg(rom) : QString("이 게임 (%1)").arg(rom));
+    if (scope == "plat")
+        return plat.isEmpty() ? (en ? "THIS PLATFORM" : "이 기종")
+                              : (en ? QString("THIS PLATFORM (%1)").arg(plat)
+                                    : QString("이 기종 (%1 전체)").arg(plat));
+    return en ? "ALL GAMES" : "모든 게임";
+}
+
+// 지금 베젤이 어떻게 적용되고 있는지 (VIDEO 화면의 안내 줄)
+QString MainWindow::bezelInfoText() const {
+    const QString rom  = m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+    const QString plat = gamePlatform(rom);
+    const bool    en   = isEn();
+    if (!gSettings.bezelEnabled) return en ? "Bezel is off." : "베젤이 꺼져 있습니다.";
+    QString why;
+    const QString path = gSettings.bezelPathFor(rom, plat, &why);
+    return path.isEmpty()
+        ? (en ? "No bezel found for this game (put a PNG in bezels/)."
+              : "이 게임에 쓸 베젤이 없습니다 (bezels/ 에 PNG 를 넣으세요).")
+        : (en ? QString("Now: %1  (%2)").arg(QFileInfo(path).fileName(), why)
+              : QString("현재 적용: %1  (%2)").arg(QFileInfo(path).fileName(), why));
+}
+
+void MainWindow::assignBezel(const QString& key, const QString& value) {
+    gSettings.bezelAssign[key] = value;
+    gSettings.bezelEnabled = true;
+    gSettings.save();
+    applyBezel();
+}
+
+void MainWindow::clearBezelAssign(const QString& key) {
+    if (gSettings.bezelAssign.remove(key) > 0) {
+        gSettings.save();
+        log(QString(isEn() ? "Bezel assignment cleared: %1" : "베젤 배정 해제: %1").arg(key));
+    }
+    applyBezel();
+}
+
+// 셰이더 파일을 걸고 저장한다. 컴파일/링크에 실패하면 설정을 되돌리고 안내한다.
+bool MainWindow::applyShaderFile(const QString& p) {
+    gSettings.videoShaderPath = p;
+    const bool ok = m_canvas ? m_canvas->setShaderPath(p) : true;
+    if (ok) {
+        log("✔ 셰이더 로드: " + QFileInfo(p).fileName());
+    } else {
+        gSettings.videoShaderPath.clear();
+        QMessageBox::warning(this, isEn() ? "Shader error" : "셰이더 오류",
+            (isEn() ? "Shader compile/link failed.\n\nFile: "
+                    : "셰이더 컴파일/링크에 실패했습니다.\n\n파일: ") + QFileInfo(p).fileName() +
+            (isEn() ? "\n\nSee the log panel for details."
+                    : "\n\n아래 로그 패널에서 오류 내용을 확인하세요."));
+    }
+    gSettings.save();
+    return ok;
+}
+
+void MainWindow::clearShaderFile() {
+    gSettings.videoShaderPath.clear();
+    if (m_canvas) m_canvas->setShaderPath({});
+    gSettings.save();
+    log("셰이더 해제");
+}
+
+// 터보 설정은 셸에서 바꾸는 즉시 저장한다 (예전엔 APPLY 버튼에서만 저장했다).
+//   게임이 정해져 있으면 그 게임 범위에 자동 저장한다 (다른 게임의 터보는 그대로).
+void MainWindow::saveTurboSettings() {
+    const QString rom = currentPadRom();
+    if (rom.isEmpty()) {
+        gSettings.turboPeriod = gState.turboPeriod;
+        QStringList turboList;
+        for (auto it = gState.turboBtns.begin(); it != gState.turboBtns.end(); ++it)
+            if (it.value()) turboList.append(QString::number(it.key()));
+        gSettings.turboButtons = turboList.join(',');
+    } else {
+        gSettings.turboScoped[gameScopeKey(rom)] = turboToString();
+    }
+    gSettings.save();
+}
+
+// 지금 켜 둔 터보를 "0,8,1|6" 형태로 (켠 버튼 인덱스 | 주기)
+QString MainWindow::turboToString() const {
+    QStringList l;
+    for (auto it = gState.turboBtns.begin(); it != gState.turboBtns.end(); ++it)
+        if (it.value()) l.append(QString::number(it.key()));
+    l.sort();
+    return l.join(',') + QLatin1Char('|') + QString::number(gState.turboPeriod);
+}
+
+// 게임 > 기종 > 전역 순으로 터보 설정을 골라 적용한다.
+void MainWindow::applyTurboFor(const QString& rom) {
+    QString v;
+    if (!rom.isEmpty()) {
+        v = gSettings.turboScoped.value(gameScopeKey(rom));
+        if (v.isEmpty()) v = gSettings.turboScoped.value(platScopeKey(rom));
+    }
+    if (v.isEmpty())
+        v = gSettings.turboButtons + QLatin1Char('|') + QString::number(gSettings.turboPeriod);
+    const QStringList parts = v.split(QLatin1Char('|'));
+    gState.turboBtns.clear();
+    for (const QString& s : parts.value(0).split(',', Qt::SkipEmptyParts)) {
+        bool ok = false; const int idx = s.trimmed().toInt(&ok);
+        if (ok && idx >= 0 && idx < 16) gState.turboBtns[idx] = true;
+    }
+    bool ok = false; const int per = parts.value(1).toInt(&ok);
+    gState.turboPeriod = (ok && per >= 1 && per <= 30) ? per : gSettings.turboPeriod;
+}
+
+// 현재 게임에 맞는 베젤을 캔버스에 올린다 (꺼져 있거나 파일이 없으면 해제).
+void MainWindow::applyBezel() {
+    if (!m_canvas) return;
+    if (m_menu) m_menu->refreshOpen();      // VIDEO 화면의 안내 줄
+
+    if (!gSettings.bezelEnabled) { m_canvas->setBezelImage(QImage()); return; }
+
+    const QString rom  = m_loadedGame.isEmpty() ? m_selectedGame : m_loadedGame;
+    QString why;
+    const QString path = gSettings.bezelPathFor(rom, gamePlatform(rom), &why);
+    if (path.isEmpty()) {
+        m_canvas->setBezelImage(QImage());
+        return;
+    }
+    QImage img(path);
+    if (img.isNull()) {
+        m_canvas->setBezelImage(QImage());
+        log("⚠ " + QString(isEn() ? "Bezel load failed: " : "베젤 로드 실패: ")
+            + QFileInfo(path).fileName());
+        return;
+    }
+    m_canvas->setBezelImage(img);
+    log(QString("🖼 %1: %2 (%3)")
+        .arg(isEn() ? "Bezel" : "베젤", QFileInfo(path).fileName(), why));
+}
+
 void MainWindow::applyPadProfiles() {
     if (!m_gamepad) return;
     for (int i = 0; i < 4; ++i) {
         if (!m_gamepad->padPresent(i)) continue;
         const QString name = m_gamepad->padName(i);
-        if (name.isEmpty()) continue;
 
         // ★ 프로필이 없어도 "기본 매핑의 사본"을 각 패드에 넣어 둔다.
         //   빈 값으로 두면 공용 매핑을 폴백으로 쓰게 되어, 다른 패드를
         //   건드렸을 때 같이 영향을 받는다. 사본을 주면 완전히 독립된다.
-        m_gamepad->setPadMapping(i, gSettings.padProfiles.contains(name)
-                                    ? gSettings.padProfiles.value(name)
-                                    : m_gamepad->defaultPadMapping());
+        QString src;
+        const PadMap stored = resolvePadMap(name, currentPadRom(), &src);
+        m_padUiMap[i]      = stored;                     // 화면에 보여줄 표
+        m_padMapSource[i]  = src;
+        // 게임에는 이 게임의 실제 인덱스로 바꿔서 넘긴다
+        m_gamepad->setPadMapping(i, materializePadMap(stored, m_coreBtns));
 
         // 배정: 저장값이 있으면 그것.
         //   저장값이 없을 때는 첫 패드만 1P 로 두고 나머지는 "사용 안 함".
@@ -4660,158 +3278,117 @@ void MainWindow::applyPadProfiles() {
     }
 }
 
-// 컨트롤 화면의 "연결된 패드" 목록을 다시 만든다.
-//   각 줄: [대상] 장치이름 (버튼수)   [플레이어 콤보]
-void MainWindow::rebuildPadAssignUi() {
-    if (!m_padAssignLayout || !m_gamepad) return;
-
-    while (QLayoutItem* it = m_padAssignLayout->takeAt(0)) {
-        if (it->widget()) it->widget()->deleteLater();
-        delete it;
-    }
-
-    int shown = 0;
-    for (int i = 0; i < 4; ++i) {
-        if (!m_gamepad->padPresent(i)) continue;
-        ++shown;
-        const QString name = m_gamepad->padName(i);
-
-        QWidget* row = new QWidget;
-        row->setStyleSheet("background:transparent;");
-        QHBoxLayout* h = new QHBoxLayout(row);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(6);
-
-        // 리매핑 대상 선택 (라디오처럼 동작)
-        QPushButton* target = new QPushButton(isEn() ? "TARGET" : "대상");
-        target->setCheckable(true);
-        target->setChecked(m_remapPad == i);
-        target->setProperty("padIdx", i);           // 형제 버튼 갱신용 표시
-        target->setFixedWidth(58);
-        target->setFixedHeight(22);
-        target->setStyleSheet(
-            "QPushButton{background:#000033;color:#6688bb;border:1px solid #224488;"
-            "font-family:'Courier New';font-size:9px;font-weight:bold;}"
-            "QPushButton:checked{background:#001166;color:#aaddff;border-color:#4488ff;}");
-        connect(target, &QPushButton::clicked, this, [this, i]{
-            m_remapPad = i;
-            // ★ 목록을 다시 만들지 않는다. 클릭한 버튼 자신이 삭제되면
-            //   조작이 끊기고 오작동한다 → 체크 상태만 갱신한다.
-            if (m_padAssignBox) {
-                const auto btns = m_padAssignBox->findChildren<QPushButton*>();
-                for (QPushButton* b : btns) {
-                    const QVariant v = b->property("padIdx");
-                    if (v.isValid()) b->setChecked(v.toInt() == i);
-                }
-            }
-            refreshPadTable();
-            log(QString("🎮 리매핑 대상: %1").arg(m_gamepad->padName(i)));
-        });
-        h->addWidget(target);
-
-        QLabel* nameLbl = new QLabel(name.isEmpty() ? QString("PAD %1").arg(i + 1) : name);
-        nameLbl->setStyleSheet("color:#aaccff;font-family:'Courier New';font-size:10px;"
-                               "background:transparent;");
-        nameLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        h->addWidget(nameLbl, 1);
-
-        QComboBox* cb = new QComboBox;
-        cb->setStyleSheet(editStyle());
-        cb->setFixedWidth(96);
-        // 목록을 채우고 현재값을 고르는 동안 신호가 나가지 않게 막는다
-        cb->blockSignals(true);
-        cb->addItem(isEn() ? "Off" : "사용 안 함", 0);
-        for (int p = 1; p <= 4; ++p) cb->addItem(QString("%1P").arg(p), p);
-        const int cur = cb->findData(m_gamepad->padPlayer(i));
-        cb->setCurrentIndex(cur >= 0 ? cur : 0);
-        cb->blockSignals(false);
-        connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                [this, i, cb, name](int){
-            const int player = cb->currentData().toInt();
-            m_gamepad->setPadPlayer(i, player);
-            if (!name.isEmpty()) { gSettings.padAssign[name] = player; gSettings.save(); }
-            log(QString("🎮 %1 → %2").arg(name,
-                    player == 0 ? QString(isEn() ? "Off" : "사용 안 함")
-                                : QString("%1P").arg(player)));
-            // ★ 여기서 목록을 다시 만들지 않는다 (자기 자신을 지우면 조작이 끊긴다)
-        });
-        h->addWidget(cb);
-
-        m_padAssignLayout->addWidget(row);
-    }
-
-    if (shown == 0) {
-        QLabel* none = new QLabel(isEn() ? "No gamepad detected"
-                                         : "연결된 게임패드 없음");
-        none->setStyleSheet("color:#556677;font-family:'Courier New';font-size:10px;"
-                            "background:transparent;");
-        m_padAssignLayout->addWidget(none);
-    }
-    applyWheelGuard(m_padAssignBox);
-}
-
-// 옵션 패널 안의 콤보/스핀/슬라이더에 휠 가드를 건다.
-void MainWindow::applyWheelGuard(QWidget* root) {
-    if (!root) return;
-    if (!m_wheelGuard) m_wheelGuard = new WheelGuard(this);
-    const QList<QWidget*> ws = root->findChildren<QWidget*>();
-    for (QWidget* w : ws) {
-        if (qobject_cast<QComboBox*>(w) || qobject_cast<QAbstractSpinBox*>(w)
-            || qobject_cast<QSlider*>(w)) {
-            w->setFocusPolicy(Qt::StrongFocus);   // 클릭해야 휠 조작 가능
-            w->removeEventFilter(m_wheelGuard);   // 중복 설치 방지
-            w->installEventFilter(m_wheelGuard);
-        }
-    }
-}
-
 // ════════════════════════════════════════════════════════════
-//  GUI 한/영 전환
-//  ─ 위젯을 재생성하지 않고 등록된 위젯의 텍스트만 교체한다.
-//    (재생성 방식은 시그널 연결/레이아웃이 끊길 위험이 있어 배제)
-//  ─ 'CONTROLS', 'VIDEO OPTIONS' 같은 아케이드풍 영문 제목은 두 언어
-//    공통으로 두고, 설명문/툴팁/체크박스 등 읽는 텍스트만 전환한다.
+//  화면보호기 — 무조작 5분 후 프리뷰 영상을 무작위 전체화면 재생
+//   같은 화면이 계속 떠 있어 생기는 번인을 줄이기 위한 기능.
+//   아무 입력(키·마우스·패드)이 들어오면 즉시 빠져나온다.
 // ════════════════════════════════════════════════════════════
-void MainWindow::applyTrEntry(const TrEntry& e) {
-    if (!e.w) return;                       // QPointer → 파괴된 위젯 자동 skip
-    const QString s = isEn() ? e.en : e.ko;
+void MainWindow::resetIdleTimer() {
+    m_ssIdleTicks = 0;
+    if (m_ssActive) stopScreensaver();   // 재생 중이면 즉시 해제
+}
 
-    if (e.kind == 1) { e.w->setToolTip(s); return; }
-    if (e.kind == 2) {                      // QLineEdit 플레이스홀더
-        if (auto* le = qobject_cast<QLineEdit*>(e.w)) le->setPlaceholderText(s);
-        return;
+void MainWindow::startScreensaver() {
+    if (m_ssActive || !m_stack || !m_ssPage) return;
+    if (m_stack->currentIndex() != 0) return;
+    if (gState.gameLoaded || gState.isPaused || m_captureActive) return;
+
+    // 재생할 영상이 하나도 없으면 켜지 않는다
+    QDir dir(gSettings.previewPath);
+    const QStringList vids = dir.entryList(
+        {"*.mp4", "*.avi", "*.mkv", "*.webm", "*.mov"}, QDir::Files);
+    if (vids.isEmpty()) return;
+
+    m_ssActive = true;
+    if (m_previewVidTimer) m_previewVidTimer->stop();
+#if HAVE_FFMPEG
+    if (m_previewVideo) m_previewVideo->stop();     // 프리뷰 재생과 충돌 방지
+#endif
+    if (m_mediaPlayer) m_mediaPlayer->stop();
+
+    if (m_ssLabel) m_ssLabel->setPixmap(QPixmap());
+    m_stack->setCurrentIndex(2);
+    // 번인 방지가 목적이므로 창모드였다면 전체화면으로 띄운다 (해제 시 원복)
+    m_ssWasWindowed = !isFullScreen();
+    if (m_ssWasWindowed) showFullScreen();
+    log("💤 화면보호기 시작 — 아무 키나 누르면 해제됩니다");
+    playRandomScreensaverVideo();
+}
+
+void MainWindow::stopScreensaver() {
+    if (!m_ssActive) return;
+    m_ssActive = false;
+#if HAVE_FFMPEG
+    if (m_previewVideo) m_previewVideo->stop();
+#endif
+    if (m_mediaPlayer) m_mediaPlayer->stop();
+    if (m_ssLabel) { m_ssLabel->setPixmap(QPixmap()); m_ssLabel->show(); }
+    if (m_stack)  m_stack->setCurrentIndex(0);
+    if (m_ssWasWindowed) { m_ssWasWindowed = false; showNormal(); }
+    log("💤 화면보호기 해제");
+
+    // 방금 나온 영상의 게임으로 목록 커서를 옮긴다 (previews/<롬>.mp4 → 롬 이름)
+    revealGame(QFileInfo(m_ssLastFile).completeBaseName());
+
+    // 선택된 게임의 프리뷰를 다시 보여준다
+    if (!m_selectedGame.isEmpty()) {
+        m_previewVideoDone = true;      // 복귀 직후 영상이 또 뜨지 않게
+        loadPreview(m_selectedGame);
     }
-
-    if (auto* g = qobject_cast<QGroupBox*>(e.w))            g->setTitle(s);
-    else if (auto* b = qobject_cast<QAbstractButton*>(e.w)) b->setText(s);  // QPushButton/QCheckBox/QRadioButton
-    else if (auto* l = qobject_cast<QLabel*>(e.w))          l->setText(s);
+    m_ssIdleTicks = 0;
 }
 
-void MainWindow::trText(QWidget* w, const QString& ko, const QString& en) {
-    if (!w) return;
-    TrEntry e{ w, ko, en, 0 };
-    m_trEntries.push_back(e);
-    applyTrEntry(e);                        // 등록 즉시 현재 언어로 표시
+// 게임 목록에서 그 롬을 골라 보이는 자리로 스크롤한다.
+//   필터나 검색어 때문에 목록에 없으면 필터를 풀어서라도 보여 준다.
+void MainWindow::revealGame(const QString& rom) {
+    if (rom.isEmpty() || !m_shell) return;
+    bool known = false;
+    for (const auto& pr : m_allRoms) if (pr.second == rom) { known = true; break; }
+    if (!known) return;
+
+    bool inList = false;
+    for (const ListRow& r : m_rows) if (r.rom == rom) { inList = true; break; }
+    if (!inList) {
+        m_glFilter = 0;
+        m_hwFilter.clear();
+        m_searchText.clear();
+        m_shell->setSearchText(QString());
+        filterRoms();            // 목록을 다시 만든다 (선택은 아래에서)
+    }
+    selectGame(rom);
+    syncShellList();             // 셸의 커서·스크롤을 선택한 게임으로
 }
 
-void MainWindow::trTip(QWidget* w, const QString& ko, const QString& en) {
-    if (!w) return;
-    TrEntry e{ w, ko, en, 1 };
-    m_trEntries.push_back(e);
-    applyTrEntry(e);
-}
+void MainWindow::playRandomScreensaverVideo() {
+    if (!m_ssActive) return;
+    QDir dir(gSettings.previewPath);
+    QStringList vids = dir.entryList(
+        {"*.mp4", "*.avi", "*.mkv", "*.webm", "*.mov"}, QDir::Files);
+    if (vids.isEmpty()) { stopScreensaver(); return; }
 
-void MainWindow::trPlaceholder(QWidget* w, const QString& ko, const QString& en) {
-    if (!w) return;
-    TrEntry e{ w, ko, en, 2 };
-    m_trEntries.push_back(e);
-    applyTrEntry(e);
+    // 바로 직전 영상은 빼고 고른다 (한 편만 있으면 그대로 반복)
+    if (vids.size() > 1 && !m_ssLastFile.isEmpty()) vids.removeAll(m_ssLastFile);
+    const QString pick = vids.at(QRandomGenerator::global()->bounded(vids.size()));
+    m_ssLastFile = pick;
+    const QString path = dir.filePath(pick);
+
+#if HAVE_FFMPEG
+    if (m_previewVideo) {
+        m_previewVideo->setVolume(gSettings.audioVolume);
+        if (!m_previewVideo->open(path)) { stopScreensaver(); return; }
+    }
+#else
+    if (m_mediaPlayer) {
+        m_mediaPlayer->setSource(QUrl::fromLocalFile(path));
+        m_mediaPlayer->setLoops(1);
+        m_mediaPlayer->play();
+    }
+#endif
+    qDebug().noquote() << QString("[saver] %1").arg(pick);
 }
 
 void MainWindow::retranslateUi() {
-    for (const TrEntry& e : m_trEntries) applyTrEntry(e);
-    rebuildHotkeyTable();      // 표 헤더 + 기능명은 코드 데이터라 별도 갱신
-    if (m_langBtn) m_langBtn->setText(isEn() ? "\xF0\x9F\x8C\x90  KO" : "\xF0\x9F\x8C\x90  EN");
+    if (m_menu) m_menu->retranslate();     // 카테고리·버튼·열려 있는 메뉴를 새 언어로
 }
 
 void MainWindow::toggleLanguage() {
@@ -4824,44 +3401,37 @@ void MainWindow::toggleLanguage() {
 // ════════════════════════════════════════════════════════════
 //  설정 적용 / 갱신
 // ════════════════════════════════════════════════════════════
-void MainWindow::applySettings() {
-    if (m_romPathEdit)     gSettings.romPath     = m_romPathEdit->text();
-    if (m_previewPathEdit) gSettings.previewPath = m_previewPathEdit->text();
-
-    // 나머지 경로는 프로그램 폴더 기준 자동 고정 (포터블)
-    //   ★ AppSettings::baseDir() 사용 — 스팀덱 번들은 실행파일이 bin/ 안이라
-    //     applicationDirPath() 를 쓰면 bin/ 아래에 데이터가 생겨 눈에 안 띈다.
-    {
-        QString base = AppSettings::baseDir();
-        gSettings.screenshotPath = base + "/screenshots";
-        gSettings.savePath       = base + "/saves";
-        gSettings.cheatPath      = base + "/cheats";
-        gSettings.recordPath     = base + "/recordings";
-        // videoShaderPath는 사용자가 VIDEO 탭에서 선택
+// ── 셰이더 파라미터 편집 ─────────────────────────────────────
+//   RetroArch 의 "셰이더 파라미터" 메뉴에 해당한다. 값은 프리셋 파일 이름으로
+//   묶어 config.json 에 남기고, 다음에 같은 셰이더를 걸면 자동으로 복원된다.
+void MainWindow::openShaderParams() {
+    if (!m_canvas) return;
+    const QString key = m_canvas->shaderKey();
+    if (key.isEmpty() || m_canvas->shaderParameters().isEmpty()) {
+        QMessageBox::information(this,
+            isEn() ? "Shader parameters" : "셰이더 파라미터",
+            isEn() ? "Load a .slang / .slangp shader first.\n"
+                     "(Legacy .glsl shaders have no parameters.)"
+                   : "먼저 .slang / .slangp 셰이더를 불러오세요.\n"
+                     "(구형 .glsl 셰이더에는 파라미터가 없습니다.)");
+        return;
     }
 
-    if (m_scaleCombo)         gSettings.videoScaleMode   = m_scaleCombo->currentText();
-    if (m_smoothCheck)        gSettings.videoSmooth      = m_smoothCheck->isChecked();
-    if (m_crtCheck)           gSettings.videoCrtMode     = m_crtCheck->isChecked();
-    if (m_crtSlider)          gSettings.videoCrtIntensity = m_crtSlider->value() / 100.0;
-    if (m_vsyncCheck)         gSettings.videoVsync       = m_vsyncCheck->isChecked();
-    if (m_frameskipSpin)      gSettings.videoFrameskip   = m_frameskipSpin->value();
-    if (m_flashGuardCheck)    gSettings.videoFlashGuard    = m_flashGuardCheck->isChecked();
-    if (m_flashSlider)        gSettings.videoFlashStrength = m_flashSlider->value();
+    ShaderParamDialog dlg(m_canvas, key, isEn(), this);
+    connect(&dlg, &ShaderParamDialog::parameterChanged, this,
+            [this, key](const QString& name, float value) {
+                gSettings.shaderParams[key][name] = value;
+            });
+    connect(&dlg, &ShaderParamDialog::resetRequested, this,
+            [this, key] { gSettings.shaderParams.remove(key); });
+    dlg.exec();
+    gSettings.save();
+    log(QString("셰이더 파라미터 저장: %1").arg(key));
+}
 
-    if (m_volumeSlider)       gSettings.audioVolume      = m_volumeSlider->value();
-    if (m_sampleRateCombo)    gSettings.audioSampleRate  = m_sampleRateCombo->currentText().toInt();
-    if (m_bufferMsSpin)       gSettings.audioBufferMs    = m_bufferMsSpin->value();
-    if (m_regionCombo)        gSettings.region           = m_regionCombo->currentText();
-
-    // 터보 설정 저장
-    gSettings.turboPeriod = gState.turboPeriod;
-    QStringList turboList;
-    for (auto it = gState.turboBtns.begin(); it != gState.turboBtns.end(); ++it)
-        if (it.value()) turboList.append(QString::number(it.key()));
-    gSettings.turboButtons = turboList.join(',');
-
-    // 즉시 적용
+// 저장된 화면·음량 설정을 지금 화면과 오디오에 반영한다.
+//   옛 APPLY 와 셸의 설정 초기화가 같은 코드를 쓴다.
+void MainWindow::applyLiveSettings() {
     if (m_canvas) {
         m_canvas->setScaleMode(gSettings.videoScaleMode);
         m_canvas->setSmooth(gSettings.videoSmooth);
@@ -4869,46 +3439,27 @@ void MainWindow::applySettings() {
         m_canvas->setFlashGuard(gSettings.videoFlashGuard,
                                 gSettings.videoFlashStrength / 100.0f);
     }
-    if (m_audio) {
-        m_audio->setVolume(gSettings.audioVolume / 100.0);
-    }
-    if (m_core) {
-        m_core->setSaveDir(gSettings.savePath);
-        // ROM 경로 변경 시 system dir도 갱신 (BIOS 파일 탐색 경로)
-        QString base = AppSettings::baseDir();
-        m_core->setSystemDir(gSettings.romPath.isEmpty() ? base : gSettings.romPath);
-    }
-
-    // 경로 변경 시 ROM 재스캔
-    filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
-    scanRoms();
-
-    gSettings.save();
-    log("⚙ 설정 저장 완료");
+    if (m_audio) m_audio->setVolume(gSettings.audioVolume / 100.0);
 }
 
-void MainWindow::refreshSettingsUi() {
-    if (m_romPathEdit)        m_romPathEdit->setText(gSettings.romPath);
-    if (m_previewPathEdit)    m_previewPathEdit->setText(gSettings.previewPath);
-    if (m_screenshotPathEdit) m_screenshotPathEdit->setText(gSettings.screenshotPath);
-    if (m_savePathEdit)       m_savePathEdit->setText(gSettings.savePath);
-    if (m_recordPathEdit)     m_recordPathEdit->setText(gSettings.recordPath);
+// 코어가 네이티브 치트를 등록했으면 수동 치트 엔진(RAM 직접 쓰기)을 멈춘다.
+//   둘 다 돌리면 같은 값을 두 번 써서 충돌한다. 메인 루프가 이 플래그를 본다.
+void MainWindow::refreshNativeCheatFlag() {
+    m_nativeCheatsActive = nativecheats::any();
+}
 
-    if (m_scaleCombo)         m_scaleCombo->setCurrentText(gSettings.videoScaleMode);
-    if (m_smoothCheck)        m_smoothCheck->setChecked(gSettings.videoSmooth);
-    if (m_crtCheck)           m_crtCheck->setChecked(gSettings.videoCrtMode);
-    if (m_crtSlider)          m_crtSlider->setValue(
-                                  static_cast<int>(gSettings.videoCrtIntensity * 100));
-    if (m_vsyncCheck)         m_vsyncCheck->setChecked(gSettings.videoVsync);
-    if (m_frameskipSpin)      m_frameskipSpin->setValue(gSettings.videoFrameskip);
-    if (m_flashGuardCheck)    m_flashGuardCheck->setChecked(gSettings.videoFlashGuard);
-    if (m_flashSlider)        m_flashSlider->setValue(gSettings.videoFlashStrength);
-
-    if (m_volumeSlider)       m_volumeSlider->setValue(gSettings.audioVolume);
-    if (m_sampleRateCombo)    m_sampleRateCombo->setCurrentText(
-                                  QString::number(gSettings.audioSampleRate));
-    if (m_bufferMsSpin)       m_bufferMsSpin->setValue(gSettings.audioBufferMs);
-    if (m_regionCombo)        m_regionCombo->setCurrentText(gSettings.region);
+// ROM/프리뷰 폴더가 바뀐 뒤에 부른다.
+//   코어의 저장·시스템(BIOS 탐색) 폴더를 맞추고 게임 목록을 다시 읽는다.
+//   (scanRoms 가 끝에서 filterRoms 까지 하므로 따로 부를 필요가 없다)
+void MainWindow::applyPathSettings() {
+    if (m_core) {
+        m_core->setSaveDir(gSettings.savePath);
+        // ROM 경로 변경 시 system dir 도 갱신 (BIOS 파일 탐색 경로)
+        m_core->setSystemDir(gSettings.romPath.isEmpty() ? AppSettings::baseDir()
+                                                         : gSettings.romPath);
+    }
+    scanRoms();
+    syncShellPreview();      // 프리뷰 폴더가 바뀌었으면 그림도 다시 찾는다
 }
 
 // ════════════════════════════════════════════════════════════
@@ -4926,7 +3477,6 @@ void MainWindow::enterGameScreen() {
         m_mediaPlayer->stop();
         m_mediaPlayer->setSource(QUrl());  // 소스 해제 → 재생 불가 상태
     }
-    if (m_previewStack) m_previewStack->setCurrentIndex(0);  // 이미지 모드
 
     m_stack->setCurrentIndex(1);
     if (m_canvas) m_canvas->setFocus();
@@ -4950,6 +3500,9 @@ void MainWindow::enterGameScreen() {
 
 // GUI 복귀: 현재 선택된 롬의 프리뷰 재시작
 void MainWindow::leaveGameScreen() {
+    // 마우스로 대체하던 트리거 입력을 반드시 푼다 (눌린 채로 남지 않게)
+    if (m_gamepad) m_gamepad->setMouseTriggerBits(false, false);
+
     // GUI로 돌아오면 커서 타이머 중지 + 커서 복원
     if (m_cursorTimer) m_cursorTimer->stop();
     if (m_cursorHidden) {
@@ -4969,7 +3522,6 @@ void MainWindow::leaveGameScreen() {
     // 게임 종료 시 스왑 상태 리셋
     if (gState.swapPlayers) {
         gState.swapPlayers = false;
-        if (m_swapBtn) { m_swapBtn->setChecked(false); m_swapBtn->setText("⇄  1P"); }
     }
     if (m_overlayTimer) m_overlayTimer->stop();
     if (m_playerOverlay) m_playerOverlay->hide();
@@ -4977,42 +3529,24 @@ void MainWindow::leaveGameScreen() {
     // 게임 종료 시 TATE/회전 상태 리셋 (다음 게임은 auto부터)
     gState.videoRotation = 0;
     if (m_canvas) m_canvas->setRotation(-1);  // auto
-    if (m_tateBtn) {
-        m_tateBtn->setText("⟳  TATE");
-        m_tateBtn->setStyleSheet(
-            "QPushButton{background:#000033;color:#6688bb;border:2px solid #224488;"
-            "font-family:'Courier New';font-size:10px;font-weight:bold;}"
-            "QPushButton:hover{background:#00004d;color:#99ccff;}"
-            "QPushButton:pressed{background:#001166;}");
-    }
 
     m_stack->setCurrentIndex(0);
-    filterRoms(m_searchEdit ? m_searchEdit->text() : QString());
+    filterRoms();
     // 선택된 게임이 있으면 프리뷰 재로드
     if (!m_selectedGame.isEmpty())
         loadPreview(m_selectedGame);
 
-    // 게임리스트 포커스 복원: D패드/방향키 즉시 동작하도록
-    if (m_gameList) {
-        m_gameList->setFocus();
-        if (m_gameList->currentRow() < 0 && m_gameList->count() > 0)
-            m_gameList->setCurrentRow(0);
-    }
+    // 포커스를 셸에 돌려줘야 방향키가 화면의 목록을 움직인다.
+    //   (예전에는 숨겨진 목록에 포커스를 줘서, 게임에서 돌아온 뒤 키보드가 먹통이었다)
+    if (m_shell) m_shell->setFocus();
 }
 
 // ── 마우스 커서 자동 숨김 ─────────────────────────────────────
 void MainWindow::resetCursorTimer() {
-    // 게임 화면 중에만 유효
+    // 게임 화면에서는 포인터가 필요 없다. 스팀덱은 플레이 중 터치패드를 건드리는 일이 잦아
+    //   포인터가 떠다니면 방해되므로, 움직임이 있어도 다시 보이게 하지 않고 계속 숨긴다.
     if (!m_stack || m_stack->currentIndex() != 1) return;
-
-    // 숨겨져 있으면 즉시 복원
-    if (m_cursorHidden) {
-        setCursor(m_customCursor);  // widget-level: Wayland 동기 통신 없음
-        m_cursorHidden = false;
-    }
-
-    // 타이머 재시작 (3초 후 hideCursor 호출)
-    if (m_cursorTimer) m_cursorTimer->start();
+    hideCursor();
 }
 
 void MainWindow::hideCursor() {
@@ -5055,6 +3589,63 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
         }
     }
 
+    // ── 게임 실행 중에는 마우스 클릭/휠을 무시한다 ───────────────
+    //   스팀덱은 L2/R2 트리거에 마우스 우/좌클릭이 할당돼 있어(스팀 입력),
+    //   트리거를 게임 버튼으로 쓰면 클릭이 같이 들어와 게임 화면에 간섭한다.
+    //   ★ 커서 이동은 막지 않는다 — 커서 자동숨김 동작을 그대로 두기 위해서.
+    //   탭/ESC 로 GUI 로 돌아오면 아래 조건이 풀려 마우스가 다시 정상 동작한다.
+    if (m_stack && m_stack->currentIndex() == 1
+        && gState.gameLoaded && !gState.isPaused) {
+        switch (ev->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick: {
+            // ★ 버리지 않고 트리거 입력으로 넘긴다.
+            //   스팀 입력에서 L2/R2 에 마우스를 걸어 두면 트리거가 조이스틱으로
+            //   보고되지 않아 게임 버튼으로 쓸 수 없다. 클릭을 그대로 L2/R2 로
+            //   바꿔 주면 마우스 설정은 그대로 두고도 인게임에서 트리거가 산다.
+            if (auto* me = static_cast<QMouseEvent*>(ev)) {
+                const Qt::MouseButtons b = me->buttons();
+                if (m_gamepad)
+                    m_gamepad->setMouseTriggerBits(b & Qt::LeftButton,
+                                                   b & Qt::RightButton);
+            }
+            return true;    // UI 로는 전달하지 않는다 (클릭음도 없음)
+        }
+        case QEvent::Wheel:
+            return true;
+        default:
+            break;
+        }
+    } else if (m_gamepad) {
+        // 게임 화면을 벗어나면 대체 입력을 반드시 푼다 (눌린 채로 남지 않게)
+        m_gamepad->setMouseTriggerBits(false, false);
+    }
+
+    // ── 아무 입력이나 들어오면 화면보호기 대기시간 초기화/해제 ──
+    //   재생 중이라면 그 입력은 "해제"에만 쓰고 원래 동작으로는 넘기지 않는다.
+    //   (ESC 로 프로그램이 꺼지거나 클릭으로 게임이 실행되면 안 되므로)
+    switch (ev->type()) {
+    case QEvent::MouseMove:
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
+    case QEvent::MouseButtonDblClick:
+    case QEvent::Wheel:
+    case QEvent::KeyPress:
+    case QEvent::KeyRelease: {
+        const bool wasSaver = m_ssActive;
+        m_ssIdleTicks = 0;
+        if (wasSaver) {
+            // 마우스 이동만으로는 끄지 않는다 (책상 진동 등으로 바로 꺼지는 것 방지)
+            if (ev->type() != QEvent::MouseMove) stopScreensaver();
+            return true;   // 이벤트 소비
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
     // ── 마우스 이동 / 클릭 → 커서 타이머 리셋 ─────────────────
     switch (ev->type()) {
     case QEvent::MouseMove:
@@ -5072,7 +3663,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
         auto* ke = static_cast<QKeyEvent*>(ev);
         if (!ke->isAutoRepeat() && ke->key() == Qt::Key_Tab) {
             // 게임이 로드되어 있고 일시정지 상태(GUI 표시 중)일 때만 가로챔
-            if (gState.gameLoaded && gState.isPaused) {
+            if (gState.gameLoaded && gState.isPaused && m_stack && m_stack->currentIndex() != 4) {
                 togglePause();
                 return true;
             }
@@ -5085,53 +3676,35 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
 //  키 이벤트
 // ════════════════════════════════════════════════════════════
 void MainWindow::keyPressEvent(QKeyEvent* e) {
+    // 화면보호기 중에는 어떤 키든 "해제"로만 쓰고 원래 기능은 실행하지 않는다.
+    // (ESC 로 프로그램이 꺼지거나, 엔터로 게임이 실행되면 안 되므로)
+    if (m_ssActive) { stopScreensaver(); e->accept(); return; }
+
     int k    = e->key();
     bool alt = (e->modifiers() & Qt::AltModifier);
 
-    // ── GUI 모드 전용: 방향키/엔터 → 게임리스트 전용 처리 ──────────
-    // 게임 화면(스택 1)이 아닌 경우만 적용
-    // → 방향키가 다른 위젯(버튼, 스크롤바 등)으로 포커스 이동하는 것을 차단
-    if (m_stack && m_stack->currentIndex() == 0 && m_gameList) {
-
-        // 상하 방향키: 게임리스트 한 칸 이동 (auto-repeat 포함)
-        if (k == Qt::Key_Up || k == Qt::Key_Down) {
-            int cnt = m_gameList->count();
-            if (cnt > 0) {
-                int row = m_gameList->currentRow();
-                if (row < 0) row = (k == Qt::Key_Down) ? 0 : cnt - 1;
-                else         row = std::clamp(row + (k == Qt::Key_Down ? 1 : -1), 0, cnt - 1);
-                m_gameList->setCurrentRow(row);
-                m_gameList->scrollToItem(m_gameList->item(row),
-                                         QAbstractItemView::EnsureVisible);
-            }
-            return;  // 소비 — Qt 포커스 이동 차단
+    // ── GUI 모드: 방향키/Enter → 셸 조작 ────────────────────────
+    //   포커스가 셸에 있으면 셸이 키를 직접 처리한다. 다른 위젯에 가 있어도
+    //   같은 동작이 나가도록 여기서 같은 navigate() 로 보낸다.
+    //   (예전에는 숨겨진 목록을 움직여서 화면과 어긋났다)
+    if (m_stack && m_stack->currentIndex() == 0 && m_shell) {
+        using Nav = NeoRageXShell::Nav;
+        bool isNav = true;
+        Nav nav = Nav::Up;
+        switch (k) {
+        case Qt::Key_Up:    nav = Nav::Up;    break;
+        case Qt::Key_Down:  nav = Nav::Down;  break;
+        case Qt::Key_Left:  nav = Nav::Left;  break;
+        case Qt::Key_Right: nav = Nav::Right; break;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            // Alt+Enter 는 전체화면. 누르고 있는 동안 연달아 실행되면 안 된다.
+            if (alt || e->isAutoRepeat()) isNav = false;
+            nav = Nav::Accept;
+            break;
+        default: isNav = false; break;
         }
-
-        // 좌우 방향키: 페이지 이동 (auto-repeat 포함)
-        if (k == Qt::Key_Left || k == Qt::Key_Right) {
-            int cnt = m_gameList->count();
-            if (cnt > 0) {
-                int rowH     = m_gameList->sizeHintForRow(0);
-                int pageSize = (rowH > 0)
-                    ? std::max(1, m_gameList->viewport()->height() / rowH) : 10;
-                int dir = (k == Qt::Key_Left) ? -1 : 1;
-                int row = std::clamp(
-                    std::max(0, m_gameList->currentRow()) + dir * pageSize,
-                    0, cnt - 1);
-                m_gameList->setCurrentRow(row);
-                m_gameList->scrollToItem(m_gameList->item(row),
-                                         QAbstractItemView::PositionAtTop);
-            }
-            return;  // 소비
-        }
-
-        // Enter / Return → 선택 게임 실행 (Alt+Enter는 전체화면이므로 제외, auto-repeat 제외)
-        if (!e->isAutoRepeat() && !alt
-            && (k == Qt::Key_Return || k == Qt::Key_Enter)
-            && !m_selectedGame.isEmpty()) {
-            launchGame();
-            return;
-        }
+        if (isNav) { m_shell->navigate(nav); return; }
     }
     // ────────────────────────────────────────────────────────────
 
@@ -5219,10 +3792,25 @@ void MainWindow::keyReleaseEvent(QKeyEvent* e) {
     QMainWindow::keyReleaseEvent(e);
 }
 
+// 저장된 값이 "의미"(6버튼 격투)면 이 게임의 실제 인덱스로 바꾼다.
+int MainWindow::keyActionIndex(int stored) const {
+    if (!padIsSem(stored)) return stored;
+    if (!m_coreBtns.valid) return -1;
+    switch (padSemSlot(stored)) {
+    case SEM_LP: return m_coreBtns.lp;
+    case SEM_MP: return m_coreBtns.mp;
+    case SEM_HP: return m_coreBtns.hp;
+    case SEM_LK: return m_coreBtns.lk;
+    case SEM_MK: return m_coreBtns.mk;
+    case SEM_HK: return m_coreBtns.hk;
+    default:     return -1;
+    }
+}
+
 void MainWindow::applyKeyPress(int qtKey) {
     auto it = m_keymap.find(qtKey);
     if (it == m_keymap.end()) return;
-    int idx = it.value();
+    int idx = keyActionIndex(it.value());
     if (idx >= 0 && idx < 16) {
         gState.rawKeys[idx] = 1;
         gState.kbHeld.insert(idx);
@@ -5232,7 +3820,7 @@ void MainWindow::applyKeyPress(int qtKey) {
 void MainWindow::applyKeyRelease(int qtKey) {
     auto it = m_keymap.find(qtKey);
     if (it == m_keymap.end()) return;
-    int idx = it.value();
+    int idx = keyActionIndex(it.value());
     if (idx >= 0 && idx < 16) {
         gState.rawKeys[idx] = 0;
         gState.kbHeld.remove(idx);
@@ -5263,7 +3851,9 @@ QString MainWindow::gamePlatform(const QString& rom) {
                 "dino","punisher","slammast","wof","kod","mercs","willow",
                 "unsquad","dynwar","cawing","forgottn","varth","captcomm",
                 "pnickj","qad","nwarr","sgemf","jojo","redearth","vhunt",
-                "vsavo","cps"}))
+                "vsavo","cps","hsf2","dstlk","batcir","armwar","ringdest","tk2",
+                "3wonders","mtwins","chikij","nemo","msword","cworld2","spf2",
+                "pang3","megaman","rockmanj","gulunpa","daimakai","sfiii"}))
         return "cps";
     if (starts({"rtype","hharry","dkgen","poundfor","airduel","gallop",
                 "cosmccop","kengo","matchit","xmultipl","dbreed","loht",
@@ -5320,23 +3910,10 @@ void MainWindow::hotkeyDecode(int enc, int& key, int& mods) {
     mods = (enc >> 28) & 0x7;
 }
 
-// 핫키 인코딩 → 사람이 읽는 문자열 ("Ctrl+F9", "Tab", "`" 등)
-QString MainWindow::hotkeyText(int enc) {
-    int key, mods; hotkeyDecode(enc, key, mods);
-    if (key == 0) return "—";
-    QString s;
-    if (mods & 2) s += "Ctrl+";
-    if (mods & 1) s += "Shift+";
-    if (mods & 4) s += "Alt+";
-    QString kn = QKeySequence(key).toString(QKeySequence::NativeText);
-    if (kn.isEmpty()) kn = QString("0x%1").arg(key, 0, 16);
-    return s + kn;
-}
-
 // action 의 현재 핫키 인코딩 (사용자 설정 > 기본값)
+// 핫키는 고정이다. 예전에 저장된 사용자 핫키가 남아 있어도 무시한다.
+//   (변경 UI 를 없앴으므로, 옛 저장값이 살아 있으면 안내와 실제가 달라진다)
 int MainWindow::hotkeyOf(const QString& action) {
-    if (gSettings.hotkeyMap.contains(action))
-        return gSettings.hotkeyMap.value(action);
     int n = 0; const HotkeyDef* d = hotkeyDefs(&n);
     for (int i = 0; i < n; ++i)
         if (action == d[i].action) return hotkeyEncode(d[i].key, d[i].mods);
@@ -5354,21 +3931,47 @@ bool MainWindow::hotkeyMatch(const QString& action, int key, int qtMods) {
     return key == hk && curMods == hm;
 }
 
-QHash<int, int> MainWindow::buildDefaultKeymap() {
-    return {
-        {Qt::Key_Z,       0},   // B     (JOYPAD_B)
-        {Qt::Key_A,       1},   // Y     (JOYPAD_Y)
-        {Qt::Key_Return,  3},   // START (JOYPAD_START)
-        {Qt::Key_Space,   2},   // SELECT(JOYPAD_SELECT)
+QHash<int, int> MainWindow::buildDefaultKeymap(bool six) {
+    QHash<int, int> k = {
+        {Qt::Key_Return,  3},   // START
+        {Qt::Key_1,       3},
+        {Qt::Key_Space,   2},   // SELECT / COIN
+        {Qt::Key_2,       2},
         {Qt::Key_Up,      4},   // UP
         {Qt::Key_Down,    5},   // DOWN
         {Qt::Key_Left,    6},   // LEFT
         {Qt::Key_Right,   7},   // RIGHT
-        {Qt::Key_X,       8},   // A     (JOYPAD_A)
-        {Qt::Key_S,       9},   // X     (JOYPAD_X)
-        {Qt::Key_D,      10},   // L     (JOYPAD_L)
-        {Qt::Key_C,      11},   // R     (JOYPAD_R)
     };
+    if (six) {
+        // 6버튼 격투: 위 줄은 손, 아래 줄은 발 (아케이드 패널과 같은 모양)
+        //     A  S  D  =  약손 중손 강손
+        //     Z  X  C  =  약발 중발 강발
+        k[Qt::Key_A] = padSemId(SEM_LP);
+        k[Qt::Key_S] = padSemId(SEM_MP);
+        k[Qt::Key_D] = padSemId(SEM_HP);
+        k[Qt::Key_Z] = padSemId(SEM_LK);
+        k[Qt::Key_X] = padSemId(SEM_MK);
+        k[Qt::Key_C] = padSemId(SEM_HK);
+    } else {
+        // 그 밖의 게임: A B C D 가 A S D F 순서다 (네오지오 A B C D, CPS 2~3버튼 A B C).
+        //   그 옆의 Z, X 는 동시 입력 매크로(CD, AB)다.
+        k[Qt::Key_A] = 0;      // A
+        k[Qt::Key_S] = 8;      // B
+        k[Qt::Key_D] = 1;      // C
+        k[Qt::Key_F] = 9;      // D
+        k[Qt::Key_Z] = 10;     // CD
+        k[Qt::Key_X] = 11;     // AB
+    }
+    return k;
+}
+
+// 지금 배치(6버튼 격투인가)에 맞는 키보드 표를 다시 고른다.
+//   게임별 > 기종별 > (배치별) 저장값 > 배치별 기본값 순이다.
+void MainWindow::reloadKeymap() {
+    const bool six = m_gamepad && m_gamepad->padLayout() == PadLayout::SixButton;
+    m_keymap = resolveCtrlMap(gSettings.kbScoped,
+                              six ? gSettings.keyboardMappingSix : gSettings.keyboardMapping,
+                              buildDefaultKeymap(six), m_ctrlScopeRom);
 }
 
 // ── 컨트롤 매핑 해석: 게임별 > 기종별 > 전역 > 기본 ──────────
@@ -5381,7 +3984,7 @@ QHash<int,int> MainWindow::resolveCtrlMap(
     if (!rom.isEmpty()) {
         QString gk = "game:" + rom;
         if (scoped.contains(gk) && !scoped[gk].isEmpty()) return scoped[gk];
-        QString pk = "plat:" + gamePlatform(rom);
+        QString pk = platScopeKey(rom);
         if (scoped.contains(pk) && !scoped[pk].isEmpty()) return scoped[pk];
     }
     if (!global.isEmpty()) return global;
@@ -5392,59 +3995,142 @@ QHash<int,int> MainWindow::resolveCtrlMap(
 void MainWindow::resolveAndApplyControls(const QString& rom) {
     m_ctrlScopeRom = rom;
 
-    // 키보드
-    m_keymap = resolveCtrlMap(gSettings.kbScoped, gSettings.keyboardMapping,
-                              buildDefaultKeymap(), rom);
-    // 게임패드
+    // ── 아케이드 버튼 배치 확정 ──────────────────────────────
+    //   FBNeo 는 6버튼 격투게임에 다른 retropad 인덱스를 쓴다. 그래서
+    //   "기본 매핑"의 내용이 게임에 따라 달라져야 한다. 저장해 둔 사용자
+    //   매핑(게임별/기종별/전역/장치별)은 아래에서 그대로 우선 적용되므로,
+    //   여기서 바뀌는 것은 기본값뿐이다.
     if (m_gamepad) {
-        QHash<int,int> xi = resolveCtrlMap(gSettings.xiScoped,
-                                gSettings.xinputMapping, {}, rom);
+        const PadLayout lay = padLayoutOf(rom);
+        const bool changed = (lay != m_gamepad->padLayout());
+        m_gamepad->setPadLayout(lay);
+        m_gamepad->resetDefaultMapping();   // 공용 폴백 표도 배치에 맞춤
+        // ★ 배치가 그대로여도 매번 다시 적용한다. 예전에는 "바뀔 때만" 적용해서
+        //   패드가 아직 인식되기 전에 한 번 지나가면 영영 반영되지 않았다.
+        applyPadProfiles();
+        if (changed)
+            qDebug().noquote() << QString("[pad] 배치 %1")
+                                  .arg(padLayoutLabel(lay, false));
+        logPadMappingSummary();   // 실제로 적용된 표를 로그에 남긴다
+    }
+
+    // 키보드 (배치가 6버튼 격투인지에 따라 기본 배정이 다르다)
+    reloadKeymap();
+    // 아케이드 스틱(WinMM). 게임패드는 위 applyPadProfiles() 가 이미 처리했다.
+    //   저장된 표가 없으면 이전 게임의 표가 남지 않도록 기본값으로 되돌린다.
+    if (m_gamepad) {
         QHash<int,int> wm = resolveCtrlMap(gSettings.wmScoped,
                                 gSettings.winmmMapping,  {}, rom);
-        if (!xi.isEmpty()) m_gamepad->setXInputMapping(xi);
         if (!wm.isEmpty()) m_gamepad->setWinMMMapping(wm);
+        else               m_gamepad->resetDefaultWinMM();
     }
+    applyTurboFor(rom);
     // 테이블이 보이면 갱신
-    refreshControlsTable();
-    refreshPadTable();
-    refreshWinMMTable();
+    refreshControlsUi();
 }
 
-// 현재 테이블(m_keymap 등) 상태를 지정 스코프로 저장
-//   scope: "global"(전역) / "plat"(기종별) / "game"(게임별)
-void MainWindow::saveControlsToScope(const QString& scope) {
-    // ★ 저장 대상은 "지금 보고 있는 게임" 이어야 한다.
-    //   예전에는 m_ctrlScopeRom(마지막으로 실행한 게임)을 우선 썼는데, 이 값은
-    //   게임을 실행할 때만 갱신되어서 메뉴에서 다른 게임을 고른 뒤 저장하면
-    //   엉뚱하게 이전 게임에 저장됐다.
-    //   → 실행 중이면 그 게임, 아니면 목록에서 선택한 게임.
-    const QString rom = !m_loadedGame.isEmpty() ? m_loadedGame : m_selectedGame;
+// ── 컨트롤 저장 범위 ─────────────────────────────────────────
+//   · 게임별  : 매핑·터보를 바꾸면 그 게임 범위에 자동 저장한다 (다른 게임은 그대로).
+//   · 기종별  : 컨트롤 화면의 "이 기종 전체에 저장" 을 눌렀을 때. 기종은 NEOGEO / CPS / 그 밖(OTHER),
+//               6버튼 격투와 일반 배치는 따로 저장한다 (같은 CPS 라도 버튼 의미가 다르므로).
+//   · 적용 순서: 게임별 > 기종별 > 전역·장치별 > 기본값.
 
-    QHash<int,int> xi = m_gamepad ? m_gamepad->getXInputMapping() : QHash<int,int>();
-    QHash<int,int> wm = m_gamepad ? m_gamepad->getWinMMMapping()  : QHash<int,int>();
+// 기종+배치 저장 키 ("plat:neogeo#std", "plat:cps#6btn", "plat:other#std")
+QString MainWindow::platScopeKey(const QString& rom) const {
+    if (rom.isEmpty()) return QString();
+    QString p = gamePlatform(rom);
+    if (p != QLatin1String("neogeo") && p != QLatin1String("cps")) p = QStringLiteral("other");
+    return QStringLiteral("plat:") + p
+         + (padLayoutOf(rom) == PadLayout::SixButton ? QStringLiteral("#6btn") : QStringLiteral("#std"));
+}
 
-    if (scope == "global") {
-        gSettings.keyboardMapping = m_keymap;
-        gSettings.xinputMapping   = xi;
-        gSettings.winmmMapping    = wm;
-        log("🎮 컨트롤 → 전역 저장");
-    } else if (scope == "plat") {
-        if (rom.isEmpty()) { log("⚠ 기종 저장: 게임을 먼저 선택하세요"); return; }
-        QString pk = "plat:" + gamePlatform(rom);
-        gSettings.kbScoped[pk] = m_keymap;
-        gSettings.xiScoped[pk] = xi;
-        gSettings.wmScoped[pk] = wm;
-        log(QString("🎮 컨트롤 → 기종별 저장 [%1] (기준 게임: %2)")
-            .arg(gamePlatform(rom), rom));
-    } else { // game
-        if (rom.isEmpty()) { log("⚠ 게임별 저장: 게임을 먼저 선택하세요"); return; }
-        QString gk = "game:" + rom;
-        gSettings.kbScoped[gk] = m_keymap;
-        gSettings.xiScoped[gk] = xi;
-        gSettings.wmScoped[gk] = wm;
-        log(QString("🎮 컨트롤 → 게임별 저장 (%1)").arg(rom));
-    }
+QString MainWindow::platformSaveLabel() const {
+    const QString p = gamePlatform(currentPadRom());
+    if (p == QLatin1String("neogeo")) return QStringLiteral("NEOGEO");
+    if (p == QLatin1String("cps"))    return QStringLiteral("CPS");
+    return QStringLiteral("OTHER");
+}
+
+void MainWindow::autoSaveKeyboard() {
+    const QString rom = currentPadRom();
+    if (rom.isEmpty()) (sixLayoutNow() ? gSettings.keyboardMappingSix : gSettings.keyboardMapping) = m_keymap;
+    else               gSettings.kbScoped[gameScopeKey(rom)] = m_keymap;
     gSettings.save();
+}
+
+void MainWindow::autoSavePad(int idx) {
+    if (!m_gamepad || idx < 0 || idx >= 4) return;
+    const QString name = m_gamepad->padName(idx);
+    const QString rom  = currentPadRom();
+    QString key = padScopeKeyGame(rom, name, m_gamepad->padLayout());
+    if (key.isEmpty()) key = padScopeKeyDev(name);
+    if (key.isEmpty()) return;
+    gSettings.padMaps[key] = m_padUiMap[idx];
+    m_padMapSource[idx] = padMapSourceLabel(PadMapSource::Game, isEn());
+    gSettings.save();
+}
+
+void MainWindow::autoSaveStick() {
+    if (!m_gamepad) return;
+    const QString rom = currentPadRom();
+    if (rom.isEmpty()) gSettings.winmmMapping = m_gamepad->getWinMMMapping();
+    else               gSettings.wmScoped[gameScopeKey(rom)] = m_gamepad->getWinMMMapping();
+    gSettings.save();
+}
+
+// 지금 키보드·패드·스틱 표와 터보를 이 기종 전체(이 배치)에 저장한다.
+void MainWindow::saveControlsForPlatform() {
+    const QString rom = currentPadRom();
+    const QString pk  = platScopeKey(rom);
+    if (pk.isEmpty()) {
+        log(isEn() ? "⚠ Pick a game first" : "⚠ 먼저 게임을 고르세요");
+        return;
+    }
+    gSettings.kbScoped[pk] = m_keymap;
+    if (m_gamepad) {
+        for (int i = 0; i < 4; ++i) {
+            if (!m_gamepad->padPresent(i) || m_padUiMap[i].isEmpty()) continue;
+            const QString key = padScopeKeyPlat(pk, m_gamepad->padName(i));
+            if (!key.isEmpty()) gSettings.padMaps[key] = m_padUiMap[i];
+        }
+        gSettings.wmScoped[pk] = m_gamepad->getWinMMMapping();
+    }
+    gSettings.turboScoped[pk] = turboToString();
+    gSettings.save();
+    log(isEn() ? QString("🎮 Controls saved for all %1 games").arg(platformSaveLabel())
+               : QString("🎮 컨트롤을 %1 기종 전체에 저장했습니다").arg(platformSaveLabel()));
+    applyPadProfiles();
+    refreshControlsUi();
+}
+
+// 이 게임에 따로 저장된 컨트롤·터보를 지우고, 기종별 → 기본값 순으로 다시 적용한다.
+void MainWindow::forgetGameControls() {
+    const QString rom = currentPadRom();
+    if (rom.isEmpty()) return;
+    const QString gk = gameScopeKey(rom);
+    gSettings.kbScoped.remove(gk);
+    gSettings.xiScoped.remove(gk);
+    gSettings.wmScoped.remove(gk);
+    gSettings.turboScoped.remove(gk);
+    const QString prefix = gk + QLatin1Char('|');
+    for (auto it = gSettings.padMaps.begin(); it != gSettings.padMaps.end(); )
+        it = it.key().startsWith(prefix) ? gSettings.padMaps.erase(it) : ++it;
+    gSettings.save();
+    log(isEn() ? "🎮 This game's saved controls were cleared"
+               : "🎮 이 게임에 저장된 컨트롤을 지웠습니다");
+    resolveAndApplyControls(rom);
+}
+
+// 저장된 패드 매핑을 모두 지우고 기본값으로 되돌린다.
+void MainWindow::clearPadScope(const QString& scope) {
+    Q_UNUSED(scope);
+    const int n = int(gSettings.padMaps.size());
+    gSettings.padMaps.clear();
+    gSettings.save();
+    log(QString(isEn() ? "🎮 Pad mappings cleared (%1) - back to defaults"
+                       : "🎮 패드 매핑 %1개 삭제 → 기본값으로").arg(n));
+    applyPadProfiles();
+    refreshControlsUi();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -5453,16 +4139,12 @@ void MainWindow::saveControlsToScope(const QString& scope) {
 void MainWindow::onNetConnected(bool isHost) {
     qDebug("[NP-conn] onNetConnected isHost=%d", isHost ? 1 : 0);
     log(QString("🌐 연결됨 — %1").arg(isHost ? "HOST(P1)" : "CLIENT(P2)"));
-    if (m_npStatusLabel) {
-        m_npStatusLabel->setText(
-            isHost ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중");
-        m_npStatusLabel->setStyleSheet(
-            "color:#44cc44;font-family:'Courier New';font-size:11px;font-weight:bold;");
-    }
-    if (m_npStartBtn)   m_npStartBtn->setEnabled(isHost);
-    if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(true);
-    if (m_npHostBtn)    m_npHostBtn->setEnabled(false);
-    if (m_npConnectBtn) m_npConnectBtn->setEnabled(false);
+    m_net.status   = isHost ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중";
+    m_net.canStart = isHost;
+    m_net.canDisc  = true;
+    m_net.canHost  = false;
+    m_net.canJoin  = false;
+    refreshNetUi();
 
     // 토큰 방식: 룸 코드는 HOST GAME 클릭 시점에 이미 생성·표시됨.
     // 연결 성립 시점에 재생성하지 않음 (코드 안정성 유지).
@@ -5650,61 +4332,47 @@ void MainWindow::onNetDisconnected() {
     log("🌐 연결 끊김");
     m_relayPeerHandled = false;   // 다음 연결을 위해 피어 처리 플래그 리셋
     cleanupNetplay();
-    if (m_npStatusLabel) {
-        m_npStatusLabel->setText("● DISCONNECTED");
-        m_npStatusLabel->setStyleSheet(
-            "color:#cc4444;font-family:'Courier New';font-size:11px;");
-    }
-    if (m_npStartBtn)   m_npStartBtn->setEnabled(false);
-    if (m_npDisconnBtn) m_npDisconnBtn->setEnabled(false);
-    if (m_npHostBtn)    m_npHostBtn->setEnabled(true);
-    if (m_npConnectBtn) m_npConnectBtn->setEnabled(true);
+    m_net.status   = "● DISCONNECTED";
+    m_net.canStart = false;
+    m_net.canDisc  = false;
+    m_net.canHost  = true;
+    m_net.canJoin  = true;
+    refreshNetUi();
 }
 
 void MainWindow::onNetError(const QString& msg) {
     log("🌐 오류: " + msg);
-    if (m_npStatusLabel) {
-        m_npStatusLabel->setText("● ERROR: " + msg);
-        m_npStatusLabel->setStyleSheet(
-            "color:#ff4444;font-family:'Courier New';font-size:11px;");
-    }
+    m_net.status = "● ERROR: " + msg;
+    refreshNetUi();
 }
 
 // 상태 변화 → UI 업데이트
 void MainWindow::onNetStateChanged(NetplayManager::State s) {
-    qDebug("[NP-state] onNetStateChanged s=%d label=%p", (int)s, (void*)m_npStatusLabel);
-    if (!m_npStatusLabel) return;
-    const char* style =
-        "color:#44cc44;font-family:'Courier New';font-size:11px;font-weight:bold;";
+    qDebug("[NP-state] onNetStateChanged s=%d", (int)s);
+    const QString rtt = QString("RTT: %1 ms").arg(gNetplay().rttMs());
     switch (s) {
     case NetplayManager::State::Lobby:
-        m_npStatusLabel->setText(gNetplay().isHost()
-            ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중");
-        m_npStatusLabel->setStyleSheet(style);
-        if (m_npStartBtn) m_npStartBtn->setEnabled(gNetplay().isHost());
-        // RTT 갱신 (Lobby 복귀 시)
-        if (m_npRttLabel)
-            m_npRttLabel->setText(QString("RTT: %1 ms").arg(gNetplay().rttMs()));
+        m_net.status = gNetplay().isHost()
+            ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중";
+        m_net.canStart = gNetplay().isHost();
+        m_net.rtt = rtt;                       // Lobby 복귀 시 갱신
         break;
     case NetplayManager::State::Loading:
-        m_npStatusLabel->setText("● 로딩 중...");
-        m_npStatusLabel->setStyleSheet(style);
-        if (m_npStartBtn) m_npStartBtn->setEnabled(false);
+        m_net.status = "● 로딩 중...";
+        m_net.canStart = false;
         break;
     case NetplayManager::State::Ready:
-        m_npStatusLabel->setText("● 준비 완료 — 상대 대기 중...");
-        m_npStatusLabel->setStyleSheet(style);
-        if (m_npRttLabel)
-            m_npRttLabel->setText(QString("RTT: %1 ms").arg(gNetplay().rttMs()));
+        m_net.status = "● 준비 완료 — 상대 대기 중...";
+        m_net.rtt = rtt;
         break;
     case NetplayManager::State::Playing:
-        m_npStatusLabel->setText(QString("● 게임 중  |  RTT: %1 ms  |  Delay: %2f")
-            .arg(gNetplay().rttMs()).arg(gNetplay().inputDelay()));
-        m_npStatusLabel->setStyleSheet(style);
-        if (m_npRttLabel) m_npRttLabel->setText("");
+        m_net.status = QString("● 게임 중  |  RTT: %1 ms  |  Delay: %2f")
+            .arg(gNetplay().rttMs()).arg(gNetplay().inputDelay());
+        m_net.rtt.clear();
         break;
-    default: break;
+    default: return;
     }
+    refreshNetUi();
 }
 
 // 조인: 호스트가 선택한 게임을 자동 로드 → 로딩 완료 시 READY 전송
@@ -5728,7 +4396,7 @@ void MainWindow::onNetLoadGame(const QString& romName, int inputDelay) {
     // 호스트가 지정한 입력 지연 반영 + 딜레이 큐 초기화
     gSettings.netplayInputDelay = inputDelay;
     m_npDelayQueue.clear();
-    if (m_npDelaySpinBox) m_npDelaySpinBox->setValue(inputDelay);
+    m_netDelay = inputDelay;
 
     log(QString("🌐 게임 수신: %1  (딜레이 %2f)").arg(romName).arg(inputDelay));
     m_selectedGame = romName;
@@ -5875,7 +4543,7 @@ void MainWindow::netplayStartGame() {
     m_npPeerReady  = false;
     m_npStarted    = false;
 
-    int delay = m_npDelaySpinBox ? m_npDelaySpinBox->value() : gSettings.netplayInputDelay;
+    int delay = m_netDelay;
     gSettings.netplayInputDelay = delay;
     m_npDelayQueue.clear();
     log(QString("🌐 게임 선택 동기화 → %1  (딜레이 %2f)").arg(m_selectedGame).arg(delay));
@@ -5950,30 +4618,10 @@ void MainWindow::cleanupNetplay() {
     log("🌐 게임 정리 완료 — Lobby 대기 중");
 }
 
-// ════════════════════════════════════════════════════════════
-//  로그
-// ════════════════════════════════════════════════════════════
 void MainWindow::log(const QString& msg) {
     qDebug() << msg;
-    if (!m_logEdit) return;
-
-    m_logEdit->append(msg);
-
-    // 최대 150블록(줄) 유지 — 초과 시 맨 앞 50줄 삭제
-    QTextDocument* doc = m_logEdit->document();
-    if (doc->blockCount() > 150) {
-        QTextCursor c(doc);
-        c.movePosition(QTextCursor::Start);
-        c.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, 50);
-        c.movePosition(QTextCursor::StartOfLine, QTextCursor::KeepAnchor);
-        c.removeSelectedText();
-    }
-
-    // 스크롤 자동 아래로
-    QScrollBar* sb = m_logEdit->verticalScrollBar();
-    sb->setValue(sb->maximum());
+    if (m_shell) m_shell->log(msg);      // EVENTS 박스에 남긴다
 }
-
 // ════════════════════════════════════════════════════════════
 //  닫기
 // ════════════════════════════════════════════════════════════

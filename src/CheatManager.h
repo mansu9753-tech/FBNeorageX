@@ -52,7 +52,6 @@ public:
 
 signals:
     void cheatsLoaded(int count, const QString& path);
-    void cheatsCleared();
 
 private:
     QList<CheatEntry> m_entries;

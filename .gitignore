@@ -50,3 +50,6 @@ Thumbs.db
 .DS_Store
 desktop.ini
 names.txt.bak
+
+# Local release staging (binaries go to GitHub Releases, not the repo)
+release/

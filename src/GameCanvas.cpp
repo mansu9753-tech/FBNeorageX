@@ -1,6 +1,9 @@
 // GameCanvas.cpp — OpenGL 게임 렌더링 (Phase 3: CRT + 스케일 모드 완전 구현)
 
 #include "GameCanvas.h"
+
+#include <QElapsedTimer>
+#include <QGuiApplication>
 #include "EmulatorState.h"
 #include "AppSettings.h"
 
@@ -12,6 +15,12 @@
 #include <QPainter>
 #include <QFont>
 #include <QDebug>
+#include <functional>
+#include <QOpenGLFramebufferObject>
+#include <QOpenGLFramebufferObjectFormat>
+#include <QImage>
+#include <QMatrix4x4>
+#include "SlangShader.h"
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -92,6 +101,8 @@ GameCanvas::GameCanvas(QWidget* parent)
 
 GameCanvas::~GameCanvas() {
     makeCurrent();
+    m_chain.release();
+    m_chainActive = false;
     if (m_texId) { glDeleteTextures(1, &m_texId); m_texId = 0; }
     if (m_vbo)   { glDeleteBuffers(1, &m_vbo);    m_vbo   = 0; }
     doneCurrent();
@@ -220,6 +231,415 @@ void GameCanvas::setRotation(int rot) {
     if (m_glReady) { makeCurrent(); updateVertices(); doneCurrent(); }
     update();
 }
+// ════════════════════════════════════════════════════════════
+//  다중 패스 slang (.slangp)
+//   각 패스를 FBO 에 그리고 마지막 패스만 화면에 낸다.
+//   RetroArch 규약:
+//     Source        = 직전 패스 결과 (첫 패스는 게임 화면)
+//     Original      = 게임 화면 원본
+//     <alias>       = 그 이름을 가진 패스의 이번 프레임 결과
+//     PassFeedbackN = N 번 패스의 "이전 프레임" 결과 (핑퐁 버퍼)
+//     LUT 이름      = 프리셋의 textures 로 불러온 이미지
+// ════════════════════════════════════════════════════════════
+
+static GLint wrapToGl(SlangWrap w) {
+    switch (w) {
+    case SlangWrap::Repeat:        return GL_REPEAT;
+    case SlangWrap::ClampToBorder: return GL_CLAMP_TO_BORDER;
+    default:                       return GL_CLAMP_TO_EDGE;
+    }
+}
+
+void GameCanvas::releaseMultiPass() {
+    for (MultiPass& p : m_passes) {
+        delete p.prog;
+        delete p.fbo[0];
+        delete p.fbo[1];
+    }
+    m_passes.clear();
+    for (const LutTex& l : m_luts)
+        if (l.id) glDeleteTextures(1, &l.id);
+    m_luts.clear();
+    m_multiPass = false;
+}
+
+bool GameCanvas::loadSlangPreset(const QString& presetPath) {
+    QFile pf(presetPath);
+    if (!pf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        emit glLogMessage("프리셋 파일 열기 실패: " + presetPath);
+        return false;
+    }
+    const SlangPreset preset =
+        parseSlangPreset(QString::fromUtf8(pf.readAll()),
+                         QFileInfo(presetPath).absolutePath());
+    if (!preset.ok) {
+        emit glLogMessage("✖ " + preset.error);
+        return false;
+    }
+
+    releaseMultiPass();
+    m_presetParams.clear();
+
+    // ── 패스별 셰이더 컴파일 ────────────────────────────────
+    m_pragmaDefaults.clear();
+    for (int i = 0; i < preset.passes.size(); ++i) {
+        const SlangPass& sp = preset.passes[i];
+
+        QFile sf(sp.path);
+        if (!sf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            emit glLogMessage("셰이더 열기 실패: " + QFileInfo(sp.path).fileName());
+            releaseMultiPass();
+            return false;
+        }
+        const QString src = QString::fromUtf8(sf.readAll());
+
+        // #pragma parameter 기본값은 모든 패스에서 모은다
+        {
+            static const QRegularExpression rePragma(
+                R"(#pragma\s+parameter\s+(\w+)\s+"[^"]*"\s+([-\d.eE+]+))");
+            auto it = rePragma.globalMatch(src);
+            while (it.hasNext()) {
+                auto m = it.next();
+                m_pragmaDefaults[m.captured(1)] = m.captured(2).toFloat();
+            }
+        }
+
+        const SlangTranslation t = translateSlang(src);
+        if (!t.ok) {
+            emit glLogMessage(QString("✖ 패스 %1 번역 실패 (%2): %3")
+                              .arg(i).arg(QFileInfo(sp.path).fileName(), t.error));
+            releaseMultiPass();
+            return false;
+        }
+
+        MultiPass mp;
+        mp.prog      = new QOpenGLShaderProgram;
+        mp.alias     = sp.alias;
+        mp.scaleType = sp.scaleType;
+        mp.scale     = sp.scale;
+        mp.linear    = sp.filterLinear;
+        mp.wrap      = sp.wrap;
+        // 이 패스가 자기 이전 프레임을 참조하면 핑퐁 버퍼가 필요하다
+        mp.needsFeedback = src.contains(QString("PassFeedback%1").arg(i));
+        mp.mipmapInput   = sp.mipmapInput;
+        // 프리셋이 지정했거나, 셰이더가 부동소수점 포맷을 요구하면 float FBO
+        mp.floatFbo      = sp.floatFbo || sp.srgbFbo
+                           || src.contains("#pragma format R16G16B16A16_SFLOAT")
+                           || src.contains("#pragma format R32G32B32A32_SFLOAT");
+
+        if (!mp.prog->addShaderFromSourceCode(QOpenGLShader::Vertex, t.vert) ||
+            !mp.prog->addShaderFromSourceCode(QOpenGLShader::Fragment, t.frag) ||
+            !mp.prog->link()) {
+            emit glLogMessage(QString("✖ 패스 %1 컴파일 실패 (%2):\n%3")
+                              .arg(i).arg(QFileInfo(sp.path).fileName(),
+                                          mp.prog->log()));
+            delete mp.prog;
+            releaseMultiPass();
+            return false;
+        }
+        m_passes.append(mp);
+    }
+
+    // ── LUT 텍스처 ──────────────────────────────────────────
+    for (const SlangLut& l : preset.luts) {
+        QImage img(l.path);
+        if (img.isNull()) {
+            emit glLogMessage("⚠ LUT 이미지 로드 실패: " + QFileInfo(l.path).fileName());
+            continue;
+        }
+        img = img.convertToFormat(QImage::Format_RGBA8888);
+        LutTex lt;
+        lt.name = l.name;
+        glGenTextures(1, &lt.id);
+        glBindTexture(GL_TEXTURE_2D, lt.id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width(), img.height(), 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, img.constBits());
+        const GLint f = l.linear ? GL_LINEAR : GL_NEAREST;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapToGl(l.wrap));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapToGl(l.wrap));
+        m_luts.append(lt);
+    }
+
+    m_presetParams = preset.params;
+    m_multiPass   = true;
+    m_slangShader = true;
+    m_shaderReady = true;
+    emit glLogMessage(QString("✔ 다중 패스 셰이더 로드: %1 (%2패스)")
+                      .arg(QFileInfo(presetPath).fileName())
+                      .arg(m_passes.size()));
+    return true;
+}
+
+// 패스 하나에 공통 유니폼을 채운다
+void GameCanvas::setSlangUniforms(QOpenGLShaderProgram& pr, const QSize& srcSize,
+                                  const QSize& outSize, const QMatrix4x4& mvp)
+{
+    if (pr.uniformLocation("MVP") >= 0) pr.setUniformValue("MVP", mvp);
+    pr.setUniformValue("FrameCount",     (int)gState.frameCount);
+    pr.setUniformValue("FrameDirection", 1);
+
+    auto setSize = [&](const char* name, float w, float h) {
+        const GLint loc = pr.uniformLocation(name);
+        if (loc < 0) return;
+        const float iw = w > 0.f ? 1.f / w : 0.f;
+        const float ih = h > 0.f ? 1.f / h : 0.f;
+        glUniform4f(loc, w, h, iw, ih);   // vec4 셰이더
+        glUniform2f(loc, w, h);           // vec2 셰이더 (아니면 무시됨)
+    };
+    const float ow = float(gState.videoWidth  > 0 ? gState.videoWidth  : 1);
+    const float oh = float(gState.videoHeight > 0 ? gState.videoHeight : 1);
+    setSize("SourceSize",   float(srcSize.width()), float(srcSize.height()));
+    setSize("OriginalSize", ow, oh);
+    setSize("OutputSize",   float(outSize.width()), float(outSize.height()));
+    setSize("TextureSize",  float(srcSize.width()), float(srcSize.height()));
+    setSize("InputSize",    float(srcSize.width()), float(srcSize.height()));
+
+    // #pragma parameter 기본값 → 그 위에 프리셋이 지정한 값을 덮어쓴다
+    for (auto it = m_pragmaDefaults.constBegin();
+         it != m_pragmaDefaults.constEnd(); ++it)
+        pr.setUniformValue(qPrintable(it.key()), it.value());
+    for (auto it = m_presetParams.constBegin();
+         it != m_presetParams.constEnd(); ++it)
+        if (pr.uniformLocation(qPrintable(it.key())) >= 0)
+            pr.setUniformValue(qPrintable(it.key()), it.value());
+}
+
+void GameCanvas::renderMultiPass() {
+    if (m_passes.isEmpty()) return;
+
+    // 회전을 고려한 원본 크기 (첫 패스가 만들어 낼 이미지 크기)
+    int rot = (m_rotation >= 0) ? m_rotation : gState.videoRotation;
+    rot &= 3;
+    const bool swapWH = (rot == 1 || rot == 3);
+    const int  gw = int(gState.videoWidth), gh = int(gState.videoHeight);
+    const QSize originalSize(swapWH ? gh : gw, swapWH ? gw : gh);
+
+    // ── 패스별 렌더 타깃 크기 결정 + FBO 준비 ────────────────
+    QSize srcSize = originalSize;
+    for (int i = 0; i < m_passes.size(); ++i) {
+        MultiPass& p = m_passes[i];
+        const bool last = (i == m_passes.size() - 1);
+
+        QSize target;
+        switch (p.scaleType) {
+        case SlangScale::Viewport:
+            target = QSize(int(width() * p.scale), int(height() * p.scale));
+            break;
+        case SlangScale::Absolute:
+            target = QSize(int(p.scale), int(p.scale));
+            break;
+        default:
+            target = QSize(int(srcSize.width() * p.scale),
+                           int(srcSize.height() * p.scale));
+            break;
+        }
+        target.setWidth (qMax(1, target.width()));
+        target.setHeight(qMax(1, target.height()));
+        p.size = target;
+
+        if (!last) {
+            const int nbuf = p.needsFeedback ? 2 : 1;
+            for (int b = 0; b < nbuf; ++b) {
+                if (!p.fbo[b] || p.fbo[b]->size() != target) {
+                    delete p.fbo[b];
+                    QOpenGLFramebufferObjectFormat fmt;
+                    // 블러·블룸·누적 패스는 8비트로 그리면 계단·뭉개짐이 생긴다
+                    if (p.floatFbo) fmt.setInternalTextureFormat(GL_RGBA16F);
+                    if (p.mipmapInput) fmt.setMipmap(true);
+                    p.fbo[b] = new QOpenGLFramebufferObject(target, fmt);
+                }
+            }
+        }
+        srcSize = target;
+    }
+
+    // ── 실제 렌더 ────────────────────────────────────────────
+    QMatrix4x4 fullMvp;                 // [0,1] → NDC 전체
+    fullMvp.translate(-1.0f, -1.0f);
+    fullMvp.scale(2.0f, 2.0f);
+
+    GLuint prevTex = m_texId;           // 첫 패스의 Source = 게임 화면
+    srcSize = originalSize;
+
+    for (int i = 0; i < m_passes.size(); ++i) {
+        MultiPass& p = m_passes[i];
+        const bool last = (i == m_passes.size() - 1);
+        const int  wIdx = p.needsFeedback ? (p.cur ^ 1) : 0;   // 쓸 버퍼
+
+        if (last) {
+            QOpenGLFramebufferObject::bindDefault();
+            glViewport(0, 0, width() * devicePixelRatioF(),
+                             height() * devicePixelRatioF());
+        } else {
+            p.fbo[wIdx]->bind();
+            glViewport(0, 0, p.size.width(), p.size.height());
+        }
+
+        QOpenGLShaderProgram& pr = *p.prog;
+        pr.bind();
+
+        // 텍스처 유닛 배정: 0=Source, 1=Original, 2.. = alias / feedback / LUT
+        int unit = 0;
+        auto bindTex = [&](const char* name, GLuint tex, bool linear, SlangWrap wrap) {
+            if (pr.uniformLocation(name) < 0 || tex == 0) return;
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            const GLint f = linear ? GL_LINEAR : GL_NEAREST;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapToGl(wrap));
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapToGl(wrap));
+            pr.setUniformValue(name, unit);
+            ++unit;
+        };
+
+        if (p.mipmapInput && prevTex) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, prevTex);
+            glGenerateMipmap(GL_TEXTURE_2D);
+        }
+        bindTex("Source",   prevTex, p.linear, p.wrap);
+        if (p.mipmapInput && pr.uniformLocation("Source") >= 0) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                            GL_LINEAR_MIPMAP_LINEAR);
+        }
+        bindTex("Original", m_texId, p.linear, SlangWrap::ClampToEdge);
+
+        // 앞선 패스들을 alias 이름으로
+        for (int j = 0; j < i; ++j) {
+            const MultiPass& q = m_passes[j];
+            // ★ q.written(이번 프레임에 그린 버퍼)을 봐야 한다.
+            //   예전에는 q.cur ^ 1 로 다시 계산했는데, 피드백 패스는 그리고 나서
+            //   cur 을 뒤집기 때문에 뒤 패스가 "한 프레임 뒤진" 버퍼를 참조했다.
+            if (q.alias.isEmpty() || !q.fbo[q.written]) continue;
+            bindTex(qPrintable(q.alias), q.fbo[q.written]->texture(),
+                    q.linear, q.wrap);
+        }
+
+        // 자기 이전 프레임 (PassFeedbackN)
+        if (p.needsFeedback && p.fbo[p.cur]) {
+            bindTex(qPrintable(QString("PassFeedback%1").arg(i)),
+                    p.fbo[p.cur]->texture(), p.linear, p.wrap);
+        }
+
+        // LUT
+        for (const LutTex& l : m_luts)
+            bindTex(qPrintable(l.name), l.id, true, SlangWrap::ClampToBorder);
+
+        setSlangUniforms(pr, srcSize,
+                         last ? QSize(width(), height()) : p.size,
+                         last ? m_slangMvp : fullMvp);
+
+        // 정점: 첫 패스만 회전 UV(=m_vboUnit), 나머지는 항등 UV
+        glBindBuffer(GL_ARRAY_BUFFER, (i == 0) ? m_vboUnit : m_unitVboMid);
+        constexpr int stride = 4 * sizeof(float);
+        GLint posLoc = pr.attributeLocation("Position");
+        if (posLoc < 0) posLoc = pr.attributeLocation("VertexCoord");
+        GLint uvLoc  = pr.attributeLocation("TexCoord");
+        if (uvLoc < 0) uvLoc = pr.attributeLocation("texcoord");
+        if (posLoc >= 0) {
+            glEnableVertexAttribArray(posLoc);
+            glVertexAttribPointer(posLoc, 2, GL_FLOAT, GL_FALSE, stride, nullptr);
+        }
+        if (uvLoc >= 0) {
+            glEnableVertexAttribArray(uvLoc);
+            glVertexAttribPointer(uvLoc, 2, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<void*>(2 * sizeof(float)));
+        }
+
+        if (last) glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        if (posLoc >= 0) glDisableVertexAttribArray(posLoc);
+        if (uvLoc  >= 0) glDisableVertexAttribArray(uvLoc);
+        pr.release();
+
+        if (!last) {
+            p.fbo[wIdx]->release();
+            prevTex = p.fbo[wIdx]->texture();
+            srcSize = p.size;
+        }
+    }
+
+    // 모든 패스가 끝난 뒤에 피드백 버퍼를 교대한다.
+    //   (도중에 바꾸면 뒤 패스의 alias 참조가 어긋난다)
+    for (MultiPass& p : m_passes)
+        if (p.needsFeedback) p.cur = p.written;
+
+    glActiveTexture(GL_TEXTURE0);
+}
+
+// ── 베젤 오버레이 ────────────────────────────────────────────
+//   셰이더가 아니라 위젯 위에 덧그린다 (paintGL 끝부분).
+//   빈 이미지를 주면 해제된다.
+// 베젤 PNG 에서 "뚫린 창"(투명 영역)의 위치를 찾는다.
+//   가운데 가로줄·세로줄에서 가장 긴 투명 구간을 잡는다. 아케이드 베젤은
+//   창이 가운데에 있으므로 이 방법이 단순하면서도 잘 맞고, 모서리의 둥근
+//   투명 픽셀에 휘둘리지 않는다.
+//   찾지 못하면 무효 사각형을 돌려준다.
+static QRectF detectBezelWindow(const QImage& src) {
+    if (src.isNull() || !src.hasAlphaChannel()) return QRectF();
+    const QImage img = src.convertToFormat(QImage::Format_ARGB32);
+    const int W = img.width(), H = img.height();
+    if (W < 8 || H < 8) return QRectF();
+
+    // 한 줄에서 가장 긴 "투명" 구간을 찾는다 (alpha < 128)
+    auto longestRun = [](const std::function<int(int)>& alphaAt, int n,
+                         int* begin, int* end) {
+        int bestB = -1, bestLen = 0, curB = -1;
+        for (int i = 0; i < n; ++i) {
+            if (alphaAt(i) < 128) {
+                if (curB < 0) curB = i;
+                const int len = i - curB + 1;
+                if (len > bestLen) { bestLen = len; bestB = curB; }
+            } else {
+                curB = -1;
+            }
+        }
+        if (bestLen <= 0) return false;
+        *begin = bestB; *end = bestB + bestLen - 1;
+        return true;
+    };
+
+    const int midY = H / 2, midX = W / 2;
+    int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    const uchar* rowMid = img.constScanLine(midY);
+    if (!longestRun([&](int x) { return int(rowMid[x * 4 + 3]); }, W, &x0, &x1))
+        return QRectF();
+    if (!longestRun([&](int y) { return int(img.constScanLine(y)[midX * 4 + 3]); },
+                    H, &y0, &y1))
+        return QRectF();
+
+    const double w = double(x1 - x0 + 1), h = double(y1 - y0 + 1);
+    // 너무 작거나(장식용 투명 점) 사실상 전체인 경우는 창으로 보지 않는다
+    if (w < W * 0.20 || h < H * 0.20)          return QRectF();
+    if (w > W * 0.995 && h > H * 0.995)        return QRectF();
+
+    return QRectF(double(x0) / W, double(y0) / H, w / W, h / H);
+}
+
+void GameCanvas::setBezelImage(const QImage& img) {
+    m_bezel          = img.isNull() ? QPixmap() : QPixmap::fromImage(img);
+    m_bezelScaled    = QPixmap();      // 크기 캐시 무효화
+    m_bezelScaledFor = QSize();
+    m_bezelWindow    = detectBezelWindow(img);
+
+    if (!img.isNull()) {
+        if (m_bezelWindow.isValid())
+            emit glLogMessage(QString("🖼 베젤 창 감지: 가로 %1% / 세로 %2% 영역에 화면을 맞춥니다")
+                              .arg(m_bezelWindow.width()  * 100.0, 0, 'f', 0)
+                              .arg(m_bezelWindow.height() * 100.0, 0, 'f', 0));
+        else
+            emit glLogMessage("⚠ 베젤에서 투명한 창을 찾지 못했습니다 — "
+                              "화면 위에 그대로 덮습니다 (가운데가 투명한 PNG 를 쓰세요)");
+    }
+
+    if (m_glReady) { makeCurrent(); updateVertices(); doneCurrent(); }
+    update();
+}
+
 bool GameCanvas::setShaderPath(const QString& path) {
     if (!m_glReady) {
         // initializeGL() 전 — 보류
@@ -227,6 +647,9 @@ bool GameCanvas::setShaderPath(const QString& path) {
         return true; // 보류 성공으로 간주
     }
     makeCurrent();
+    // 셰이더를 바꾸면 완전 호환 체인은 무조건 먼저 내린다.
+    //   (성공하면 parseAndLoadSlang 이 다시 올린다)
+    if (m_chainActive) { m_chain.release(); m_chainActive = false; m_shaderKey.clear(); }
     bool ok = false;
     if (path.isEmpty()) {
         // 외부 셰이더 해제 → 기본 CRT 셰이더 복구
@@ -237,7 +660,9 @@ bool GameCanvas::setShaderPath(const QString& path) {
         emit glLogMessage("외부 셰이더 해제 — CRT 기본 셰이더 복구");
         ok = true;
     } else {
-        if (parseAndLoadGlsl(path)) {
+        const QString ext = QFileInfo(path).suffix().toLower();
+        const bool isSlang = (ext == "slang" || ext == "slangp");
+        if (isSlang ? parseAndLoadSlang(path) : parseAndLoadGlsl(path)) {
             m_externalShader = true;
             emit glLogMessage("✔ 외부 셰이더 로드: " + QFileInfo(path).fileName());
             ok = true;
@@ -255,21 +680,101 @@ bool GameCanvas::setShaderPath(const QString& path) {
     return ok;
 }
 
-bool GameCanvas::loadShader(const QString& vertPath, const QString& fragPath) {
-    QFile vf(vertPath), ff(fragPath);
-    if (!vf.open(QIODevice::ReadOnly | QIODevice::Text) ||
-        !ff.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
-    QString vs = vf.readAll(), fs = ff.readAll();
-    makeCurrent();
-    m_prog.removeAllShaders();
-    m_shaderReady    = false;
-    m_externalShader = false;
-    bool ok = m_prog.addShaderFromSourceCode(QOpenGLShader::Vertex,   vs)
-           && m_prog.addShaderFromSourceCode(QOpenGLShader::Fragment, fs)
-           && m_prog.link();
-    if (ok) { m_shaderReady = true; m_externalShader = true; }
-    doneCurrent();
-    return ok;
+QVector<SlangParamDecl> GameCanvas::shaderParameters() const {
+    return m_chainActive ? m_chain.parameters() : QVector<SlangParamDecl>();
+}
+
+float GameCanvas::shaderParameter(const QString& name) const {
+    return m_chainActive ? m_chain.parameterValue(name) : 0.0f;
+}
+
+void GameCanvas::setShaderParameter(const QString& name, float value) {
+    if (!m_chainActive) return;
+    m_chain.setParameter(name, value);
+    update();
+}
+
+// ── RetroArch .slang 파싱 및 컴파일 ─────────────────────────
+//   .slang 은 Vulkan GLSL 이라 그대로는 데스크톱 GL 에서 못 쓴다.
+//   SlangShader.cpp 가 소스 수준으로 번역해 준다 (단일 패스 한정).
+bool GameCanvas::parseAndLoadSlang(const QString& path) {
+    QString shaderPath = path;
+
+    // ── 1순위: RetroArch 완전 호환 경로 ─────────────────────
+    //   glslang 으로 SPIR-V 를 거쳐 GLSL 330+ 로 뽑아낸다. 히스토리·피드백·
+    //   LUT·파라미터까지 전부 지원하므로 Mega Bezel 계열도 그대로 돌아간다.
+    releaseMultiPass();
+    m_chain.release();
+    m_chainActive = false;
+    if (m_glslVersion >= 330) {
+        // Mega Bezel 처럼 패스가 수십 개인 프리셋은 그래픽 드라이버가 셰이더를
+        //   컴파일하는 데 수십 초가 걸린다. 그동안 창이 멈춘 것처럼 보이므로
+        //   최소한 커서로라도 "작업 중" 을 알린다.
+        QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+        QElapsedTimer compileTimer;
+        compileTimer.start();
+
+        QString err;
+        const bool chainOk = m_chain.load(path, m_glslVersion, err);
+        const qint64 ms = compileTimer.elapsed();
+        QGuiApplication::restoreOverrideCursor();
+
+        if (chainOk) {
+            m_chainActive   = true;
+            m_shaderKey     = QFileInfo(path).fileName();
+
+            // 사용자가 예전에 바꿔 둔 파라미터 값을 되살린다
+            const auto saved = gSettings.shaderParams.value(m_shaderKey);
+            for (auto it = saved.constBegin(); it != saved.constEnd(); ++it)
+                m_chain.setParameter(it.key(), it.value());
+            if (!saved.isEmpty())
+                emit glLogMessage(QString("셰이더 파라미터 %1개 복원").arg(saved.size()));
+
+            m_multiPass     = false;
+            m_slangShader   = true;
+            m_shaderReady   = true;
+            for (const QString& l : m_chain.log()) emit glLogMessage("  " + l);
+            emit glLogMessage(QString("slang 체인 로드 완료 — 패스 %1개 (%2초)")
+                              .arg(m_chain.passCount())
+                              .arg(ms / 1000.0, 0, 'f', 1));
+            return true;
+        }
+        // 실패하면 아래 예전 경로로 내려간다. 이유는 남긴다.
+        emit glLogMessage("slang 전체 경로 실패 → 간이 경로로 시도: " + err.left(300));
+        m_chain.release();
+    }
+
+    // .slangp 프리셋은 패스가 몇 개든 다중 패스 경로로 처리한다
+    if (QFileInfo(path).suffix().compare("slangp", Qt::CaseInsensitive) == 0)
+        return loadSlangPreset(path);
+
+    QFile f(shaderPath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        emit glLogMessage("셰이더 파일 열기 실패: " + shaderPath);
+        return false;
+    }
+    const QString src = QString::fromUtf8(f.readAll());
+
+    // #pragma parameter 기본값은 glsl 과 형식이 같다
+    m_pragmaDefaults.clear();
+    {
+        static const QRegularExpression rePragma(
+            R"(#pragma\s+parameter\s+(\w+)\s+"[^"]*"\s+([-\d.eE+]+))");
+        auto it = rePragma.globalMatch(src);
+        while (it.hasNext()) {
+            auto m = it.next();
+            m_pragmaDefaults[m.captured(1)] = m.captured(2).toFloat();
+        }
+    }
+
+    const SlangTranslation t = translateSlang(src);
+    if (!t.ok) {
+        emit glLogMessage("✖ slang 번역 실패: " + t.error);
+        return false;
+    }
+    releaseMultiPass();
+    m_slangShader = true;
+    return compileProgram(t.vert, t.frag);
 }
 
 // ── RetroArch .glsl 파싱 및 컴파일 ───────────────────────────
@@ -447,23 +952,26 @@ bool GameCanvas::parseAndLoadGlsl(const QString& path) {
     normalizeVersion(fragSrc);
 
     // ── 디버그: pragma parameter 기본값 목록 ──────────────────────
-    if (!m_pragmaDefaults.isEmpty()) {
-        QString plog = "── #pragma parameter 기본값 ──────\n";
-        for (auto it = m_pragmaDefaults.constBegin(); it != m_pragmaDefaults.constEnd(); ++it)
-            plog += QString("  %1 = %2\n").arg(it.key()).arg((double)it.value());
-        emit glLogMessage(plog);
-    }
+    // 셰이더 파라미터·소스 덤프는 개발용이라 화면 로그에는 남기지 않는다.
+    //   (문제 추적이 필요하면 crash_log 에서 확인)
+    for (auto it = m_pragmaDefaults.constBegin(); it != m_pragmaDefaults.constEnd(); ++it)
+        qDebug() << "[shader] pragma" << it.key() << "=" << (double)it.value();
+    qDebug() << "[shader] vert" << vertSrc.size() << "frag" << fragSrc.size();
 
-    // ── 디버그: 처리된 셰이더 소스 로그 출력 ─────────────────────
-    // 앞부분(주석+pragma)을 건너뛰고 실제 GLSL 코드(마지막 3000자)를 표시
-    emit glLogMessage(
-        QString("── VERT 소스 (%1자, 마지막 3000자) ──────\n").arg(vertSrc.size()) +
-        vertSrc.right(3000));
-    emit glLogMessage(
-        QString("── FRAG 소스 (%1자, 마지막 3000자) ──────\n").arg(fragSrc.size()) +
-        fragSrc.right(3000));
+    releaseMultiPass();
+    m_slangShader = false;
+    return compileProgram(vertSrc, fragSrc);
+}
 
-    // ── 컴파일 & 링크 ────────────────────────────────────
+// ── 컴파일 & 링크 (glsl/slang 공용) ──────────────────────────
+bool GameCanvas::compileProgram(const QString& vertSrc, const QString& fragSrc) {
+    // 셰이더 문제가 생겼을 때 환경을 바로 알 수 있게 남긴다 (crash_log 전용).
+    //   .slang 을 #version 130 으로 뽑았다가 Mesa(스팀덱)에서 화면이 깨진 적이 있어,
+    //   실제 컨텍스트가 무엇인지 기록해 두는 게 중요하다.
+    qDebug() << "[shader] GL" << (const char*)glGetString(GL_VERSION)
+             << "| GLSL" << (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION)
+             << "| viewport" << width() << "x" << height();
+
     m_prog.removeAllShaders();
     m_shaderReady = false;
 
@@ -510,6 +1018,33 @@ void GameCanvas::initializeGL() {
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+
+    // slang 용 [0,1] 위치 버퍼 (updateVertices 에서 채운다)
+    glGenBuffers(1, &m_vboUnit);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vboUnit);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+
+    // 다중 패스의 중간 패스용 — 위치 [0,1], UV 항등 (고정값)
+    static const float midVerts[] = {
+        0.f, 0.f,  0.f, 0.f,
+        1.f, 0.f,  1.f, 0.f,
+        0.f, 1.f,  0.f, 1.f,
+        1.f, 1.f,  1.f, 1.f,
+    };
+    glGenBuffers(1, &m_unitVboMid);
+    glBindBuffer(GL_ARRAY_BUFFER, m_unitVboMid);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(midVerts), midVerts, GL_STATIC_DRAW);
+
+    // ── 이 컨텍스트가 감당하는 GLSL 버전 판정 ────────────────
+    //   3.3 미만이면 slang 신경로를 아예 끄고 예전 경로만 쓴다.
+    {
+        const QSurfaceFormat sf = context() ? context()->format() : QSurfaceFormat();
+        const int v = sf.majorVersion() * 100 + sf.minorVersion() * 10;
+        m_glslVersion = (v >= 330) ? qMin(v, 450) : 0;
+        emit glLogMessage(QString("OpenGL %1.%2 — slang 전체 기능 %3")
+                          .arg(sf.majorVersion()).arg(sf.minorVersion())
+                          .arg(m_glslVersion ? "사용 가능" : "사용 불가(3.3 필요)"));
+    }
 
     buildDefaultShader();
     m_glReady = true;
@@ -562,6 +1097,26 @@ void GameCanvas::updateVertices() {
 
     QRectF dr = calcDestRect(logW, logH, vw, vh);
 
+    // ── 베젤이 있으면 그 "뚫린 창" 안에 맞춘다 ────────────────
+    //   예전에는 화면 전체 기준으로 배치하고 베젤을 위에 덮어서, 베젤 창이
+    //   작으면 게임 화면의 위아래·양옆이 프레임에 가려 잘렸다.
+    //   창 안쪽에 비율을 유지한 채 넣으므로 잘리지도, 늘어나지도 않는다.
+    if (m_bezelWindow.isValid()) {
+        const double wx = m_bezelWindow.x()      * vw;
+        const double wy = m_bezelWindow.y()      * vh;
+        const int    ww = qMax(1, qRound(m_bezelWindow.width()  * vw));
+        const int    wh = qMax(1, qRound(m_bezelWindow.height() * vh));
+        // ★ 창을 "화면"으로 보고 스케일 모드를 그대로 적용한다.
+        //   Fill 이면 창을 꽉 채우고, Fit 이면 창 안에서 비율 유지,
+        //   1:1 이면 원본 크기로 창 가운데. (예전엔 무조건 Fit 이라
+        //   Fill 을 골라도 창 안에 레터박스가 생겼다)
+        const QRectF inner = calcDestRect(logW, logH, ww, wh);
+        dr = QRectF(wx + inner.x(), wy + inner.y(),
+                    inner.width(), inner.height());
+    }
+
+    m_destRect = dr;   // slang 체인이 마지막 패스를 여기에 그린다
+
     // NDC 변환 (OpenGL Y축: 위=+1)
     float x0 = static_cast<float>(dr.x() / vw * 2.0 - 1.0);
     float x1 = static_cast<float>((dr.x() + dr.width())  / vw * 2.0 - 1.0);
@@ -605,6 +1160,26 @@ void GameCanvas::updateVertices() {
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+
+    // ── slang 용 정점: 위치를 [0,1] 단위 사각형으로 ──────────
+    //   ★ RetroArch slang 셰이더는 Position 이 [0,1] 이라고 전제하고,
+    //     MVP 가 그것을 화면 좌표로 옮긴다. 실제로 newpixie-mini 는
+    //     "1.0 - Position.y" 로 상하를 뒤집는데, 우리처럼 NDC(-1~1)를 주면
+    //     y 가 0~2 가 되어 화면 위쪽 절반만 나온다.
+    //   → slang 일 때는 이 버퍼와 아래 MVP 를 쓴다.
+    float unitVerts[] = {
+        0.f, 0.f,  u_bl, v_bl,
+        1.f, 0.f,  u_br, v_br,
+        0.f, 1.f,  u_tl, v_tl,
+        1.f, 1.f,  u_tr, v_tr,
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, m_vboUnit);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(unitVerts), unitVerts);
+
+    // [0,1] → 화면 사각형 변환 (slang 의 MVP 로 넘긴다)
+    m_slangMvp.setToIdentity();
+    m_slangMvp.translate(x0, y1);
+    m_slangMvp.scale(x1 - x0, y0 - y1);
 }
 
 // ── 프레임 업로드 ────────────────────────────────────────────
@@ -660,6 +1235,24 @@ void GameCanvas::paintGL() {
 
     uploadFrame();
 
+    // RetroArch 완전 호환 체인이 살아 있으면 그쪽이 전부 그린다
+    if (m_chainActive) {
+        const double dpr = devicePixelRatioF();
+        const QSize  vp(int(width() * dpr), int(height() * dpr));
+        const QRect  dst(int(m_destRect.x() * dpr),      int(m_destRect.y() * dpr),
+                         int(m_destRect.width() * dpr),  int(m_destRect.height() * dpr));
+        int rot = (m_rotation >= 0) ? m_rotation : gState.videoRotation;
+        m_chain.render(m_texId,
+                       QSize(int(gState.videoWidth), int(gState.videoHeight)),
+                       dst.isEmpty() ? QRect(0, 0, vp.width(), vp.height()) : dst,
+                       vp, defaultFramebufferObject(), rot & 3);
+
+        // 셰이더가 실제로 프레임 예산을 넘길 때만 알린다 (평소엔 조용하다)
+        QString warn;
+        if (m_chain.takePerfWarning(warn)) emit glLogMessage("⚠ " + warn);
+    } else if (m_multiPass) {
+        renderMultiPass();
+    } else {
     m_prog.bind();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_texId);
@@ -672,6 +1265,11 @@ void GameCanvas::paintGL() {
 
         // ── 프레임 카운터 ────────────────────────────────────────
         m_prog.setUniformValue("FrameCount",     (int)gState.frameCount);
+        // slang 은 Position 이 [0,1] 이라고 전제하므로 MVP 가 화면 배치를 담당한다.
+        //   (일반 glsl 셰이더는 정점이 이미 NDC 라 단위행렬)
+        if (m_prog.uniformLocation("MVP") >= 0)
+            m_prog.setUniformValue("MVP",
+                m_slangShader ? m_slangMvp : QMatrix4x4());
         m_prog.setUniformValue("FrameDirection", 1);   // 1=정방향 재생
 
         // ── 크기 유니폼 — vec2/vec4 이중 설정 ───────────────────
@@ -742,10 +1340,13 @@ void GameCanvas::paintGL() {
     GLint posLoc = m_prog.attributeLocation("aPos");
     if (posLoc < 0) posLoc = m_prog.attributeLocation("VertexCoord");
     if (posLoc < 0) posLoc = m_prog.attributeLocation("position");
+    if (posLoc < 0) posLoc = m_prog.attributeLocation("Position");   // slang
     GLint uvLoc  = m_prog.attributeLocation("aUV");
     if (uvLoc  < 0) uvLoc  = m_prog.attributeLocation("TexCoord");
     if (uvLoc  < 0) uvLoc  = m_prog.attributeLocation("texcoord");
     constexpr int stride = 4 * sizeof(float);
+    // slang 이면 [0,1] 위치 버퍼를 쓴다
+    glBindBuffer(GL_ARRAY_BUFFER, m_slangShader ? m_vboUnit : m_vbo);
 
     if (posLoc >= 0) {
         glEnableVertexAttribArray(posLoc);
@@ -763,23 +1364,39 @@ void GameCanvas::paintGL() {
     if (uvLoc  >= 0) glDisableVertexAttribArray(uvLoc);
 
     m_prog.release();
+    }   // 단일 패스 경로 끝
 
-    // ── 녹화 오버레이 ─────────────────────────────────────
-    if (m_recording) {
+    // ── 베젤 + 녹화 오버레이 (QPainter 한 패스) ─────────────
+    //   베젤은 셰이더가 아니라 위젯 위에 덧그린다. 알파가 있는 PNG 를 그대로
+    //   쓸 수 있고, 셰이더 경로를 건드리지 않아 CRT/플래시 처리와 무관하다.
+    if (!m_bezel.isNull() || m_recording) {
         QPainter p(this);
         p.setRenderHint(QPainter::TextAntialiasing);
-        // 반투명 배경
-        p.fillRect(8, 8, 72, 22, QColor(0, 0, 0, 160));
-        // 빨간 점 + REC 텍스트
-        p.setPen(QColor(255, 60, 60));
-        p.setFont(QFont("Courier New", 11, QFont::Bold));
-        p.drawText(QRect(8, 8, 72, 22), Qt::AlignCenter, "\u25CF REC");
+
+        if (!m_bezel.isNull()) {
+            // 위젯 크기가 바뀔 때만 다시 스케일 (매 프레임 스케일은 낭비)
+            if (m_bezelScaled.isNull() || m_bezelScaledFor != size()) {
+                m_bezelScaled    = m_bezel.scaled(size(), Qt::IgnoreAspectRatio,
+                                                  Qt::SmoothTransformation);
+                m_bezelScaledFor = size();
+            }
+            p.drawPixmap(0, 0, m_bezelScaled);
+        }
+
+        if (m_recording) {
+            p.fillRect(8, 8, 72, 22, QColor(0, 0, 0, 160));
+            p.setPen(QColor(255, 60, 60));
+            p.setFont(QFont("Courier New", 11, QFont::Bold));
+            p.drawText(QRect(8, 8, 72, 22), Qt::AlignCenter, "\u25CF REC");
+        }
         p.end();
     }
 }
 
 // ── 쉐이더 빌드 ─────────────────────────────────────────────
 void GameCanvas::buildDefaultShader() {
+    m_slangShader = false;   // 기본 셰이더는 NDC 정점을 쓴다
+    releaseMultiPass();
     if (!m_prog.addShaderFromSourceCode(QOpenGLShader::Vertex, defaultVertSrc())) {
         emit glLogMessage("Vertex shader: " + m_prog.log()); return;
     }

@@ -36,7 +36,7 @@ info() { echo -e "${GRN}[INFO]${NC}  $*"; }
 warn() { echo -e "${YLW}[WARN]${NC}  $*"; }
 die()  { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-exec > >(tee -a "$LOG") 2>&1
+exec > >(tee "$LOG") 2>&1
 echo "═══════════════════════════════════════════════════════"
 echo "  FBNeoRageX Steam Deck Build  $(date '+%Y-%m-%d %H:%M')"
 echo "═══════════════════════════════════════════════════════"
@@ -117,6 +117,10 @@ if command -v apt-get &>/dev/null; then
         #   비활성화된다(스샷만 되고 녹화 실패). 런타임 .so 는 시스템에 있어도
         #   dev 헤더가 없으면 컴파일 단계에서 빠진다.
         libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+        # RetroArch slang 셰이더 변환 (Mega Bezel 등) — glslang 으로 SPIR-V 를
+        #   만들고 SPIRV-Cross 로 데스크톱 GLSL 을 뽑는다. 둘 다 정적(.a) 이라
+        #   런타임 의존성은 늘지 않는다.
+        glslang-dev libspirv-cross-c-shared-dev
     )
     MISSING=()
     for pkg in "${PKGS[@]}"; do
@@ -547,6 +551,14 @@ info "런처 생성 완료: FBNeoRageX.sh"
 
 # 임시 AppDir 정리
 rm -rf "$TMPAPPDIR"
+
+# ── 사용자 데이터 폴더 미리 생성 ────────────────────────────────────
+#   프로그램이 최초 실행 때도 만들지만, 압축을 푼 직후부터 어디에 무엇을
+#   넣어야 하는지 보이도록 패키지에 포함해 둔다.
+for d in roms previews screenshots saves cheats recordings shaders bezels          system/fbneo/cheats; do
+    mkdir -p "$BUNDLE_ROOT/$d"
+done
+info "사용자 데이터 폴더 생성 완료 (roms/previews/... )"
 
 # ════════════════════════════════════════════════════════════════════
 #  [5] tar.gz 패키징

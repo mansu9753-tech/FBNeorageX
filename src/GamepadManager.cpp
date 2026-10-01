@@ -3,6 +3,8 @@
 // Linux: /dev/input/js0
 
 #include "GamepadManager.h"
+#include "PadRawBits.h"
+#include "PadMapping.h"
 #include "EmulatorState.h"
 #include "AppSettings.h"
 
@@ -102,6 +104,30 @@ static constexpr int LR_A = 8, LR_X = 9, LR_L   =10, LR_R   =11;
 static constexpr int LR_L2=12, LR_R2=13;
 #endif
 
+// ── 비트 정의가 어긋나지 않는지 컴파일 타임에 못 박는다 ─────
+//   이름표(PadRawBits.h)와 여기 XI_*/RAW_* 가 따로 정의돼 있던 탓에
+//   스팀덱에서 버튼 이름이 전부 엉뚱하게 표시됐다. 다시는 갈라지지 않게
+//   두 정의가 같은 값인지 빌드가 검사한다.
+static_assert(uint32_t(XI_A)     == PAD_A,     "PAD_A 불일치");
+static_assert(uint32_t(XI_B)     == PAD_B,     "PAD_B 불일치");
+static_assert(uint32_t(XI_X)     == PAD_X,     "PAD_X 불일치");
+static_assert(uint32_t(XI_Y)     == PAD_Y,     "PAD_Y 불일치");
+static_assert(uint32_t(XI_LB)    == PAD_LB,    "PAD_LB 불일치");
+static_assert(uint32_t(XI_RB)    == PAD_RB,    "PAD_RB 불일치");
+static_assert(uint32_t(XI_BACK)  == PAD_BACK,  "PAD_BACK 불일치");
+static_assert(uint32_t(XI_START) == PAD_START, "PAD_START 불일치");
+static_assert(uint32_t(XI_L3)    == PAD_L3,    "PAD_L3 불일치");
+static_assert(uint32_t(XI_R3)    == PAD_R3,    "PAD_R3 불일치");
+static_assert(uint32_t(XI_DPAD_UP)    == PAD_DPAD_UP,    "PAD_DPAD_UP 불일치");
+static_assert(uint32_t(XI_DPAD_DOWN)  == PAD_DPAD_DOWN,  "PAD_DPAD_DOWN 불일치");
+static_assert(uint32_t(XI_DPAD_LEFT)  == PAD_DPAD_LEFT,  "PAD_DPAD_LEFT 불일치");
+static_assert(uint32_t(XI_DPAD_RIGHT) == PAD_DPAD_RIGHT, "PAD_DPAD_RIGHT 불일치");
+#ifndef _WIN32
+static_assert(RAW_L2 == PAD_L2 && RAW_R2 == PAD_R2, "트리거 비트 불일치");
+static_assert(RAW_ST_UP == PAD_ST_UP && RAW_ST_RIGHT == PAD_ST_RIGHT,
+              "스틱 비트 불일치");
+#endif
+
 // ── 생성자/소멸자 ─────────────────────────────────────────────
 GamepadManager::GamepadManager(QObject* parent)
     : QObject(parent)
@@ -148,22 +174,6 @@ void GamepadManager::stop() {
 }
 
 // ── 매핑 헬퍼 ─────────────────────────────────────────────────
-void GamepadManager::setMapping(const QHash<int,int>& m) {
-#ifdef _WIN32
-    if (m_source == PadSource::WinMM) m_winmmMapping = m;
-    else                               m_xinputMapping = m;
-#else
-    m_xinputMapping = m;
-#endif
-}
-
-QHash<int,int> GamepadManager::getMapping() const {
-#ifdef _WIN32
-    return (m_source == PadSource::WinMM) ? m_winmmMapping : m_xinputMapping;
-#else
-    return m_xinputMapping;
-#endif
-}
 
 // ── 버튼 캡처용 raw 폴 ────────────────────────────────────────
 int GamepadManager::pollRawForCapture(bool winmm) {
@@ -202,18 +212,6 @@ int GamepadManager::pollRawForCapture(bool winmm) {
 #endif
 }
 
-QString GamepadManager::activeSource() const {
-#ifdef _WIN32
-    switch (m_source) {
-    case PadSource::XInput: return "XInput";
-    case PadSource::WinMM:  return "WinMM";
-    default:                return "None";
-    }
-#else
-    return m_jsFd >= 0 ? "Joystick" : "None";
-#endif
-}
-
 // ── 패드별 매핑 / 플레이어 배정 ───────────────────────────────
 bool GamepadManager::padPresent(int idx) const {
 #ifdef _WIN32
@@ -223,19 +221,40 @@ bool GamepadManager::padPresent(int idx) const {
 #endif
 }
 
+// 버튼 이름은 PadRawBits.cpp 한 곳에만 있다 (비트 정의와 같은 파일).
+QString GamepadManager::buttonName(int rawBit) {
+    return padButtonName(rawBit);
+}
+
+// 마우스 클릭을 트리거 비트로 바꿔 둔다 (게임 화면에서만 호출된다)
+void GamepadManager::setMouseTriggerBits(bool left, bool right) {
+    uint32_t b = 0;
+    if (left)  b |= 0x20000u;   // 왼쪽 클릭 → R2
+    if (right) b |= 0x10000u;   // 오른쪽 클릭 → L2
+    m_mouseTrigBits = b;
+}
+
+// 패드는 어떤 경우에도 "자기 표"를 갖는다.
+//   비어 있으면 현재 배치의 기본값 사본을 넣는다. (공용 표 공유 금지)
+void GamepadManager::ensurePadMap(int idx) {
+    if (idx < 0 || idx >= 4) return;
+    if (m_padMaps[idx].isEmpty())
+        m_padMaps[idx] = makeDefaultMapping(m_padLayout);
+}
+
 void GamepadManager::setPadMapping(int idx, const QHash<int,int>& m) {
     if (idx < 0 || idx >= 4) return;
     m_padMaps[idx] = m;
+#ifdef _WIN32
+    // Windows 는 XInput 입력을 합쳐 한 표로 읽는다 → 첫 번째 패드의 표를 그대로 쓴다
+    if (idx == 0) m_xinputMapping = m;
+#endif
 }
 
 QHash<int,int> GamepadManager::padMapping(int idx) const {
     if (idx < 0 || idx >= 4) return {};
-    return m_padMaps[idx].isEmpty() ? m_xinputMapping : m_padMaps[idx];
-}
-
-// 기본 매핑 사본 — 패드별 프로필의 출발점 (공장 기본값)
-QHash<int,int> GamepadManager::defaultPadMapping() const {
-    return makeDefaultMapping();
+    if (!m_padMaps[idx].isEmpty()) return m_padMaps[idx];
+    return makeDefaultMapping(m_padLayout);   // 공용 표로 새지 않게
 }
 
 void GamepadManager::setPadPlayer(int idx, int player) {
@@ -262,12 +281,84 @@ uint16_t GamepadManager::playerBits(int player) const {
 //     X(왼쪽)=약손A   Y(위)=강손C
 //     A(아래)=약발B   B(오른쪽)=강발D
 void GamepadManager::resetDefaultMapping() {
-    m_xinputMapping = makeDefaultMapping();
+    m_xinputMapping = makeDefaultMapping(m_padLayout);
 }
 
 // 공장 기본 매핑을 만들어 돌려준다 (객체 상태와 무관)
-QHash<int,int> GamepadManager::makeDefaultMapping() {
+// ── 조합 핫키 판정 (플랫폼 공통) ─────────────────────────────
+//   SELECT(Back) 를 누른 채 다른 버튼을 누르면 핫키다. 조합 없이 SELECT 만 눌렀다 떼면
+//   그 순간 코인 펄스를 준다 (그래서 SELECT 를 코인으로 써도 핫키와 겹치지 않는다).
+void GamepadManager::updateHotkeys(uint32_t raw) {
+    m_rawAll = raw;   // 메뉴 조작이 참조하는 물리 버튼 상태
+    const bool sel = (raw & XI_BACK) != 0;
+    const uint32_t pressed = raw & ~m_hkPrevRaw;   // 이번에 새로 눌린 것
+
+    if (sel) {
+        if (!m_selHeld) m_selCombo = false;        // 홀드 시작
+        auto fire = [this](uint16_t hk) { m_hotkeyPending |= hk; m_selCombo = true; };
+        if (pressed & XI_START)      fire(HK_MENU);
+        if (pressed & XI_Y)          fire(HK_EXIT);
+        if (pressed & XI_LB)         fire(HK_SERVICE);
+        if (pressed & XI_RB)         fire(HK_FF);
+        if (pressed & XI_A)          fire(HK_SAVE);
+        if (pressed & XI_B)          fire(HK_LOAD);
+        if (pressed & XI_X)          fire(HK_SHOT);
+        if (pressed & XI_DPAD_RIGHT) fire(HK_SLOT_UP);
+        if (pressed & XI_DPAD_LEFT)  fire(HK_PREVSHOT);
+        if (pressed & XI_DPAD_UP)    fire(HK_FULLSCR);
+        if (pressed & XI_DPAD_DOWN)  fire(HK_SWAP);
+        if (pressed & (1u << 16))    fire(HK_RECORD);     // L2 (트리거 비트는 양 플랫폼 공통)
+        if (pressed & (1u << 17))    fire(HK_PREVREC);    // R2
+    } else if (m_selHeld) {
+        // 조합 없이 그냥 뗐다 → 코인 펄스
+        if (!m_selCombo) m_selPulse.restart();
+        else             m_selPulse.invalidate();
+        m_selCombo = false;
+    }
+
+    m_selHeld   = sel;
+    m_hkPrevRaw = raw;
+}
+
+QHash<int,int> GamepadManager::makeDefaultMapping(PadLayout layout) {
     QHash<int,int> m_xinputMapping;   // 아래 기존 코드를 그대로 쓰기 위한 지역명
+
+    // ── 6버튼 격투 배치 (스트리트파이터 계열) ────────────────
+    //   아케이드 패널이 2단 3열이라 패드도 같은 모양으로 잡는다.
+    //        X   Y   R1        LP  MP  HP
+    //        A   B   R2        LK  MK  HK
+    //   FBNeo 의 6버튼 인덱스: LP=1 MP=9 HP=10 / LK=0 MK=8 HK=11
+    //   (일반 배치와 인덱스가 달라서 표를 따로 둔다 — 같은 표를 쓰면
+    //    스트리트파이터에서 손발이 뒤바뀐다)
+    if (layout == PadLayout::SixButton) {
+        // ★ 인덱스 근거: 코어가 직접 보내는 버튼 정의(retro_input_descriptor).
+        //     1=Weak Punch  9=Medium Punch  10=Strong Punch
+        //     0=Weak Kick   8=Medium Kick   11=Strong Kick
+        //   FBNeo 소스의 배정 규칙과도 일치한다.
+        //   ※ 한때 이 표를 뒤집은 적이 있는데, 그건 저장된 프로필이 기본값을
+        //     덮고 있던 문제를 인덱스 문제로 오판한 것이었다. 되돌렸다.
+        //   ★ 인덱스가 아니라 "의미"로 넣는다. 실제 인덱스는 게임이 실행될 때
+        //     코어 정의에서 채워진다 (게임마다 인덱스가 다르기 때문).
+        m_xinputMapping[XI_X]    = padSemId(SEM_LP);   // X  → 약손
+        m_xinputMapping[XI_Y]    = padSemId(SEM_MP);   // Y  → 중손
+        m_xinputMapping[XI_RB]   = padSemId(SEM_HP);   // R1 → 강손
+        m_xinputMapping[XI_A]    = padSemId(SEM_LK);   // A  → 약발
+        m_xinputMapping[XI_B]    = padSemId(SEM_MK);   // B  → 중발
+        m_xinputMapping[0x20000] = padSemId(SEM_HK);   // R2 → 강발
+        // 3연타 매크로(12/13)는 어느 쪽이 펀치인지 실기 확인 전이라 기본 배정하지
+        // 않는다. 컨트롤 표에 행은 있으니 원하는 버튼에 직접 지정하면 된다.
+        m_xinputMapping[XI_START] = 3;
+        m_xinputMapping[XI_BACK]  = 14;
+        // 방향은 D-패드만 기본으로 둔다.
+        //   스틱까지 같이 넣으면 같은 동작에 두 입력이 걸려 매핑 표에 어느 쪽이
+        //   뜰지 들쭉날쭉해진다(스틱/D-패드가 섞여 보이던 원인).
+        m_xinputMapping[XI_DPAD_UP]    = 4;
+        m_xinputMapping[XI_DPAD_DOWN]  = 5;
+        m_xinputMapping[XI_DPAD_LEFT]  = 6;
+        m_xinputMapping[XI_DPAD_RIGHT] = 7;
+        return m_xinputMapping;
+    }
+
 #ifdef _WIN32
     // Windows 는 기존 배치 유지 (사용자 요청)
     m_xinputMapping[XI_X]          = 0;   // X → Button A (약손)
@@ -299,18 +390,11 @@ QHash<int,int> GamepadManager::makeDefaultMapping() {
     m_xinputMapping[XI_START]      = 3;   // Start
     m_xinputMapping[XI_BACK]       = 14;  // Select (코인)
 #endif
+    // 방향은 D-패드만 기본으로 (스틱은 필요하면 사용자가 직접 매핑)
     m_xinputMapping[XI_DPAD_UP]    = 4;   // UP
     m_xinputMapping[XI_DPAD_DOWN]  = 5;   // DOWN
     m_xinputMapping[XI_DPAD_LEFT]  = 6;   // LEFT
     m_xinputMapping[XI_DPAD_RIGHT] = 7;   // RIGHT
-#ifndef _WIN32
-    // Linux: 왼쪽 스틱도 방향키로 (D-패드와 동일하게 동작하도록)
-    //   Windows 는 readXInput 에서 스틱을 D-패드 비트에 합쳐 처리한다.
-    m_xinputMapping[RAW_ST_UP]     = 4;
-    m_xinputMapping[RAW_ST_DOWN]   = 5;
-    m_xinputMapping[RAW_ST_LEFT]   = 6;
-    m_xinputMapping[RAW_ST_RIGHT]  = 7;
-#endif
     return m_xinputMapping;
 }
 
@@ -439,6 +523,18 @@ uint16_t GamepadManager::readXInput() {
 
     }   // for i (모든 컨트롤러 합산)
 
+    // 컨트롤러가 하나라도 있으면 "패드 1개" 로 본다 (Windows 는 XInput 입력을 합쳐서 쓴다).
+    //   이걸 알려 줘야 컨트롤 화면이 패드 매핑을 보여 주고, 저장된 매핑이 적용된다.
+    {
+        const int want = anyPad ? 1 : 0;
+        if (m_padCount != want) {
+            m_padCount = want;
+            if (want && m_padNames[0].isEmpty()) m_padNames[0] = QStringLiteral("XInput Controller");
+            if (want) ensurePadMap(0);
+            emit padsChanged();
+        }
+    }
+
     if (!anyPad) {
         if (m_source == PadSource::XInput) {
             m_source    = PadSource::None;
@@ -459,16 +555,20 @@ uint16_t GamepadManager::readXInput() {
     if (allRT > XI_TRIG_DEAD) bits32 |= 0x20000;
 
     // 핫키 비트 (게임 입력과 분리)
-    m_hotkeyBits = 0;
-    if (btns & XI_L3)      m_hotkeyBits |= HK_L3;
-    if (btns & XI_R3)      m_hotkeyBits |= HK_R3;
-    if (bits32 & 0x10000)  m_hotkeyBits |= HK_LT;
-    if (bits32 & 0x20000)  m_hotkeyBits |= HK_RT;
+    bits32 |= m_mouseTrigBits;   // 마우스로 대체한 트리거
+
+    updateHotkeys(bits32);
+
+    // 조합 핫키를 누르는 중에는 게임으로 입력을 보내지 않는다.
+    //   (SELECT+R1 을 눌렀는데 R1 이 강손으로도 들어가면 안 되므로)
+    if (m_selHeld) { for (int i = 0; i < 4; ++i) m_padBits[i] = 0; return 0; }
+    if (coinPulseActive()) bits32 |= XI_BACK;     // SELECT 만 눌렀다 뗐다 → 코인
 
     uint16_t result = 0;
     for (auto it = m_xinputMapping.begin(); it != m_xinputMapping.end(); ++it)
         if ((bits32 & it.key()) && it.value() < 16)
             result |= (1 << it.value());
+    m_padBits[0] = result;
     return result;
 }
 
@@ -516,10 +616,39 @@ uint16_t GamepadManager::readWinMM() {
 
         uint16_t result = 0;
 
+        // ── 핫키: 패드와 같은 위치의 버튼을 XInput 비트로 옮겨 같은 판정을 쓴다 ──
+        //   버튼 1~4 = A B X Y, 5/6 = L1/R1, 9 = SELECT, 10 = START, POV = 십자키
+        {
+            const DWORD b = info.dwButtons;
+            uint32_t raw = 0;
+            if (b & (1u << 0)) raw |= XI_A;
+            if (b & (1u << 1)) raw |= XI_B;
+            if (b & (1u << 2)) raw |= XI_X;
+            if (b & (1u << 3)) raw |= XI_Y;
+            if (b & (1u << 4)) raw |= XI_LB;
+            if (b & (1u << 5)) raw |= XI_RB;
+            if (b & (1u << 6)) raw |= (1u << 16);      // 버튼 7 = L2
+            if (b & (1u << 7)) raw |= (1u << 17);      // 버튼 8 = R2
+            if (b & (1u << 8)) raw |= XI_BACK;
+            if (b & (1u << 9)) raw |= XI_START;
+            const DWORD pv = info.dwPOV;
+            if (pv <= 35900) {
+                if (pv >= 4500  && pv <= 13500) raw |= XI_DPAD_RIGHT;
+                if (pv >= 22500 && pv <= 31500) raw |= XI_DPAD_LEFT;
+                if (pv >= 31500 || pv <= 4500)  raw |= XI_DPAD_UP;
+                if (pv >= 13500 && pv <= 22500) raw |= XI_DPAD_DOWN;
+            }
+            updateHotkeys(raw);
+        }
+        // 조합 중에는 게임으로 보내지 않는다. SELECT 만 눌렀다 뗐으면 코인 버튼을 잠깐 눌린 것으로 본다.
+        if (m_selHeld) return 0;
+        DWORD buttons = info.dwButtons;
+        if (coinPulseActive()) buttons |= (1u << 8);
+
         // ── 버튼 매핑 ──────────────────────────────────────────
         for (auto it = m_winmmMapping.begin(); it != m_winmmMapping.end(); ++it) {
             int btnIdx = it.key();  // 0-based
-            if (it.value() < 16 && ((info.dwButtons >> btnIdx) & 1))
+            if (it.value() < 16 && ((buttons >> btnIdx) & 1))
                 result |= (1 << it.value());
         }
 
@@ -578,7 +707,12 @@ bool GamepadManager::openJoystick() {
             // 장치 이름을 읽어 둔다 (패드별 버튼 배열이 달라 진단에 필요)
             char name[128] = {0};
             if (::ioctl(fd, JSIOCGNAME(sizeof(name)), name) >= 0)
-                m_padNames[i] = QString::fromUtf8(name);
+                m_padNames[i] = QString::fromUtf8(name).trimmed();
+            // 이름을 못 읽어도 비워 두지 않는다 — 이름이 비면 상위에서
+            // 프로필 적용을 건너뛰어 그 패드만 설정이 안 먹는 일이 있었다.
+            if (m_padNames[i].isEmpty())
+                m_padNames[i] = QString("PAD %1").arg(i);
+            ensurePadMap(i);
             char nbtn = 0, naxis = 0;
             ::ioctl(fd, JSIOCGBUTTONS, &nbtn);
             ::ioctl(fd, JSIOCGAXES,    &naxis);
@@ -609,11 +743,9 @@ uint16_t GamepadManager::readJoystick() {
     // axis 0: 왼쪽 스틱 X   axis 1: 왼쪽 스틱 Y
     // axis 2: LT 트리거     axis 5: RT 트리거
     // axis 6: D-패드 X      axis 7: D-패드 Y
-    // ── 소스별 비트 분리 ──────────────────────────────────────
-    // m_buttonBits: JS_EVENT_BUTTON 이벤트 전용
-    // m_stickBits : axis 0/1 (왼쪽 스틱) — 게임 입력
-    // m_dpadBits  : axis 6/7 (D-패드 hat) — 게임 + UI 네비
-    // → 스틱과 D-패드가 동일 방향 비트를 공유하지 않으므로 상호 간섭 없음
+    // ── 비트 구성 ─────────────────────────────────────────────
+    // m_rawBits  : 버튼 + 트리거 + D-패드 + 스틱을 합친 원시 비트 (매핑의 key)
+    // m_dpadBits : D-패드/스틱 방향만 추린 값 — 메뉴 네비게이션 전용
     const short DEAD = 10000;  // ~30% 데드존 (스틱 드리프트 방지 강화)
 
     // 연결된 모든 패드의 이벤트를 읽어 하나의 원시 비트로 합친다
@@ -671,7 +803,7 @@ uint16_t GamepadManager::readJoystick() {
     bool anyOpen = false;
     for (int i = 0; i < kMaxPads; ++i) if (m_jsFds[i] >= 0) { anyOpen = true; if (m_jsFd < 0) m_jsFd = m_jsFds[i]; }
     if (!anyOpen) {
-        m_rawBits = 0; m_buttonBits = 0; m_stickBits = 0; m_dpadBits = 0;
+        m_rawBits = 0; m_dpadBits = 0;
         if (m_connected) { m_connected = false; emit disconnected(); }
         return 0;
     }
@@ -682,17 +814,39 @@ uint16_t GamepadManager::readJoystick() {
     m_rawBits  = 0;
     m_padCount = 0;
     uint16_t result = 0;
+    uint32_t rawPad[kMaxPads] = {0, 0, 0, 0};
+    uint32_t selDown = 0;                       // SELECT 를 누르고 있는 패드들
     for (int pad = 0; pad < kMaxPads; ++pad) {
         m_padBits[pad] = 0;
         if (m_jsFds[pad] < 0) continue;
         ++m_padCount;
-        const uint32_t raw = m_padRaw[pad];
+        // 마우스로 대체한 트리거는 1P 패드에만 더한다
+        //   (여러 패드가 있을 때 클릭 하나가 전원에게 들어가면 안 된다)
+        rawPad[pad] = m_padRaw[pad]
+                    | ((m_padPlayer[pad] == 1) ? m_mouseTrigBits : 0u);
         // 캡처용 합산본: 리매핑 대상 패드가 지정돼 있으면 그 패드만 본다
-        if (m_capturePad < 0 || m_capturePad == pad) m_rawBits |= raw;
+        if (m_capturePad < 0 || m_capturePad == pad) m_rawBits |= rawPad[pad];
+        if (rawPad[pad] & XI_BACK) selDown |= (1u << pad);
+    }
+
+    // 핫키 비트 (게임 입력과 분리 — 매핑 테이블을 거치지 않는다)
+    updateHotkeys(m_rawBits);
+    if (m_selHeld) m_selPads |= uint8_t(selDown);        // 코인 펄스를 줄 패드 기억
+    const bool pulse = coinPulseActive();
+    if (!m_selHeld && !pulse) m_selPads = 0;
+
+    for (int pad = 0; pad < kMaxPads; ++pad) {
+        if (m_jsFds[pad] < 0) continue;
+        uint32_t raw = rawPad[pad];
+        if (m_selHeld) continue;                          // 조합 중에는 게임으로 보내지 않는다
+        if (pulse && (m_selPads & (1u << pad))) raw |= XI_BACK;   // SELECT 만 눌렀다 뗐다 → 코인
 
         // ★ 패드별 매핑을 쓴다 (장치마다 버튼 번호가 다르므로)
-        const QHash<int,int>& map =
-            m_padMaps[pad].isEmpty() ? m_xinputMapping : m_padMaps[pad];
+        // ★ 공용 표로 폴백하지 않는다.
+        //   예전에는 패드별 표가 비면 공용 표(m_xinputMapping)를 썼는데,
+        //   그 공용 표가 "전역 저장" 값으로 덮여 있어 배치 기본값이 영영
+        //   적용되지 않았다. 패드는 열릴 때 항상 자기 표를 갖는다(ensurePadMap).
+        const QHash<int,int>& map = m_padMaps[pad];
         uint16_t bits = 0;
         for (auto it = map.constBegin(); it != map.constEnd(); ++it)
             if ((raw & uint32_t(it.key())) && it.value() < 16)
@@ -700,14 +854,7 @@ uint16_t GamepadManager::readJoystick() {
         m_padBits[pad] = bits;
     }
     // 1P 에 배정된 패드들의 합 (UI 네비게이션·단일 플레이 경로용)
-    result = playerBits(1);
-
-    // 핫키 비트 (게임 입력과 분리 — 매핑 테이블을 거치지 않는다)
-    m_hotkeyBits = 0;
-    if (m_rawBits & XI_L3)  m_hotkeyBits |= HK_L3;
-    if (m_rawBits & XI_R3)  m_hotkeyBits |= HK_R3;
-    if (m_rawBits & RAW_L2) m_hotkeyBits |= HK_LT;
-    if (m_rawBits & RAW_R2) m_hotkeyBits |= HK_RT;
+    result = m_selHeld ? uint16_t(0) : playerBits(1);
 
     // UI 네비게이션용 방향 비트 (D-패드 + 스틱 모두 인정)
     m_dpadBits = 0;
@@ -734,10 +881,8 @@ uint16_t GamepadManager::dpadBits() const {
 void GamepadManager::clearState() {
 #ifndef _WIN32
     m_rawBits    = 0;
-    m_buttonBits = 0;
-    m_stickBits  = 0;
     m_dpadBits   = 0;
-    m_hotkeyBits = 0;
+    m_hotkeyPending = 0;
     // 이전 게임 중 발생한 미처리 이벤트 드레인 (열린 패드 전부)
     for (int i = 0; i < kMaxPads; ++i) {
         if (m_jsFds[i] < 0) continue;

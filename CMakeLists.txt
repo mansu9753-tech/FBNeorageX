@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FBNeoRageX VERSION 1.9 LANGUAGES CXX C)
+project(FBNeoRageX VERSION 2.3 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,14 +26,38 @@ set(SOURCES
     src/main.cpp
     src/AppSettings.cpp
     src/LibretroCore.cpp
-    src/BorderPanel.cpp
     src/GameCanvas.cpp
+    src/SlangShader.cpp
+    src/SlangPreset.cpp
+    src/SlangCompile.cpp
+    src/SlangChain.cpp
+    src/ShaderParamDialog.cpp
+    src/NeoRageXSkin.cpp
+    src/NeoRageXShell.cpp
+    src/ShellMenu.cpp
+    src/ShellText.cpp
+    src/ShellPageControls.cpp
+    src/ShellPageShots.cpp
+    src/ShellPageNetplay.cpp
+    src/ShellPageDirectories.cpp
+    src/ShellPageVideo.cpp
+    src/ShellPageAudio.cpp
+    src/ShellPageMachine.cpp
+    src/ShellPageCheats.cpp
+    src/ShellPageSystem.cpp
+    src/PixelFont.cpp
+    src/IntroSplash.cpp
+    src/FrameLab.cpp
     src/AudioManager.cpp
+    src/SoundMode.cpp
+    src/ArcadeLayout.cpp
     src/NetplayManager.cpp
     src/StunClient.cpp
     src/UPnpMapper.cpp
     src/CheatManager.cpp
     src/GamepadManager.cpp
+    src/PadRawBits.cpp
+    src/PadMapping.cpp
     src/VideoRecorder.cpp
     src/PreviewVideo.cpp
     src/MainWindow.cpp
@@ -45,14 +69,31 @@ set(HEADERS
     src/EmulatorState.h
     src/DrcPid.h
     src/LibretroCore.h
-    src/BorderPanel.h
     src/GameCanvas.h
+    src/SlangShader.h
+    src/SlangPreset.h
+    src/SlangCompile.h
+    src/SlangChain.h
+    src/ShaderParamDialog.h
+    src/NeoRageXSkin.h
+    src/NeoRageXShell.h
+    src/ShellPage.h
+    src/ShellPages.h
+    src/ShellMenu.h
+    src/ShellText.h
+    src/NativeCheats.h
+    src/PixelFont.h
     src/AudioManager.h
+    src/SoundMode.h
+    src/ArcadeLayout.h
+    src/ArcadeLayout_data.h
     src/NetplayManager.h
     src/StunClient.h
     src/UPnpMapper.h
     src/CheatManager.h
     src/GamepadManager.h
+    src/PadRawBits.h
+    src/PadMapping.h
     src/GameNamesDb.h
     src/GameHardware.h
     src/VideoRecorder.h
@@ -83,6 +124,7 @@ if(WIN32)
 else()
     qt_add_executable(FBNeoRageX ${SOURCES} ${HEADERS} ${RESOURCES})
 endif()
+target_compile_definitions(FBNeoRageX PRIVATE FBNRX_VERSION="${PROJECT_VERSION}")
 
 # ── 링크 ─────────────────────────────────────────────────
 target_link_libraries(FBNeoRageX PRIVATE
@@ -93,6 +135,28 @@ target_link_libraries(FBNeoRageX PRIVATE
     Qt6::Multimedia
     Qt6::MultimediaWidgets
     Qt6::Network
+)
+
+# ── slang 셰이더 변환 (glslang → SPIR-V → SPIRV-Cross → GLSL) ──
+#   RetroArch 와 같은 경로를 쓴다. 이게 있어야 Mega Bezel 처럼 GLSL 450 기능을
+#   쓰는 셰이더를 데스크톱 OpenGL 에서 돌릴 수 있다.
+#   Windows(MSYS2) 와 Ubuntu 모두 정적 라이브러리(.a)를 제공하므로 그대로 링크한다.
+#   ★ 링크 순서 주의: 의존하는 쪽이 먼저 와야 한다
+#     (default-resource-limits → glslang → SPIRV → SPIRV-Tools)
+target_link_libraries(FBNeoRageX PRIVATE
+    glslang-default-resource-limits
+    glslang
+    SPIRV
+    SPIRV-Tools-opt
+    SPIRV-Tools
+    spirv-cross-c
+    spirv-cross-glsl
+    spirv-cross-hlsl
+    spirv-cross-msl
+    spirv-cross-cpp
+    spirv-cross-reflect
+    spirv-cross-util
+    spirv-cross-core
 )
 
 if(WIN32)
@@ -140,6 +204,12 @@ if(MSVC)
     target_compile_options(FBNeoRageX PRIVATE /W3 /utf-8)
 else()
     target_compile_options(FBNeoRageX PRIVATE -Wall -Wextra -O2)
+    # Release 는 디버그 심볼을 떼어 실행 파일을 줄인다 (Windows 정적 빌드 기준 약 89MB -> 56MB).
+    #   충돌 로그의 주소를 소스 줄로 되짚어야 할 때는 -DFBNRX_STRIP=OFF 로 빌드한다.
+    option(FBNRX_STRIP "Release 빌드에서 심볼 제거" ON)
+    if(FBNRX_STRIP)
+        target_link_options(FBNeoRageX PRIVATE $<$<CONFIG:Release>:-s>)
+    endif()
     if(WIN32)
         # MinGW 런타임 DLL 제거
         target_link_options(FBNeoRageX PRIVATE

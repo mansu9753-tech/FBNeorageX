@@ -11,24 +11,6 @@
 
 #include "libretro.h"
 
-// ── DRC 이동 평균 (오디오 버퍼 평활화) ────────────────────
-struct MovingAvg {
-    static constexpr int N = 5;
-    double buf[N] = {};
-    int    idx    = 0;
-    bool   full   = false;
-
-    double update(double v) {
-        buf[idx] = v;
-        idx = (idx + 1) % N;
-        if (idx == 0) full = true;
-        int cnt = full ? N : idx;
-        double sum = 0;
-        for (int i = 0; i < cnt; ++i) sum += buf[i];
-        return sum / cnt;
-    }
-};
-
 // ── 에뮬레이터 전역 상태 ──────────────────────────────────
 struct EmulatorState {
     // ── 게임 상태 ──────────────────────────────────────────
@@ -88,7 +70,6 @@ struct EmulatorState {
 
     // ── 오디오 ────────────────────────────────────────────
     QByteArray  audioPending;    // retro_audio_batch 로 누적된 PCM 데이터
-    MovingAvg   drcFreeAvg;
 
     // ── 설정 경로 (코어에 전달) ────────────────────────────
     QByteArray  systemDir;

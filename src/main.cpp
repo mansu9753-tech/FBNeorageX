@@ -2,6 +2,8 @@
 
 #include <QApplication>
 #include <QSurfaceFormat>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
 #include <QDir>
 #include <QStandardPaths>
 #include <QDateTime>
@@ -96,7 +98,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     app.setApplicationName("FBNeoRageX");
-    app.setApplicationVersion("1.9");
+    app.setApplicationVersion(FBNRX_VERSION);
     app.setOrganizationName("FBNeoRageX");
 
     // ── 작업 디렉터리를 실행파일 위치로 고정 ──────────────
@@ -106,6 +108,7 @@ int main(int argc, char* argv[])
     //   gSettings 는 정적 초기화 시점에 생성되어 그때는 applicationDirPath()
     //   가 비어 있다 → 여기서 프로그램 폴더 기준으로 다시 설정한다.
     gSettings.initDefaults();
+    gSettings.ensureDataDirs();   // 최초 실행: 폴더 구조를 미리 만들어 둔다
 
     // ── 크래시 진단 로그 파일 오픈 (실행파일 위치, 즉시 flush) ───
     // QApplication 생성 이후에 applicationDirPath()가 유효해짐.
@@ -144,7 +147,32 @@ int main(int argc, char* argv[])
     QSurfaceFormat fmt;
 #ifdef _WIN32
     fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
-    fmt.setVersion(2, 1);
+    // RetroArch slang 셰이더(Mega Bezel 등)는 GLSL 330 이상이라야 돌아간다.
+    //   ★ 그런데 3.3 을 요청했다가 실패하면 창이 아예 안 뜬다. 그러니 요청하기
+    //     전에 실제로 만들어 보고, 안 되면 예전과 똑같이 2.1 로 간다.
+    //     2.1 로 떨어져도 기존 GLSL 셰이더·베젤·화면 모드는 그대로 동작한다.
+    {
+        QSurfaceFormat probe;
+        probe.setProfile(QSurfaceFormat::CompatibilityProfile);
+        probe.setVersion(3, 3);
+        probe.setDepthBufferSize(0);
+        probe.setStencilBufferSize(0);
+
+        QOffscreenSurface surf;
+        surf.setFormat(probe);
+        surf.create();
+
+        QOpenGLContext probeCtx;
+        probeCtx.setFormat(probe);
+        bool got33 = false;
+        if (surf.isValid() && probeCtx.create() && probeCtx.makeCurrent(&surf)) {
+            const QSurfaceFormat real = probeCtx.format();
+            got33 = (real.majorVersion() > 3)
+                 || (real.majorVersion() == 3 && real.minorVersion() >= 3);
+            probeCtx.doneCurrent();
+        }
+        fmt.setVersion(got33 ? 3 : 2, got33 ? 3 : 1);
+    }
 #endif
     fmt.setDepthBufferSize(0);
     fmt.setStencilBufferSize(0);

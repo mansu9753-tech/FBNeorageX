@@ -33,8 +33,6 @@ public:
     bool    unserialize(const void* data, size_t size);
 
     // ── 치트 ──────────────────────────────────────────────
-    void    cheatReset();
-    void    cheatSet(unsigned index, bool enabled, const QString& code);
 
     // ── 메모리 직접 접근 (치트 RAM 패치용) ────────────────
     void*  getMemoryData(unsigned memId);
@@ -65,6 +63,8 @@ private:
     retro_system_info    m_sysInfo    = {};
     retro_system_av_info m_avInfo     = {};
     retro_pixel_format   m_pixelFormat = RETRO_PIXEL_FORMAT_RGB565;
+    QString              m_libPath;           // 마지막으로 불러온 코어 파일
+    bool                 m_hadGame = false;   // 이 프로세스에서 게임을 한 번이라도 실행했는가
 
     // 경로 (코어에 넘겨줄 C 문자열 수명 보장용)
     QByteArray m_systemDirBa;
@@ -83,8 +83,6 @@ private:
     retro_serialize_t           m_retro_serialize           = nullptr;
     retro_unserialize_t         m_retro_unserialize         = nullptr;
     retro_reset_t               m_retro_reset               = nullptr;
-    retro_cheat_reset_t         m_retro_cheat_reset         = nullptr;
-    retro_cheat_set_t           m_retro_cheat_set           = nullptr;
     retro_set_environment_t     m_retro_set_environment     = nullptr;
     retro_set_video_refresh_t   m_retro_set_video_refresh   = nullptr;
     retro_set_audio_sample_t    m_retro_set_audio_sample    = nullptr;
