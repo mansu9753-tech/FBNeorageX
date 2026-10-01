@@ -256,6 +256,7 @@ void AppSettings::load(const QString& path) {
 
     uiLanguage        = jval(o, "ui_language",          uiLanguage);
     showIntro         = jval(o, "show_intro",           showIntro);
+    videoRenderer     = jval(o, "video_renderer",       videoRenderer);
     netplayPort       = jval(o, "netplay_port",         netplayPort);
     netplayInputDelay = jval(o, "netplay_input_delay",  netplayInputDelay);
     netplayRelayUrl   = jval(o, "netplay_relay_url",    netplayRelayUrl);
@@ -439,6 +440,7 @@ void AppSettings::save(const QString& path) const {
 
     o["ui_language"]          = uiLanguage;
     o["show_intro"]           = showIntro;
+    o["video_renderer"]       = videoRenderer;
     o["netplay_port"]         = netplayPort;
     o["netplay_input_delay"]  = netplayInputDelay;
     o["netplay_relay_url"]    = netplayRelayUrl;

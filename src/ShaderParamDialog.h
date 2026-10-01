@@ -23,7 +23,7 @@
 
 #include "SlangCompile.h"   // SlangParamDecl
 
-class GameCanvas;
+class GameViewIface;
 class QLineEdit;
 class QVBoxLayout;
 class QWidget;
@@ -33,7 +33,7 @@ class QLabel;
 class ShaderParamDialog : public QDialog {
     Q_OBJECT
 public:
-    ShaderParamDialog(GameCanvas* canvas, const QString& shaderKey,
+    ShaderParamDialog(GameViewIface* canvas, const QString& shaderKey,
                       bool english, QWidget* parent = nullptr);
 
 signals:
@@ -52,7 +52,7 @@ private:
         bool           isTitle = false;
     };
 
-    GameCanvas*   m_canvas = nullptr;
+    GameViewIface* m_canvas = nullptr;
     QString       m_shaderKey;
     bool          m_en = false;
     QLineEdit*    m_search = nullptr;

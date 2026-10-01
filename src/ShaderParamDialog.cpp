@@ -1,7 +1,7 @@
 // ShaderParamDialog.cpp — slang 셰이더 파라미터 편집 창
 
 #include "ShaderParamDialog.h"
-#include "GameCanvas.h"
+#include "GameViewIface.h"
 
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
@@ -36,7 +36,7 @@ bool looksLikeTitle(const SlangParamDecl& d) {
 
 }  // namespace
 
-ShaderParamDialog::ShaderParamDialog(GameCanvas* canvas, const QString& shaderKey,
+ShaderParamDialog::ShaderParamDialog(GameViewIface* canvas, const QString& shaderKey,
                                      bool english, QWidget* parent)
     : QDialog(parent), m_canvas(canvas), m_shaderKey(shaderKey), m_en(english) {
     setWindowTitle(m_en ? "Shader Parameters — " + shaderKey

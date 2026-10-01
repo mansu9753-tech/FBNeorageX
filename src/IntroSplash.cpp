@@ -4,6 +4,7 @@
 
 #include <QAudioOutput>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QMediaPlayer>
@@ -61,6 +62,20 @@ QString IntroSplash::findVideo(const QString& baseDir) {
             const QString f = dir + QStringLiteral("/intro.") + QLatin1String(e);
             if (QFileInfo::exists(f)) return f;
         }
+    // 폴더에 없으면 실행 파일에 내장된 기본 오프닝을 임시 폴더로 꺼내서 쓴다 (영상 재생기는 파일 경로가 필요하다)
+    QFile res(QStringLiteral(":/assets/intro/intro.mp4"));
+    if (res.exists()) {
+        const QString tmp = QDir::tempPath() + QStringLiteral("/fbneoragex_intro_") + QString::number(res.size()) + QStringLiteral(".mp4");
+        if (QFileInfo(tmp).size() == res.size()) return tmp;
+        if (res.open(QIODevice::ReadOnly)) {
+            QFile out(tmp);
+            if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                out.write(res.readAll());
+                out.close();
+                return tmp;
+            }
+        }
+    }
     return QString();
 }
 

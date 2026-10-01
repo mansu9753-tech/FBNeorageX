@@ -2,6 +2,9 @@
 
 #include "MainWindow.h"
 
+#include <QProcess>
+#include <QScreen>
+#include <QWindow>
 #include <QRegularExpression>
 #include "ShaderParamDialog.h"
 #include "NeoRageXShell.h"
@@ -777,10 +780,26 @@ void MainWindow::buildUi() {
     m_stack->addWidget(m_guiWidget);
 
     // ── 게임 캔버스 (index 1) ───────────────────────────────
-    m_canvas = new GameCanvas;
-    m_canvas->setMouseTracking(true);   // 버튼 안 눌러도 마우스 이동 감지
-    connect(m_canvas, &GameCanvas::glLogMessage, this, &MainWindow::log);
-    m_stack->addWidget(m_canvas);
+    //   ★ 캔버스(QOpenGLWidget)는 창에 붙는 순간 Qt 가 창 전체를 GPU(RHI)로 합성하기 시작한다.
+    //     일부 PC(내장 그래픽·구형 드라이버)에서는 그 합성이 실패해 메뉴까지 검은/빨간 화면이 된다.
+    //     그래서 게임을 처음 켤 때까지는 자리만 차지하는 빈 위젯을 두고, 그때 캔버스를 끼운다.
+    //     (메뉴는 평범한 소프트웨어 그리기로 나오므로 어떤 PC에서도 보인다)
+    //   VIDEO OPTIONS → RENDERER 가 SOFTWARE 면 OpenGL 없이 CPU 로 그리는 SoftCanvas 를 쓴다.
+    if (gSettings.videoRenderer == QLatin1String("software")) {
+        auto* sc = new SoftCanvas;
+        connect(sc, &SoftCanvas::glLogMessage, this, &MainWindow::log);
+        m_canvas = sc;
+        qDebug("[gfx] 렌더러: SOFTWARE (CPU)");
+    } else {
+        auto* gc = new GameCanvas;
+        connect(gc, &GameCanvas::glLogMessage, this, &MainWindow::log);
+        m_canvas = gc;
+        qDebug("[gfx] 렌더러: OPENGL");
+    }
+    m_canvasW = m_canvas->widget();
+    m_canvasW->setMouseTracking(true);   // 버튼 안 눌러도 마우스 이동 감지
+    m_canvasHolder = new QWidget;
+    m_stack->addWidget(m_canvasHolder);
 
     buildShellMenu();   // 캔버스·오디오·치트가 모두 준비된 뒤에 만든다
 
@@ -820,7 +839,7 @@ void MainWindow::buildUi() {
     });
 
     // ── 1P↔2P 게임 화면 오버레이 ─────────────────────────────
-    m_playerOverlay = new QLabel(m_canvas);
+    m_playerOverlay = new QLabel(m_canvasW);
     m_playerOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_playerOverlay->setStyleSheet(
         "QLabel{"
@@ -843,7 +862,7 @@ void MainWindow::buildUi() {
         m_playerOverlay->hide();
     });
 
-    m_canvas->installEventFilter(this);
+    m_canvasW->installEventFilter(this);
 }
 
 
@@ -990,6 +1009,7 @@ void MainWindow::syncShellPreview() {
 void MainWindow::buildShellMenu() {
     ShellHost h;
     h.canvas = m_canvas;
+    h.softwareRenderer = [this]() { return qobject_cast<SoftCanvas*>(m_canvasW) != nullptr; };
     h.audio  = m_audio;
     h.cheat  = m_cheat;
     h.window = this;
@@ -2139,7 +2159,7 @@ void MainWindow::toggleSwapPlayers() {
 
         m_playerOverlay->adjustSize();
         m_playerOverlay->move(
-            m_canvas->width()  - m_playerOverlay->width()  - 12,
+            m_canvasW->width()  - m_playerOverlay->width()  - 12,
             12);
         m_playerOverlay->show();
         m_playerOverlay->raise();
@@ -2635,7 +2655,7 @@ void MainWindow::onEmuTimer() {
 
     // ── 렌더링 ─────────────────────────────────────────────
     if (m_stack->currentIndex() == 1 && m_canvas)
-        m_canvas->update();
+        m_canvasW->update();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -3467,6 +3487,77 @@ void MainWindow::applyPathSettings() {
 // ════════════════════════════════════════════════════════════
 
 // 게임 화면 진입: 프리뷰 완전 정지 후 캔버스 표시
+// 빈 자리 위젯을 게임 캔버스로 바꿔 끼운다 (처음 한 번만). 스택 번호는 그대로 1번이다.
+void MainWindow::attachCanvas() {
+    if (!m_canvasHolder || !m_canvas) return;
+    const bool soft = gSettings.videoRenderer == QLatin1String("software");
+    qDebug(soft ? "[gfx] 게임 화면(소프트웨어)을 창에 연결합니다"
+                : "[gfx] 게임 캔버스를 창에 연결합니다 (이 시점부터 GPU 합성 사용)");
+    m_stack->insertWidget(1, m_canvasW);
+    m_stack->removeWidget(m_canvasHolder);
+    m_canvasHolder->deleteLater();
+    m_canvasHolder = nullptr;
+#ifdef _WIN32
+    //   창 캡처로 실제 화면을 확인하는 방식이라 Windows 에서만 쓴다 (Wayland/gamescope 는 캡처가 막혀 오판한다)
+    if (!soft) startCompositingWatch();     // OpenGL 합성이 안 되는 PC 를 자동으로 알아챈다
+#endif
+}
+
+// ── 화면 합성 점검 ───────────────────────────────────────────
+//   일부 PC(구형 내장 그래픽 등)는 OpenGL 게임 화면을 붙이는 순간 창 전체가 검게 나온다.
+//   게임이 밝은 장면을 내보내는데도 실제 화면(창 캡처)이 계속 검으면 소프트웨어 렌더러로 바꿔 다시 시작한다.
+static double lumaOf(const QImage& src) {
+    if (src.isNull()) return 0.0;
+    const QImage s = src.scaled(24, 24, Qt::IgnoreAspectRatio, Qt::FastTransformation).convertToFormat(QImage::Format_RGB32);
+    double sum = 0;
+    for (int y = 0; y < s.height(); ++y) {
+        const QRgb* l = reinterpret_cast<const QRgb*>(s.constScanLine(y));
+        for (int x = 0; x < s.width(); ++x)
+            sum += 0.299 * qRed(l[x]) + 0.587 * qGreen(l[x]) + 0.114 * qBlue(l[x]);
+    }
+    return sum / (s.width() * s.height() * 255.0);
+}
+
+void MainWindow::startCompositingWatch() {
+    if (!m_gfxWatch) {
+        m_gfxWatch = new QTimer(this);
+        m_gfxWatch->setInterval(1500);
+        connect(m_gfxWatch, &QTimer::timeout, this, [this] { checkCompositing(); });
+    }
+    m_gfxBad = 0;
+    m_gfxChecks = 0;
+    m_gfxWatch->start();
+}
+
+void MainWindow::checkCompositing() {
+    if (++m_gfxChecks > 12) { m_gfxWatch->stop(); return; }            // 약 18초만 지켜본다
+    if (!m_stack || m_stack->currentIndex() != 1 || !gState.gameLoaded || gState.isPaused) return;
+    if (isMinimized() || !isVisible() || !windowHandle() || !windowHandle()->screen()) return;
+
+    const double game = lumaOf(currentFrameImage());
+    if (game < 0.08) return;                                            // 게임 장면 자체가 어두우면 판단하지 않는다
+    const QImage shot = windowHandle()->screen()->grabWindow(winId()).toImage();
+    double screen = lumaOf(shot);
+    if (qEnvironmentVariableIsSet("FBNRX_TEST_FALLBACK")) screen = 0.0;   // 진단·시험용
+    qDebug("[gfx] 합성 점검: 게임 %.3f / 화면 %.3f", game, screen);
+    if (screen > 0.02) { m_gfxWatch->stop(); return; }                  // 화면에 제대로 나온다 → 정상
+    if (++m_gfxBad < 3) return;                                          // 연속 3번 검을 때만
+
+    m_gfxWatch->stop();
+    gSettings.videoRenderer = QStringLiteral("software");
+    gSettings.save();
+    log("⚠ 게임 화면이 그려지지 않는 그래픽 환경으로 보여 소프트웨어 렌더러로 전환합니다");
+    QMessageBox::information(this, QStringLiteral("FBNeoRageX"),
+        isEn() ? QStringLiteral("The game screen is not being displayed on this PC's graphics setup.\n"
+                                "Switching to the software renderer and restarting.\n"
+                                "(Shaders / CRT are unavailable; change it back in VIDEO OPTIONS > RENDERER.)")
+               : QStringLiteral("이 PC의 그래픽 환경에서 게임 화면이 표시되지 않아\n"
+                                "소프트웨어 렌더러로 전환하고 다시 시작합니다.\n"
+                                "(셰이더·CRT 는 쓸 수 없습니다. VIDEO OPTIONS > RENDERER 에서 되돌릴 수 있습니다.)"));
+    QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList());
+    close();
+}
+
 void MainWindow::enterGameScreen() {
     // 프리뷰 타이머 + 영상 + 소리 완전 정지
     if (m_previewVidTimer) m_previewVidTimer->stop();
@@ -3478,8 +3569,9 @@ void MainWindow::enterGameScreen() {
         m_mediaPlayer->setSource(QUrl());  // 소스 해제 → 재생 불가 상태
     }
 
+    attachCanvas();
     m_stack->setCurrentIndex(1);
-    if (m_canvas) m_canvas->setFocus();
+    if (m_canvasW) m_canvasW->setFocus();
 
     // ── 입력 상태 초기화 (leaveGameScreen 과 대칭) ────────────────
     // GUI → 게임 재개 시, GUI 를 조작하던 키/패드 상태가 그대로 남아
@@ -3563,12 +3655,12 @@ void MainWindow::hideCursor() {
 // ════════════════════════════════════════════════════════════
 bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
     // ── 캔버스 리사이즈 → 오버레이 재배치 ────────────────────
-    if (obj == m_canvas && ev->type() == QEvent::Resize && m_playerOverlay) {
+    if (obj == m_canvasW && ev->type() == QEvent::Resize && m_playerOverlay) {
         auto reposition = [this]{
             if (!m_playerOverlay->isVisible()) return;
             m_playerOverlay->adjustSize();
             m_playerOverlay->move(
-                m_canvas->width()  - m_playerOverlay->width()  - 12,
+                m_canvasW->width()  - m_playerOverlay->width()  - 12,
                 12);
         };
         reposition();

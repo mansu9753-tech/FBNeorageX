@@ -579,7 +579,7 @@ void GameCanvas::renderMultiPass() {
 //   창이 가운데에 있으므로 이 방법이 단순하면서도 잘 맞고, 모서리의 둥근
 //   투명 픽셀에 휘둘리지 않는다.
 //   찾지 못하면 무효 사각형을 돌려준다.
-static QRectF detectBezelWindow(const QImage& src) {
+QRectF detectBezelWindow(const QImage& src) {
     if (src.isNull() || !src.hasAlphaChannel()) return QRectF();
     const QImage img = src.convertToFormat(QImage::Format_ARGB32);
     const int W = img.width(), H = img.height();

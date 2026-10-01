@@ -1,9 +1,9 @@
 #pragma once
 // IntroSplash.h — 프로그램을 켤 때 처음 나오는 오프닝 화면
 //
-//  assets/intro/ 폴더에 intro.mp4 (또는 webm / mkv / avi / mov / wmv) 가 있으면 그 영상을
-//  재생하고, 없으면 내장 샘플 애니메이션(로고가 그려지는 약 4초)을 보여 준다.
-//  영상은 그냥 파일만 바꿔 넣으면 된다 (다시 빌드할 필요 없음).
+//  assets/intro/ 폴더에 intro.mp4 (또는 webm / mkv / avi / mov / wmv) 가 있으면 그 영상을 재생한다.
+//  없으면 실행 파일에 내장된 기본 오프닝(intro.mp4)을, 그것도 안 되면 코드로 그리는 샘플 애니메이션을 보여 준다.
+//  내 영상으로 바꾸려면 assets/intro/ 에 파일만 넣으면 된다 (다시 빌드할 필요 없음).
 //  아무 키·마우스·패드 버튼이나 누르면 건너뛴다.
 //
 //  재생 방식은 프리뷰 영상과 같다: Linux 는 자체 FFmpeg 디코더(PreviewVideo),

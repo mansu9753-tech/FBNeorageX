@@ -21,7 +21,7 @@
 #include <QVector>
 #include <functional>
 
-class GameCanvas;
+class GameViewIface;
 class AudioManager;
 class CheatManager;
 class QWidget;
@@ -90,7 +90,8 @@ struct VideoApi {
 
 struct ShellHost {
     // ── 객체 ─────────────────────────────────────────────
-    GameCanvas*   canvas = nullptr;
+    GameViewIface* canvas = nullptr;
+    std::function<bool()> softwareRenderer;       // 지금 소프트웨어 렌더러로 돌고 있는가 (셰이더·CRT 등을 못 쓴다)
     AudioManager* audio  = nullptr;
     CheatManager* cheat  = nullptr;
     QWidget*      window = nullptr;     // 파일 선택창의 부모

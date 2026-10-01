@@ -110,6 +110,7 @@ struct AppSettings {
 
     // ── 기타 ────────────────────────────────────────────
     QString uiLanguage = "ko";          // GUI 표시 언어: "ko" / "en"
+    QString videoRenderer = "opengl";   // 게임 화면 그리기: "opengl"(기본, 셰이더 지원) / "software"(CPU, 어떤 PC 에서도 보임)
     bool    showIntro  = true;          // 시작할 때 오프닝 영상을 보여 준다
 
     // ── 넷플레이 ────────────────────────────────────────

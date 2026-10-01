@@ -37,6 +37,7 @@
 
 #include "AppSettings.h"   // gSettings (isEn() 인라인에서 사용)
 #include "GameCanvas.h"
+#include "SoftCanvas.h"
 #include "VideoRecorder.h"
 #include "FrameLab.h"
 #include "IntroSplash.h"
@@ -117,6 +118,9 @@ private:
     void applyTate(int rot);    // -1=auto, 0=off, 1=90°CCW, 3=90°CW
 
     // 게임 캔버스 전환 헬퍼 (프리뷰 정지 + 스택 전환 통합)
+    void startCompositingWatch();
+    void checkCompositing();
+    void attachCanvas();      // 빈 자리 위젯 → 게임 캔버스 (처음 한 번)
     void enterGameScreen();   // GUI → 게임 화면 (프리뷰 정지)
     void leaveGameScreen();   // 게임 화면 → GUI (프리뷰 재개)
 
@@ -287,7 +291,8 @@ private:
     // ── 화면 전환 스택 ───────────────────────────────────
     QStackedWidget*  m_stack      = nullptr;  // 0=GUI, 1=게임화면
     QWidget*         m_guiWidget  = nullptr;
-    GameCanvas*      m_canvas     = nullptr;
+    GameViewIface*   m_canvas     = nullptr;   // 게임 화면 (GameCanvas 또는 SoftCanvas)
+    QWidget*         m_canvasW    = nullptr;   // 그 위젯
 
     // ── NeoRageX 0.6b 메뉴 셸 ────────────────────────────
     //   GUI 화면(게임 목록·옵션 메뉴·프리뷰·이벤트)을 통째로 이 위젯이 그린다.
@@ -349,6 +354,9 @@ private:
     QString          m_loadedGame;   // 현재 코어에 실제 로드된 롬 이름 (isPaused 재개 판별용)
     bool             m_isFullscreen  = false;
     bool             fullscreenNow() const;
+    QTimer*          m_gfxWatch = nullptr;       // OpenGL 합성 실패 감시
+    int              m_gfxBad = 0, m_gfxChecks = 0;
+    QWidget*         m_canvasHolder = nullptr;   // 캔버스를 처음 끼우기 전까지 스택 1번 자리를 지킨다
     FrameLab*        m_lab = nullptr;            // 스택 4번 페이지
     QList<QImage>    m_frameHist;                // 최근 프레임 (오래된 것 -> 최신)
     QString          m_histGame;                 // 기록이 어느 게임의 것인지

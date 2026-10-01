@@ -7,5 +7,6 @@
     <file alias="icon.ico">assets/icon.ico</file>
     <file alias="clik.wav">assets/clik.wav</file>
     <file alias="fonts/GalmuriMono11.ttf">assets/fonts/GalmuriMono11.ttf</file>
+    <file alias="intro/intro.mp4">assets/intro/intro.mp4</file>
 </qresource>
 </RCC>

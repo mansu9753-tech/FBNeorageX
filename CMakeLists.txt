@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FBNeoRageX VERSION 2.3 LANGUAGES CXX C)
+project(FBNeoRageX VERSION 2.3.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,6 +48,7 @@ set(SOURCES
     src/PixelFont.cpp
     src/IntroSplash.cpp
     src/FrameLab.cpp
+    src/SoftCanvas.cpp
     src/AudioManager.cpp
     src/SoundMode.cpp
     src/ArcadeLayout.cpp

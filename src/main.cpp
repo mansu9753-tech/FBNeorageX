@@ -4,6 +4,9 @@
 #include <QSurfaceFormat>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QScreen>
+#include <QWindow>
 #include <QDir>
 #include <QStandardPaths>
 #include <QDateTime>
@@ -169,7 +172,15 @@ int main(int argc, char* argv[])
             const QSurfaceFormat real = probeCtx.format();
             got33 = (real.majorVersion() > 3)
                  || (real.majorVersion() == 3 && real.minorVersion() >= 3);
+            // 화면이 안 나오는 PC 를 진단할 수 있게 그래픽 정보를 로그에 남긴다
+            QOpenGLFunctions* gf = probeCtx.functions();
+            qDebug("[gfx] OpenGL %s | %s | %s",
+                   reinterpret_cast<const char*>(gf->glGetString(GL_VERSION)),
+                   reinterpret_cast<const char*>(gf->glGetString(GL_RENDERER)),
+                   reinterpret_cast<const char*>(gf->glGetString(GL_VENDOR)));
             probeCtx.doneCurrent();
+        } else {
+            qDebug("[gfx] OpenGL 3.3 프로브 실패 (surface=%d)", surf.isValid() ? 1 : 0);
         }
         fmt.setVersion(got33 ? 3 : 2, got33 ? 3 : 1);
     }
@@ -188,10 +199,34 @@ int main(int argc, char* argv[])
 #else
     fmt.setSwapInterval(gSettings.videoVsync ? 1 : 0);
 #endif
+    // 진단용: 환경변수 FBNRX_VSYNC=0 이면 수직 동기를 끈다 (듀얼 모니터·내장 그래픽 문제 확인용)
+    if (qEnvironmentVariable("FBNRX_VSYNC") == QLatin1String("0")) {
+        fmt.setSwapInterval(0);
+        qDebug("[gfx] FBNRX_VSYNC=0 → swapInterval 0");
+    }
     QSurfaceFormat::setDefaultFormat(fmt);
 
     // ── 메인 윈도우 ──────────────────────────────────────
+    for (QScreen* sc : QGuiApplication::screens())
+        qDebug().noquote() << QString("[gfx] 화면 %1 %2x%3 dpr=%4 %5Hz")
+                               .arg(sc->name()).arg(sc->size().width()).arg(sc->size().height())
+                               .arg(sc->devicePixelRatio()).arg(sc->refreshRate());
+    qDebug().noquote() << "[gfx] Qt" << QT_VERSION_STR << "platform" << QGuiApplication::platformName();
     MainWindow win;
+    // 진단용: 환경변수 FBNRX_GL_TOP = core | none 이면 "창 전체를 GPU 로 합성하는 컨텍스트" 의 형식만 바꾼다.
+    //   (게임 화면 위젯은 기존 형식 그대로. 게임 중 화면이 검게 나오는 PC 의 원인을 가려내는 용도)
+    {
+        const QString top = qEnvironmentVariable("FBNRX_GL_TOP");
+        if (top == QLatin1String("core") || top == QLatin1String("none")) {
+            QSurfaceFormat tf = QSurfaceFormat::defaultFormat();
+            if (top == QLatin1String("core")) { tf.setProfile(QSurfaceFormat::CoreProfile); tf.setVersion(3, 3); }
+            else                              { tf.setProfile(QSurfaceFormat::NoProfile);   tf.setVersion(2, 1); }
+            win.setAttribute(Qt::WA_NativeWindow);
+            win.winId();
+            if (win.windowHandle()) win.windowHandle()->setFormat(tf);
+            qDebug().noquote() << "[gfx] FBNRX_GL_TOP =" << top;
+        }
+    }
     win.show();
 
     int ret = app.exec();

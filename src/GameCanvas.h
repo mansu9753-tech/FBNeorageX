@@ -13,12 +13,15 @@
 #include <QOpenGLTexture>
 #include <QString>
 #include <QHash>
+#include "GameViewIface.h"
 
-class GameCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
+class GameCanvas : public QOpenGLWidget, protected QOpenGLFunctions, public GameViewIface {
     Q_OBJECT
 public:
     explicit GameCanvas(QWidget* parent = nullptr);
     ~GameCanvas() override;
+
+    QWidget* widget() override { return this; }
 
     // 스케일 모드: "Fill" / "Fit" / "1:1"
     void setScaleMode(const QString& mode);

@@ -7,7 +7,7 @@
 #include <QFileInfo>
 
 #include "AppSettings.h"
-#include "GameCanvas.h"
+#include "GameViewIface.h"
 
 namespace {
 
@@ -17,31 +17,39 @@ public:
     QString id() const override { return QStringLiteral("video"); }
 
     QVector<Row> rows() override {
+        // 소프트웨어 렌더러로 돌 때는 셰이더·CRT·플래시 감소·VSYNC 를 쓸 수 없다 → 회색 안내 줄로 잠근다.
+        const bool soft = m_h.softwareRenderer && m_h.softwareRenderer();
+        auto lock = [soft](Row r) -> Row {
+            if (!soft) return r;
+            return Row::note(r.label, QStringLiteral("--"));
+        };
         QVector<Row> out = {
             scaleMode(),
             toggle(QStringLiteral("SMOOTH FILTER"), gSettings.videoSmooth,
                    [this] { if (m_h.canvas) m_h.canvas->setSmooth(gSettings.videoSmooth); }),
-            toggle(QStringLiteral("CRT SCANLINE"), gSettings.videoCrtMode,
-                   [this] { applyCrt(); }),
-            crtLevel(),
-            toggle(QStringLiteral("FLASH GUARD"), gSettings.videoFlashGuard,
-                   [this] { applyFlash(); }),
-            flashLevel(),
+            lock(toggle(QStringLiteral("CRT SCANLINE"), gSettings.videoCrtMode,
+                        [this] { applyCrt(); })),
+            lock(crtLevel()),
+            lock(toggle(QStringLiteral("FLASH GUARD"), gSettings.videoFlashGuard,
+                        [this] { applyFlash(); })),
+            lock(flashLevel()),
             toggle(QStringLiteral("BEZEL"), gSettings.bezelEnabled,
                    [this] { if (m_h.applyBezel) m_h.applyBezel(); }),
-            toggle(QStringLiteral("VSYNC"), gSettings.videoVsync,
-                   [this] { say(en() ? "VSync applies after restart."
-                                     : "VSync 는 다시 시작해야 적용됩니다."); }),
-            fullscreen(),
-            frameskip(),
-            shaderFile(),
+            lock(toggle(QStringLiteral("VSYNC"), gSettings.videoVsync,
+                        [this] { say(en() ? "VSync applies after restart."
+                                          : "VSync 는 다시 시작해야 적용됩니다."); })),
+            renderer(),
         };
-        if (!gSettings.videoShaderPath.isEmpty())
+        if (soft)
+            out << Row::note(en() ? "SOFTWARE RENDERER: SHADER / CRT / FLASH GUARD / VSYNC ARE UNAVAILABLE"
+                                  : "소프트웨어 렌더러: 셰이더 · CRT · 플래시 감소 · VSYNC 는 쓸 수 없습니다");
+        out << fullscreen() << frameskip() << lock(shaderFile());
+        if (!gSettings.videoShaderPath.isEmpty() && !soft)
             out << Row::action(en() ? "CLEAR SHADER" : "셰이더 해제", [this] {
                 if (m_h.video.clearShader) m_h.video.clearShader();
             });
-        out << Row::action(QStringLiteral("SHADER PARAMS"),
-                           [this] { if (m_h.openShaderParams) m_h.openShaderParams(); });
+        out << lock(Row::action(QStringLiteral("SHADER PARAMS"),
+                                [this] { if (m_h.openShaderParams) m_h.openShaderParams(); }));
         out << bezelRows();
         return out;
     }
@@ -49,6 +57,19 @@ public:
 private:
     // ── 공통 ─────────────────────────────────────────────
     void commit() { gSettings.save(); }
+
+    // 게임 화면 그리기 방식. 게임을 켜면 화면이 검게 나오는 PC(구형 내장 그래픽 등)는 SOFTWARE 로 바꾼다.
+    //   SOFTWARE 는 셰이더·CRT·플래시 감소를 쓸 수 없다. 다시 시작해야 적용된다.
+    Row renderer() {
+        const bool soft = gSettings.videoRenderer == QLatin1String("software");
+        return Row::flip(QStringLiteral("RENDERER"), soft ? QStringLiteral("SOFTWARE") : QStringLiteral("OPENGL"),
+                         [this, soft](int) {
+            gSettings.videoRenderer = soft ? QStringLiteral("opengl") : QStringLiteral("software");
+            commit();
+            say(en() ? "Renderer applies after restart. SOFTWARE works on any PC but has no shaders / CRT."
+                     : "렌더러는 다시 시작해야 적용됩니다. SOFTWARE 는 어떤 PC 에서도 보이지만 셰이더·CRT 는 못 씁니다.");
+        });
+    }
     void applyCrt() {
         if (m_h.canvas)
             m_h.canvas->setCrtMode(gSettings.videoCrtMode, gSettings.videoCrtIntensity);

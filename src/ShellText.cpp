@@ -27,7 +27,7 @@ const QHash<QString, QString>& dict() {
         // VIDEO
         {"SCALE MODE", "화면 비율"}, {"SMOOTH FILTER", "부드럽게"}, {"CRT SCANLINE", "CRT 스캔라인"},
         {"CRT LEVEL", "CRT 강도"}, {"FLASH GUARD", "플래시 감소"}, {"FLASH LEVEL", "플래시 강도"},
-        {"BEZEL", "베젤"}, {"VSYNC", "수직 동기"}, {"FULLSCREEN", "전체화면"}, {"FRAMESKIP", "프레임스킵"},
+        {"BEZEL", "베젤"}, {"VSYNC", "수직 동기"}, {"RENDERER", "렌더러"}, {"FULLSCREEN", "전체화면"}, {"FRAMESKIP", "프레임스킵"},
         {"SHADER", "셰이더"}, {"SHADER PARAMS", "셰이더 설정"},
         {"FULL", "전체"}, {"NONE", "없음"},
         // AUDIO
