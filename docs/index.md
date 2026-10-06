@@ -12,7 +12,7 @@ Built with C++17 + Qt6 for **Windows** and **Steam Deck**.
 **FinalBurn Neo libretro 코어 기반의 아케이드 에뮬레이터 프론트엔드입니다.**
 C++17 + Qt6로 제작되었으며 **윈도우**와 **스팀덱**을 지원합니다.
 
-[⬇️ Download / 다운로드 (v2.3)](https://github.com/mansu9753-tech/FBNeorageX/releases/latest){: .btn }
+[⬇️ Download / 다운로드 (v2.3.1)](https://github.com/mansu9753-tech/FBNeorageX/releases/latest){: .btn }
 [📖 GitHub](https://github.com/mansu9753-tech/FBNeorageX){: .btn }
 
 ---
