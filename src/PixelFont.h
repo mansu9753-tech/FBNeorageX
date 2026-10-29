@@ -29,7 +29,17 @@ public:
     //   scaleY : 세로만 추가 배율 (OPTIONS 의 2배 높이 face 용)
     //   retro 가 true 이면 통일 모드에서도 8x8 비트맵 글자로 그린다 (테두리 위 제목 등).
     void draw(QPainter& p, const QString& text, int x, int y,
-              const QColor& color, int scale, int scaleY = 1, bool retro = false);
+              const QColor& color, int scale, int scaleY = 1, bool retro = false) {
+        drawQ(p, text, x, y, color, scale * 8, scaleY, retro);
+    }
+    // 같은 그리기. 배율을 1/8 단위로 준다 (q=8 이 1배, 11 이 1.375배).
+    //   retro 가 아니면 부드럽게 보간해서 그린다 (정수 배가 아닐 때 도트가 울퉁불퉁해 보이는 것을 막는다).
+    void drawQ(QPainter& p, const QString& text, int x, int y,
+               const QColor& color, int q, int scaleY = 1, bool retro = false);
+    // 1/8 단위 배율에서의 픽셀 폭 / 한 칸 폭 / 한 줄 높이
+    static int widthQ(const QString& text, int q) { return cells(text) * q; }
+    static int cellWQ(int q) { return q; }
+    static int cellHQ(int q) { return (CELL_H * q + 4) / 8; }
 
     // 통일 모드: 영문·숫자·기호도 한글과 같은 도트 폰트로 그려 두 글자의 크기를 맞춘다.
     //   8x8 글자는 한글(14px 도트)보다 훨씬 작아 한 줄에 섞이면 어색하다. 한국어 화면에서 켠다.
@@ -89,13 +99,18 @@ public:
         return QLatin1Char('.') + out;
     }
 
-    // 8x8 face 는 소문자 g 를 9 처럼 그린다. 원본의 'Fi9hters' 가 그 흔적이다.
+    // 매끈한 벡터 글꼴(Noto Sans KR)을 쓸 수 있는가. 쓸 수 있으면 retro 가 아닌 글자는 영문·숫자까지 이 글꼴로 그린다.
+    static bool vectorAvailable();
+
+    // 8x8 face 는 소문자 g 를 9 처럼 그린다. 원본의 'Fi9hters' 가 그 흔적이다. (벡터 글꼴일 때는 그대로 둔다)
     static QString gTo9(const QString& s) {
+        if (vectorAvailable()) return s;
         QString r = s;
         r.replace(QLatin1Char('g'), QLatin1Char('9'));
         return r;
     }
 
+    struct KoRun { QImage img; int baselineY = 0; int advance = 0; int pad = 0; };
 private:
     // 색깔별 아틀라스(1배율). 224칸 x 1행.
     const QImage& atlas(const QColor& color);
@@ -104,7 +119,6 @@ private:
     // 8x8 표에 없는 글자(한글 등)를 시스템 폰트로 그린 한 덩어리.
     //   화면에 바로 그리지 않고 여유 있는 이미지에 먼저 그린다. drawText 에 셀 크기의 사각형을
     //   주면 폰트의 줄 높이가 셀보다 클 때 글자 위아래가 잘려 나간다 (스팀덱에서 하단이 잘린 원인).
-    struct KoRun { QImage img; int baselineY = 0; int advance = 0; int pad = 0; };
     const KoRun& koreanRun(const QString& run, const QColor& color, int px);
     QHash<QString, KoRun> m_ko;
     bool m_unified = false;

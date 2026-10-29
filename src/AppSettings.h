@@ -111,14 +111,26 @@ struct AppSettings {
     // ── 기타 ────────────────────────────────────────────
     QString uiLanguage = "ko";          // GUI 표시 언어: "ko" / "en"
     QString videoRenderer = "opengl";   // 게임 화면 그리기: "opengl"(기본, 셰이더 지원) / "software"(CPU, 어떤 PC 에서도 보임)
+    QString netId;                              // 내 아이디 (처음 한 번 만든다, 상대에게 보이는 고유 번호)
+    QString netNick;                            // 닉네임 (방에서 보인다)
+    // 계정 서버 (아이디/비밀번호 로그인, 레벨, 아바타). 주소는 개인정보가 없는 새 서버를 배포한 뒤 채운다.
+    static QString builtinServerUrl() { return QStringLiteral("https://nrx-play.nrx-play-7421.workers.dev"); }
+    QString serverUrl;                          // 비어 있으면 내장 주소 (config.json 의 server_url 로만 바꿀 수 있다 — 화면에는 입력칸이 없다)
+    QString effectiveServer() const { return serverUrl.trimmed().isEmpty() ? builtinServerUrl() : serverUrl.trimmed(); }
+    QString accountId;                          // 마지막으로 로그인한 아이디 (비밀번호는 저장하지 않는다)
+    QString accountToken;                       // 서버가 준 로그인 표
+    QString avatarParts;                        // 게스트(로그인 안 함)일 때 내 캐릭터 부품 "body=boy1,hat=cap1"
+    bool    netAutoReady = false;
+    bool    winCounter = true;          // 넷플레이 중 격투게임 세트 승수(1P : 2P)를 화면에 보여 준다
     bool    showIntro  = true;          // 시작할 때 오프닝 영상을 보여 준다
 
     // ── 넷플레이 ────────────────────────────────────────
     int     netplayPort       = 7845;
-    int     netplayInputDelay = 2;   // 입력 지연 프레임 (0=없음, 1~8 / 해외플레이 권장 2~4)
+    int     netplayInputDelay = 0;   // 입력 지연 프레임 (0=없음, 1~8). 국내 대전은 0 이 기본, 핑이 높으면 1~2
     // 내장 릴레이(Cloudflare Worker) 주소. 계정 ID 를 포함하므로 GUI 에는
     // 절대 실제 값을 노출하지 않는다(육안·스크린샷 차단). builtinRelayUrl() 로 비교.
-    static QString builtinRelayUrl() { return "https://fbneoragex-relay.mansu9753.workers.dev"; }
+    static QString builtinRelayUrl() { return QString(); }      // 개인 주소는 배포본에 넣지 않는다 (서버 주소는 프로그램 안에서 설정)
+    QString relayBase() const { return effectiveServer(); }
     QString netplayRelayUrl   = builtinRelayUrl();
 
     // ── 즐겨찾기 ────────────────────────────────────────

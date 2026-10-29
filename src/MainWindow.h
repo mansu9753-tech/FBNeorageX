@@ -1,4 +1,9 @@
 #pragma once
+#include "WinCounter.h"
+#include "NeoRageXShell.h"
+#include "AccountClient.h"
+#include "Avatar.h"
+#include <QMap>
 #include "ShellPage.h"
 // MainWindow.h — 메인 윈도우
 #include <map>
@@ -69,13 +74,15 @@ private slots:
     void onEmuTimer();
 
     void onNetConnected(bool isHost);
+    void onNetRomList(int slot, const QStringList& roms);            // 상대 ROM 목록 도착 → 목록을 둘 다 가진 게임으로 제한
+    void clearNetRomFilter();
     void onNetDisconnected();
     void onNetError(const QString& msg);
     void onNetStateChanged(NetplayManager::State s);
 
     // 게임 흐름 (상태머신 기반)
-    void onNetLoadGame(const QString& romName, int inputDelay); // 조인: 게임 자동 로드
-    void onNetReady();                          // 호스트: 상대 READY 수신
+    void onNetLoadGame(const QString& romName, int inputDelay, int playerMask); // 조인: 게임 자동 로드
+    void onNetReady(int slot);                      // 호스트: 상대 READY 수신
     void onNetStart();                          // 양쪽: 동시 시작 신호
     void onNetGameOver();                       // 양쪽: 게임 종료 복귀
 
@@ -236,7 +243,9 @@ private:
     // ── 키 매핑 ──────────────────────────────────────────
     void applyKeyPress(int qtKey);
     // 넷플레이 입력 합성: lb=로컬, rb=원격 → gState.keys / p2Keys
-    void npApplyInput(uint16_t lb, uint16_t rb);
+    struct NpInputState { uint16_t bits[3] = { 0, 0, 0 }; };
+    void npApplyInputs(const NpInputState& is);
+    void npFillRemote(NpInputState& is, uint32_t frame);
     void applyKeyRelease(int qtKey);
     static QHash<int, int> buildDefaultKeymap(bool six);
     void reloadKeymap();
@@ -335,7 +344,96 @@ private:
     // ── NETPLAY 페이지 위젯 ──────────────────────────────
     // ── MULTIPLAYER 셸 페이지 창구 ──
     NetState         m_net;                                 // 화면에 보일 상태 (문구·버튼 가능 여부)
-    int              m_netDelay = 2;                        // 입력 지연 (프레임)
+    // ── 멀티플레이 로비 (방) ────────────────────────────────
+    //   자리 3개: [0] 방장, [1], [2] 참가자. 방장이 자리 상태(입장·READY·관전)를 정하고 모두에게 알린다.
+    struct Seat {
+        bool present = false, ready = false, wantSpec = false, spectator = false;
+        bool guest = true, verified = false, profileSeen = false;
+        QString id, nick, parts;
+        int level = 1, into = 0, need = 0, joinSerial = 0;
+        QSet<QString> roms; bool romsKnown = false;     // 그 사람이 가진 ROM (방장·참가자 모두 서로의 것을 안다)
+    };
+    Seat             m_seats[3];
+    int              m_mySeat = 0;
+    int              m_joinCounter = 1;
+    bool             m_netIsHost = false;                   // 내가 방을 만든 쪽인가
+    bool             m_netConnected = false;                // 연결됐는가 (방장: 참가자가 1명 이상)
+    AccountClient*   m_acct = nullptr;                      // 계정 서버 (로그인·레벨·아바타)
+    struct MyProfile { QString id, nick, parts; int level = 1, into = 0, need = 0; bool account = false; };
+    MyProfile        myProfile() const;
+    void             onAccountChanged();
+    void             onPeerLookup(const AccountClient::Profile& p);
+    QString          m_roomCodeShared;                      // 참가자: 방장이 알려 준 룸 코드 (경험치 보고에 쓴다)
+    int              m_expRep1 = 0, m_expRep2 = 0;          // 이미 보고한 세트 승수
+    int              m_expSeq = 0;
+    bool             m_expTimerOn = false;
+    void             checkExpReport();
+    bool             m_myLobbyReady = false;                // 내가 레디를 눌렀는가 (참가자)
+    int              m_roomRev = 0;                         // 방 설정(게임·딜레이)이 바뀔 때마다 올라간다
+    QString          m_roomGame;                            // 참가자가 본 호스트의 게임
+    int              m_roomDelay = 0;
+    int              m_npPlayerMask = 0;                    // 이번 판에서 입력을 내는 자리 (비트)
+    int              m_npReadyMask = 0, m_npRequiredMask = 0;
+    QVector<NeoRageXShell::LobbyChatLine> m_lobbyChat;
+    void             resetLobby();
+    void             pushLobby();
+    void             lobbyChatAdd(int kind, const QString& who, const QString& text);
+    void             lobbyRoomChanged();                    // 방장: 게임·딜레이가 바뀌었다 → 참가자에게 알리고 레디를 푼다
+    void             computeSeatRoles();                    // 방장: 누가 플레이어이고 누가 관전인지 정한다
+    void             broadcastSeats();
+    void             broadcastProfiles();
+    void             recomputeNetRoms();
+    int              playersForGame(const QString& rom) const;   // 이 게임에서 동시에 플레이할 수 있는 최대 인원 (2 또는 3)
+    void             sendMyProfile();
+    void             onNetPeerJoined(int slot);
+    void             onNetPeerLeft(int slot);
+    void             onNetProfile(int slot, const QString& id, const QString& nick, int level, bool account, const QString& parts);
+    void             onNetChat(int slot, const QString& text);
+    void             onNetSeats(int f0, int f1, int f2);
+    void             onNetSeatMode(int slot, bool wantSpec);
+    void             updateSideCard();
+    // ── 로비(방 목록) ──
+    QVector<AccountClient::RoomInfo> m_rooms;
+    qint64           m_roomsStamp = 0;
+    bool             m_roomPublished = false;
+    QTimer*          m_roomTimer = nullptr;
+    QVector<NetRoomRow> netRoomRows();
+    void             publishRoom();
+    void             joinListedRoom(const QString& code);
+    int              m_hostPollGen = 0;
+    QSet<QString>    m_probedClients;
+    QString          m_relayKey;
+    void             relayPollClients(const QString& code, int tries = 0);
+    NetProfileView   netProfileView() const;
+    struct AuthForm { bool signup = false, busy = false; QString id, pw, nick, gender = QStringLiteral("m"), msg; };
+    AuthForm         m_auth;
+    bool             m_pickingRoom = false;
+    NetAuthView      netAuthView() const;
+    void             authEdit(const QString& field);
+    void             authGender(int delta);
+    void             authSubmit();
+    void             authMode(bool signup);
+    void             hostPick();
+    void             hostPickDone();
+    void             hostPickCancel();
+    void             cycleAvatarPart(const QString& slot, int delta);
+    void             onNetLobbyReady(int slot, bool ready, int rev);
+    void             onNetRoomInfo(const QString& rom, int delay, int rev, const QString& code);
+    void             onLobbyAction(const QString& id, int delta);
+    void             lobbySendChat(const QString& text);
+    QString          myNick() const;
+    QHash<QString,QString> m_npHostVars;                    // 호스트의 머신 세팅 (조인이 받은 것)
+    bool             m_npHostVarsReady = false;
+    bool             m_npLoadWaiting   = false;            // 호스트 머신 세팅을 기다리는 중
+    bool             m_npSkipVarWait   = false;
+    int              m_npVarWaits      = 0;
+    void             onNetVars(const QStringList& lines);
+    QStringList      netSyncVarLines() const;
+    WinCounter       m_wc;                                  // 격투게임 세트 승수 (넷플레이)
+    QMap<int, WinCounter::State> m_wcHist;                  // 프레임별 승수 상태 (롤백 때 되돌림)
+    void             wcAfterRun();
+    void             recordScores();                        // 점수 게임: 이번 판 최고 점수를 파일에 남긴다
+    int              m_netDelay = 0;                        // 입력 지연 (프레임)
     void netHost();
     void netJoin();
     void netDisconnect();
@@ -367,6 +465,8 @@ private:
     QSize            m_windowedSize;
     int              m_stateSlot    = 1;
 
+    QSet<QString>    m_peerRoms;                 // 넷플레이 중 상대가 가진 ROM (비어 있으면 제한 없음)
+    bool             m_peerRomsKnown = false;
     QList<QPair<QString, QString>> m_allRoms;  // {displayName, romName}
 
     // ── 에뮬 타이머 ─────────────────────────────────────
@@ -437,9 +537,10 @@ private:
 
     // ── Rollback Netcode ─────────────────────────────────
     QHash<int, QByteArray> m_npStates;   // frame → run() 직전 스냅샷
+    QHash<int, uint32_t>   m_npRamCrc;   // frame → 그 시점 게임 RAM 의 체크섬 (desync 비교용: 사운드 내부값 같은 게임과 무관한 바이트는 뺀다)
+    uint32_t               ramCrc() const;
 
     // 프레임별 입력 히스토리 (로컬 + 원격 동시 보관)
-    struct NpInputState { uint16_t local = 0; uint16_t remote = 0; };
     std::map<int, NpInputState> m_npInputHistory;
 
     // ── No-Wait 프레임 페이싱 ───────────────────────────
@@ -466,14 +567,13 @@ private:
     std::map<uint32_t,uint32_t> m_remoteChecksums;  // frame → 상대 상태 CRC
     uint32_t m_lastChecksumFrame = 0;               // 마지막 체크섬 계산 프레임
     bool     m_resyncPending     = false;           // 재동기 요청 진행 중
-    void onNetChecksum(quint32 frame, quint32 crc); // 상대 체크섬 수신 핸들러
-    void onNetResyncReq(quint32 frame);             // 호스트: 재동기 요청 받음
+    void onNetChecksum(int slot, quint32 frame, quint32 crc); // 상대 체크섬 수신 핸들러
+    void onNetResyncReq(int slot, quint32 frame);             // 호스트: 재동기 요청 받음
     void checkDesync(uint32_t frame);               // 같은 프레임 CRC 비교
     static uint32_t npChecksum(const QByteArray& data);  // 상태 CRC (FNV-1a)
 
     // ── Loading Barrier ──────────────────────────────────
     // 양쪽 준비 판단을 MainWindow에서 직접 관리 (NetplayManager 플래그 경쟁 회피)
-    bool   m_npPeerReady   = false; // 상대가 MSG_READY 보냈는지
     bool   m_npSelfLoaded  = false; // 내가 loadRomInternal() 완료했는지
     bool   m_npStarted     = false; // onNetStart() 이미 호출됐는지 (이중 시작 방지)
     QTimer* m_npReadyRetry = nullptr; // READY 재전송 타이머 (300ms)

@@ -80,6 +80,14 @@ void SoftCanvas::paintEvent(QPaintEvent*) {
         }
         p.drawPixmap(0, 0, m_bezelScaled);
     }
+    if (!m_score.isEmpty()) {
+        p.setFont(QFont(QStringLiteral("Courier New"), 13, QFont::Bold));
+        const int w = p.fontMetrics().horizontalAdvance(m_score) + 24;
+        const QRect r((width() - w) / 2, 6, w, 24);
+        p.fillRect(r, QColor(0, 0, 0, 170));
+        p.setPen(QColor(255, 255, 255));
+        p.drawText(r, Qt::AlignCenter, m_score);
+    }
     if (m_recording) {
         p.fillRect(8, 8, 72, 22, QColor(0, 0, 0, 160));
         p.setPen(QColor(255, 60, 60));

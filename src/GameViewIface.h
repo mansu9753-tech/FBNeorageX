@@ -29,6 +29,7 @@ public:
     virtual bool setShaderPath(const QString& path) = 0;          // false = 쓸 수 없음/실패
     virtual void setBezelImage(const QImage& img) = 0;            // 빈 이미지면 해제
     virtual void setRecording(bool on) = 0;
+    virtual void setScoreboard(const QString& text) = 0;           // 위쪽 가운데 작은 표시줄 (빈 문자열 = 숨김)
     virtual void setFlashGuard(bool on, float strength) = 0;
     virtual void setRotation(int rot) = 0;                        // -1 = 코어 값, 0~3
     virtual int  rotation() const = 0;

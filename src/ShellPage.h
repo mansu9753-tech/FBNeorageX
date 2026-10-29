@@ -69,7 +69,40 @@ struct NetState {
     bool    relayBuiltin = true;
     bool    canHost = true, canJoin = true, canStart = false, canDisc = false;
 };
+// 멀티플레이 프로필 (계정·닉네임·캐릭터 꾸미기)
+struct NetProfileView {
+    bool    loggedIn = false, serverSet = false;
+    QString accountId, nick;
+    int     level = 1, into = 0, need = 0;
+    QString tier;                          // 단계 이름 (브론즈…)
+    struct Slot { QString key, label, value, nextUnlock; };
+    QVector<Slot> slotList;                   // 몸·상의·모자: 지금 입은 것과 다음에 풀리는 것
+};
+// 로그인 / 회원가입 화면 (서버에 로그인하기 전에 멀티플레이 첫 화면으로 보이는 것)
+struct NetAuthView {
+    bool    signup = false, busy = false;
+    QString id, pwMask, nick, gender;      // gender: "m" / "f"
+    QString genderLabel, message;          // 성별 표시 글자, 마지막 결과 안내
+};
+struct NetRoomRow {
+    QString code, host, game, seats;       // 방장 이름, 게임 이름, "1/3"
+    int     level = 1;
+    bool    joinable = true;
+    QString reason;                        // 입장할 수 없을 때 이유 (ROM 없음 / 가득 참 / 진행 중)
+};
 struct NetApi {
+    std::function<QVector<NetRoomRow>()>   rooms;
+    std::function<void()>                  refreshRooms;
+    std::function<void(const QString&)>    joinRoom;
+    std::function<NetProfileView()>        profile;
+    std::function<NetAuthView()>           auth;
+    std::function<void(const QString&)>    authEdit;        // "id" / "pw" / "nick"  (입력창을 연다)
+    std::function<void(int)>               authGender;
+    std::function<void()>                  authSubmit;      // 로그인 또는 가입하기
+    std::function<void(bool)>              authMode;        // true = 회원가입 화면, false = 로그인 화면
+    std::function<void()>                  logout, editNick;
+    std::function<void()>                  hostPick;        // 방 만들기: 게임 고르는 화면으로
+    std::function<void(const QString&, int)> cyclePart;   // (칸, +1/-1)
     std::function<NetState()>              state;
     std::function<void()>                  host, join, start, disconnect, copyCode;
     std::function<void(int)>               setPort, setDelay;

@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 // NeoRageXShell.h — NeoRageX 0.6b 메뉴 셸
 //
 //  GUI 를 이 위젯이 통째로 그린다. 창 크기 그대로 논리 좌표를 잡으므로
@@ -54,6 +55,45 @@ public:
         bool             enabled = true;
         QVector<SubItem> sub;   // 비어 있으면 올라가기 연출 뒤 곧장 optionChosen
     };
+
+    // ── 멀티플레이 로비 (방) ────────────────────────────────
+    //   방을 만들거나 들어가면 MULTIPLAYER 의 하위 목록 대신 이 화면이 열린다.
+    //   셸은 받은 값을 그리고 입력을 신호로 알릴 뿐이다. 방 상태는 앱(MainWindow)이 가지고 있다.
+    struct LobbyMember {
+        QString nick, id, parts;          // parts: 아바타 부품 "body=boy1,hat=cap1"
+        int     level = 1, into = 0, need = 0;
+        bool    host = false, ready = false, present = false, spectator = false, guest = true;
+        int     joinSerial = 0;           // 입장할 때마다 올라간다 (입장 연출을 다시 시작하는 신호)
+    };
+    struct LobbyChatLine {
+        QString who, text;
+        int     kind = 0;                 // 0 내 글, 1 상대 글, 2 알림
+    };
+    struct LobbyLabels {
+        QString room, copy, close, settings, game, delay, win, ready, readyOn, start, leave,
+                waiting, joined, hostTag, you, chatHint, on, off, startHint, spectator, open,
+                seat, seatPlayer, seatSpec, seatFixed, guestTag, exp;
+    };
+    struct LobbyView {
+        bool active = false, isHost = false, connected = false, myReady = false;
+        bool canStart = false, delayEditable = false, winCounter = true;
+        bool seatSwitchable = false;      // 내가 3번 칸이고 이 게임이 3인 이상 플레이를 지원할 때: 플레이어/관전 전환
+        bool mySpectator = false;
+        int  mySlot = 0;
+        QString roomCode, status, gameLabel;
+        int  delay = 0;
+        QVector<LobbyMember>   members;   // 3칸: [0] 방장, [1], [2]
+        QVector<LobbyChatLine> chat;
+        LobbyLabels            L;
+    };
+    void setLobby(const LobbyView& v);
+    bool lobbyVisible() const;
+
+    // 방을 만들기 전 "내 캐릭터" 미리보기 (MULTIPLAYER 하위 목록 오른쪽에 카드 한 장)
+    void setSideCard(const LobbyMember& m, bool on, const QString& caption = QString());
+
+    // 방 만들기: 게임 목록에서 게임을 고르는 동안. LAUNCH 단추가 label 로 바뀌고, 목록에서 ESC 를 누르면 pickCancelled.
+    void setPickMode(bool on, const QString& launchLabel);
 
     // 게임 목록 위쪽의 필터 단추 (ALL / FAV / 기종…)
     struct FilterTab {
@@ -115,6 +155,7 @@ public:
     bool isIdle() const;
 
     void openMenu(int i);
+    void openCategory(const QString& id);       // id 로 찾아서 연다 (없으면 아무 것도 안 한다)
     void closeMenu();
     bool menuOpen() const { return m_menuFrame >= 0; }
 
@@ -133,6 +174,11 @@ signals:
     void filterChosen(const QString& filterId);
     void searchChanged(const QString& text);    // 검색어가 바뀔 때마다
     void searchRequested();                     // 게임패드로 검색창을 열려 할 때
+    void pickCancelled();                       // 방 만들기 게임 고르기 중 ESC
+
+    // 로비: id = main / delay / win / nick / chatprompt / leave / copy,  delta 는 ◀ ▶ 일 때만
+    void lobbyAction(const QString& id, int delta);
+    void lobbyChatSend(const QString& text);
 
     // 하위 항목 자체를 눌렀을 때 (동작형 항목)
     void optionChosen(const QString& id, int subIndex);
@@ -162,9 +208,18 @@ private:
     void tick();
 
     // ── 배율 / 치수 ──────────────────────────────────────
-    int  bodyScale() const { return qMax(1, m_L.s - 1); }   // 본문은 한 단계 작게
-    int  bodyCellW() const { return nrx::ATLAS_CELL  * bodyScale(); }
-    int  bodyCellH() const { return nrx::ATLAS_CELLH * bodyScale(); }
+    //   글자 크기는 역할마다 따로 정한다. 단위는 1/8 배 (8 = 1배, 11 = 1.375배).
+    //     list : 게임 목록·필터·검색·하단 버튼·이벤트   sub : 하위 옵션   opt : 메인 옵션(2배 높이)
+    int  baseUnit() const { return 1; }          // 글자 크기는 창 크기와 무관하게 고정 (창이 커지면 박스만 커져 글자가 더 많이 보인다)
+    int  listQ() const { return qMax(9, int(std::lround(baseUnit() * 8 * 1.375))); }
+    int  subQ()  const { return qMax(9, int(std::lround(baseUnit() * 8 * 1.25))); }
+    int  optQ()  const;                                                           // 칸에 다 들어가도록 정한다
+    int  bodyScale() const { return listQ(); }
+    int  bodyCellW() const { return PixelFont::cellWQ(listQ()); }
+    int  bodyCellH() const { return PixelFont::cellHQ(listQ()); }
+    int  subCellW() const { return PixelFont::cellWQ(subQ()); }
+    int  subCellH() const { return PixelFont::cellHQ(subQ()); }
+    int  optCellH() const { return PixelFont::cellHQ(optQ()); }
     int  listPitch() const { return bodyCellH() + 5 * m_L.s; }
     int  filterBarH() const;         // 필터 단추 줄 + 검색창
     int  filterRowsH() const;        // 필터 단추 줄만
@@ -237,6 +292,41 @@ private:
     void snapSubSel(int dir = +1);   // 안내 줄이 아닌 가까운 항목으로 옮긴다
     bool subSelectable(int i) const;
     bool subSelectableFrom(int i) const;
+
+    // ── 로비 ─────────────────────────────────────────────
+    struct LobbyGeo {
+        QRect box, title, card[3], cardImg[3], chatLog, chatBar, panel,
+              rowGame, rowDelay, rowWin, rowSeat, btnMain, btnLeave, chipCopy, chipClose, spinL, spinR;
+    };
+    LobbyGeo lobbyGeo() const;
+    QRect lobbyOuter() const;              // 방 화면이 차지하는 칸 (OPTIONS + EVENTS 상자를 합친 오른쪽 전체)
+    void drawLobby(QPainter& p);
+    void drawSideCard(QPainter& p);
+    void drawCard(QPainter& p, const QRect& r, const LobbyMember& m, int flash, bool emptyOpen, const QString& emptyText);
+    int  hitLobby(const QPoint& lp, int& deltaOut) const;   // 0 main 1 delay 2 win 3 seat 4 chat 5 leave 6 copy 7 close
+    bool lobbyNavigate(Nav a);
+    void lobbyActivate(int item, int delta);
+    bool lobbyKey(QKeyEvent* e);                            // 채팅 입력. 처리했으면 true
+    void lobbyChatSubmit();
+    void setChatFocus(bool on);
+    QString elideTo(const QString& s, int px, int q) const;
+    LobbyView   m_lobby;
+    int         m_lobbySel = 0;
+    int         m_lobbyHover = -1;
+    bool        m_chatFocus = false;
+    QString     m_chatBuf, m_chatPre;
+    int         m_flashSerial[3] = { 0, 0, 0 };
+    QElapsedTimer m_flashClock[3];
+    QElapsedTimer m_lobbyClock;
+    QTimer*     m_lobbyTimer = nullptr;
+    // 방 만들기 전 미리보기 카드
+    bool        m_pickMode = false;
+    QString     m_pickLabel;
+    bool        m_sideOn = false;
+    LobbyMember m_sideMember;
+    QString     m_sideCaption;
+    int         sideReserve() const;                        // 그 카드가 차지하는 가로 폭 (하위 목록 폭을 줄인다)
+    QRect       sideRect() const;
 
     // ── 상태 ─────────────────────────────────────────────
     nrx::Layout m_L;

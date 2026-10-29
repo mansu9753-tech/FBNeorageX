@@ -20,6 +20,7 @@ const QHash<QString, QString>& dict() {
         {"CONTROLS", "컨트롤"}, {"DIRECTORIES", "디렉터리"}, {"VIDEO OPTIONS", "비디오 옵션"},
         {"AUDIO OPTIONS", "오디오 옵션"}, {"MACHINE SETTINGS", "머신 세팅"},
         {"SHOTS FACTORY", "샷 팩토리"}, {"CHEATS", "치트"}, {"MULTIPLAYER", "멀티플레이어"},
+        {"MULTIPLAYER (UNDER CONSTRUCTION)", "멀티플레이어 (공사중)"},
         {"SYSTEM", "시스템"},
         // 하단 버튼 / 검색
         {"LAUNCH", "실행"}, {"IMPORT", "갱신"}, {"BACK", "뒤돌아가기"}, {"EXIT", "종료"}, {"SEARCH", "검색"},

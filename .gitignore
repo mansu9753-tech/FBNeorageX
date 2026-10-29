@@ -53,3 +53,8 @@ names.txt.bak
 
 # Local release staging (binaries go to GitHub Releases, not the repo)
 release/
+
+# Local server dev state / avatar zips
+server/.wrangler/
+server/node_modules/
+tools/*.zip

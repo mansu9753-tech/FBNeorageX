@@ -10,6 +10,15 @@
 
 ## 📋 Update History / 업데이트 내역
 
+### v2.4.0 (2026-10)
+
+Full notes / 전체 내용: [RELEASE_NOTES_v2.4.0.md](RELEASE_NOTES_v2.4.0.md)
+
+| | English | 한국어 |
+|---|---|---|
+| ✨ NEW | **New NeoRageX-style menu shell** with Korean text; empty-space clicks no longer close submenus / room screen. | **NeoRageX 스타일 새 메뉴 화면**과 한글 표시. 빈 곳 클릭으로 하위 메뉴·방 화면이 닫히지 않음. |
+| 🚧 WIP | **MULTIPLAYER (under construction)**: login / sign-up, room list, avatars. | **멀티플레이어(공사중)**: 로그인/회원가입, 방 목록, 아바타. |
+
 ### v2.3.1 (2026-10)
 
 Full notes / 전체 내용: [RELEASE_NOTES_v2.3.1.md](RELEASE_NOTES_v2.3.1.md)

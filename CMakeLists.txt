@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FBNeoRageX VERSION 2.3.1 LANGUAGES CXX C)
+project(FBNeoRageX VERSION 2.4.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ set(SOURCES
     src/ShaderParamDialog.cpp
     src/NeoRageXSkin.cpp
     src/NeoRageXShell.cpp
+    src/NeoRageXShellLobby.cpp
     src/ShellMenu.cpp
     src/ShellText.cpp
     src/ShellPageControls.cpp
@@ -56,6 +57,9 @@ set(SOURCES
     src/StunClient.cpp
     src/UPnpMapper.cpp
     src/CheatManager.cpp
+    src/WinCounter.cpp
+    src/Avatar.cpp
+    src/AccountClient.cpp
     src/GamepadManager.cpp
     src/PadRawBits.cpp
     src/PadMapping.cpp

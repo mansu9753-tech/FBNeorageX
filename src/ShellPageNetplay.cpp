@@ -6,13 +6,17 @@
 //  (스팀덱에서는 화면 키보드가 뜬다).
 
 #include "ShellPages.h"
+#include "AppSettings.h"
 
-#include <QInputDialog>
-#include <QLineEdit>
+#include <functional>
 
 namespace {
 
 class NetplayPage final : public ShellPage {
+    QString signup_hint(bool signup) const {
+        return signup ? (en() ? "ID: 3-16 LETTERS/DIGITS/_   PASSWORD: 6+ CHARS" : "아이디 영문·숫자·밑줄 3~16자, 비밀번호 6자 이상")
+                      : (en() ? "NO ACCOUNT YET? CHOOSE SIGN UP" : "계정이 없으면 회원가입을 누르세요");
+    }
 public:
     using ShellPage::ShellPage;
     QString id() const override { return QStringLiteral("netplay"); }
@@ -23,94 +27,80 @@ public:
         if (!n.state) return out;
         const NetState s = n.state();
 
-        out << Row::note(s.status);
-        if (!s.rtt.isEmpty()) out << Row::note(s.rtt);
-        out << Row::note(QStringLiteral("YOUR IP"),
-                         s.publicIp.isEmpty() ? QStringLiteral("...") : s.publicIp);
+        // 방에 있을 때는 이 목록 대신 방 화면이 열린다.
+        const NetProfileView pv = n.profile ? n.profile() : NetProfileView();
 
-        // ── HOST ────────────────────────────────────────────
-        out << Row::note(QStringLiteral("HOST"));
-        out << Row::action(QStringLiteral("PORT"),
-                           [this, s] {
-                               bool ok = false;
-                               const int v = QInputDialog::getInt(m_h.window, QStringLiteral("PORT"),
-                                                                  QStringLiteral("UDP port (1024-65535)"),
-                                                                  s.port, 1024, 65535, 1, &ok);
-                               if (ok && m_h.net.setPort) m_h.net.setPort(v);
-                           },
-                           QString::number(s.port));
-        out << Row::value_(QStringLiteral("DELAY"), QStringLiteral("%1f").arg(s.delay),
-                           [this, s](int d) {
-                               if (m_h.net.setDelay) m_h.net.setDelay(clampStep(s.delay, d, 1, 0, 8));
-                           });
-        out << Row::note(en() ? "RECOMMENDED: OVERSEAS 2-4f" : "권장: 해외 2~4f");
-        if (s.canHost)
-            out << Row::action(QStringLiteral("HOST GAME"), [this] { if (m_h.net.host) m_h.net.host(); });
-        if (!s.roomCode.isEmpty()) {
-            out << Row::action(QStringLiteral("ROOM CODE"),
-                               [this] {
-                                   if (!m_h.net.copyCode) return;
-                                   m_h.net.copyCode();
-                                   say(en() ? "Room code copied" : "룸 코드 복사됨");
-                               },
-                               s.roomCode + QStringLiteral("  COPY"));
+        // ── 로그인 전: 로그인 화면 / 회원가입 화면만 보인다 ──
+        if (!pv.loggedIn) {
+            const NetAuthView av = n.auth ? n.auth() : NetAuthView();
+            auto act = [this](const QString& label, std::function<void()> fn, const QString& val = QString()) {
+                return Row::action(label, [fn] { if (fn) fn(); }, val);
+            };
+            if (!av.signup) {
+                out << Row::heading(en() ? "LOGIN" : "로그인");
+                out << act(en() ? "ID" : "아이디", [this] { if (m_h.net.authEdit) m_h.net.authEdit("id"); },
+                           av.id.isEmpty() ? (en() ? QStringLiteral("(ENTER)") : QStringLiteral("(입력)")) : av.id);
+                out << act(en() ? "PASSWORD" : "비밀번호", [this] { if (m_h.net.authEdit) m_h.net.authEdit("pw"); },
+                           av.pwMask.isEmpty() ? (en() ? QStringLiteral("(ENTER)") : QStringLiteral("(입력)")) : av.pwMask);
+                out << act(en() ? "LOG IN" : "로그인", [this] { if (m_h.net.authSubmit) m_h.net.authSubmit(); },
+                           av.busy ? (en() ? QStringLiteral("...") : QStringLiteral("연결 중...")) : QString());
+                out << act(en() ? "SIGN UP" : "회원가입", [this] { if (m_h.net.authMode) m_h.net.authMode(true); });
+            } else {
+                out << Row::heading(en() ? "SIGN UP" : "회원가입");
+                out << act(en() ? "ID" : "아이디", [this] { if (m_h.net.authEdit) m_h.net.authEdit("id"); },
+                           av.id.isEmpty() ? (en() ? QStringLiteral("(ENTER)") : QStringLiteral("(입력)")) : av.id);
+                out << act(en() ? "PASSWORD" : "비밀번호", [this] { if (m_h.net.authEdit) m_h.net.authEdit("pw"); },
+                           av.pwMask.isEmpty() ? (en() ? QStringLiteral("(ENTER)") : QStringLiteral("(입력)")) : av.pwMask);
+                out << act(en() ? "NICKNAME" : "닉네임", [this] { if (m_h.net.authEdit) m_h.net.authEdit("nick"); },
+                           av.nick.isEmpty() ? (en() ? QStringLiteral("(ENTER)") : QStringLiteral("(입력)")) : av.nick);
+                out << Row::value_(en() ? "GENDER" : "성별", av.genderLabel, [this](int d) { if (m_h.net.authGender) m_h.net.authGender(d); });
+                out << act(en() ? "CREATE ACCOUNT" : "가입하기", [this] { if (m_h.net.authSubmit) m_h.net.authSubmit(); },
+                           av.busy ? (en() ? QStringLiteral("...") : QStringLiteral("연결 중...")) : QString());
+                out << act(en() ? "BACK TO LOGIN" : "로그인 화면으로", [this] { if (m_h.net.authMode) m_h.net.authMode(false); });
+            }
+            if (!av.message.isEmpty()) out << Row::note(av.message);
+            else out << Row::note(signup_hint(av.signup));
+            return out;
         }
-        if (s.canStart)
-            out << Row::action(QStringLiteral("START GAME (HOST)"),
-                               [this] { if (m_h.net.start) m_h.net.start(); });
 
-        // ── JOIN ────────────────────────────────────────────
-        out << Row::note(QStringLiteral("JOIN"));
-        out << Row::action(QStringLiteral("ROOM CODE"),
-                           [this, s] {
-                               bool ok = false;
-                               const QString v = QInputDialog::getText(
-                                   m_h.window, QStringLiteral("ROOM CODE"),
-                                   en() ? QStringLiteral("6-character room code") : QStringLiteral("6자 룸 코드"),
-                                   QLineEdit::Normal, s.joinCode, &ok);
-                               if (ok && m_h.net.setJoinCode) m_h.net.setJoinCode(v);
-                           },
-                           s.joinCode.isEmpty() ? QStringLiteral("------") : s.joinCode);
-        out << Row::action(QStringLiteral("OR DIRECT IP"),
-                           [this, s] {
-                               bool ok = false;
-                               const QString v = QInputDialog::getText(
-                                   m_h.window, QStringLiteral("IP"),
-                                   en() ? QStringLiteral("Host IP (used when room code is empty)")
-                                        : QStringLiteral("호스트 IP (룸 코드가 비었을 때 사용)"),
-                                   QLineEdit::Normal, s.joinIp, &ok);
-                               if (ok && m_h.net.setJoinIp) m_h.net.setJoinIp(v);
-                           },
-                           s.joinIp);
-        if (s.canJoin)
-            out << Row::action(QStringLiteral("JOIN GAME"), [this] { if (m_h.net.join) m_h.net.join(); });
+        // ── 로그인 후: 로비(방 목록) + 방 만들기 + 내 프로필 ──
+        out << Row::heading(en() ? "LOBBY - ROOMS" : "로비 — 방 목록");
+        {
+            const QVector<NetRoomRow> rooms = n.rooms ? n.rooms() : QVector<NetRoomRow>();
+            if (rooms.isEmpty())
+                out << Row::note(en() ? "NO ROOMS YET - CREATE ONE" : "열려 있는 방이 없습니다 — 방을 만들어 보세요");
+            for (const NetRoomRow& r : rooms) {
+                const QString game = r.game.isEmpty() ? (en() ? QStringLiteral("(NO GAME)") : QStringLiteral("(게임 미정)")) : r.game;
+                const QString label = QStringLiteral("%1  -  %2").arg(r.host, game);      // 방장 닉네임 - 게임
+                if (r.joinable)
+                    out << Row::action(label, [this, code = r.code] { if (m_h.net.joinRoom) m_h.net.joinRoom(code); }, r.seats);
+                else
+                    out << Row::note(label, QStringLiteral("%1 [%2]").arg(r.seats, r.reason));
+            }
+            out << Row::action(en() ? QStringLiteral("REFRESH") : QStringLiteral("새로고침"),
+                               [this] { if (m_h.net.refreshRooms) m_h.net.refreshRooms(); });
+        }
+        out << Row::action(en() ? QStringLiteral("CREATE ROOM") : QStringLiteral("방 만들기"),
+                           [this, s] { if (s.canHost && m_h.net.hostPick) m_h.net.hostPick(); });
+        out << Row::note(en() ? "ROOMS NEED YOUR OWN COPY OF THE GAME ROM" : "방의 게임 ROM 이 내 PC 에 있어야 입장할 수 있습니다");
 
-        // ── 연결 해제 / 릴레이 ───────────────────────────────
-        if (s.canDisc)
-            out << Row::action(QStringLiteral("DISCONNECT"),
-                               [this] { if (m_h.net.disconnect) m_h.net.disconnect(); });
-
-        out << Row::note(QStringLiteral("RELAY"));
-        // 릴레이 주소는 계정 ID 를 포함하므로 실제 값을 화면에 절대 보여 주지 않는다.
-        out << Row::action(en() ? QStringLiteral("RELAY SERVER") : QStringLiteral("릴레이 서버"),
-                           [this] {
-                               bool ok = false;
-                               const QString v = QInputDialog::getText(
-                                   m_h.window, QStringLiteral("RELAY"),
-                                   en() ? QStringLiteral("Custom relay URL (empty = built-in)")
-                                        : QStringLiteral("커스텀 릴레이 URL (비우면 내장 서버)"),
-                                   QLineEdit::Password, QString(), &ok);
-                               if (ok && m_h.net.setRelay) m_h.net.setRelay(v);
-                           },
-                           s.relayBuiltin ? (en() ? QStringLiteral("BUILT-IN") : QStringLiteral("내장"))
-                                          : (en() ? QStringLiteral("CUSTOM") : QStringLiteral("커스텀")));
-
-        out << Row::note(en() ? "HOST: SET DELAY, HOST GAME, SHARE THE CODE, PICK A GAME, START GAME"
-                              : "호스트: 딜레이 → HOST GAME → 룸 코드 공유 → 게임 선택 → START GAME");
-        out << Row::note(en() ? "JOIN: ENTER THE ROOM CODE, JOIN GAME (OR A DIRECT IP)"
-                              : "참가: 룸 코드 입력 → JOIN GAME (또는 직접 IP)");
-        out << Row::note(en() ? "ESC IN GAME ENDS BOTH GAMES / DISCONNECT RELEASES THE LINK"
-                              : "게임 중 ESC = 양쪽 종료 / DISCONNECT = 연결 해제");
+        // ── 내 프로필: 계정, 닉네임, 캐릭터 꾸미기 ──
+        out << Row::note("");
+        out << Row::heading(en() ? "MY PROFILE" : "내 프로필");
+        out << Row::action(en() ? QStringLiteral("ACCOUNT") : QStringLiteral("계정 정보"),
+                           [this] { if (m_h.net.logout) m_h.net.logout(); },
+                           QStringLiteral("%1  Lv%2  %3").arg(pv.accountId).arg(pv.level)
+                               .arg(en() ? QStringLiteral("LOGOUT") : QStringLiteral("로그아웃")));
+        out << Row::action(en() ? QStringLiteral("NICKNAME") : QStringLiteral("닉네임"),
+                           [this] { if (m_h.net.editNick) m_h.net.editNick(); }, pv.nick);
+        for (const NetProfileView::Slot& sl : pv.slotList) {
+            out << Row::value_(sl.label, sl.value, [this, key = sl.key](int d) {
+                                   if (m_h.net.cyclePart) m_h.net.cyclePart(key, d);
+                               });
+            if (!sl.nextUnlock.isEmpty()) out << Row::note(sl.nextUnlock);
+        }
+        out << Row::note(en() ? "LEVEL RISES WITH SET WINS IN KOF GAMES (1 WIN = 1 EXP)"
+                              : "KOF 대전 게임에서 세트를 이기면 경험치가 오릅니다 (1승 = 1)");
         return out;
     }
 };

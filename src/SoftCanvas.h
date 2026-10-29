@@ -24,6 +24,7 @@ public:
     bool setShaderPath(const QString& path) override;
     void setBezelImage(const QImage& img) override;
     void setRecording(bool on) override { m_recording = on; update(); }
+    void setScoreboard(const QString& text) override { if (m_score != text) { m_score = text; update(); } }
     void setFlashGuard(bool, float) override {}
     void setRotation(int rot) override { m_rotation = rot; update(); }
     int  rotation() const override { return m_rotation; }
@@ -45,6 +46,7 @@ private:
     bool     m_smooth = false;
     int      m_rotation = -1;
     bool     m_recording = false;
+    QString  m_score;
     QPixmap  m_bezel;
     QPixmap  m_bezelScaled;
     QSize    m_bezelScaledFor;

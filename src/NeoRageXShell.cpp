@@ -149,6 +149,11 @@ void NeoRageXShell::openMenu(int i) {
     update();
 }
 
+void NeoRageXShell::openCategory(const QString& id) {
+    for (int i = 0; i < m_options.size(); ++i)
+        if (m_options[i].id == id && m_options[i].enabled) { openMenu(i); return; }
+}
+
 QString NeoRageXShell::openCategoryId() const {
     return (m_openIdx >= 0 && m_openIdx < m_options.size())
                ? m_options[m_openIdx].id : QString();
@@ -383,13 +388,23 @@ double NeoRageXShell::quant(double t) const {
     return qRound(clamp01(t) * n) / double(n);
 }
 
-int NeoRageXShell::textW(const QString& s, int scale) const {
-    return PixelFont::width(s, scale);
+int NeoRageXShell::textW(const QString& s, int q) const {
+    return PixelFont::widthQ(s, q);
+}
+
+// 메인 옵션 글자 크기: 목표 크기에서 시작해, 옵션이 전부 한 박스에 들어갈 때까지 줄인다 (스크롤 없음).
+int NeoRageXShell::optQ() const {
+    const Layout& L = m_L;
+    const int n = qMax(1, int(m_options.size()));
+    const int avail = L.options.height() - 2 * L.border;
+    int q = 13;                                   // 목표 크기 (창 크기와 무관)
+    while (q > 8 && n * PixelFont::cellHQ(q) * L.options_.scaleY + (n - 1) * 2 * L.s > avail) --q;
+    return q;
 }
 
 void NeoRageXShell::text(QPainter& p, const QString& s, int x, int y,
-                         const QColor& c, int scale, int scaleY, bool retro) {
-    m_font.draw(p, s, x, y, c, scale, scaleY, retro);
+                         const QColor& c, int q, int scaleY, bool retro) {
+    m_font.drawQ(p, s, x, y, c, q, scaleY, retro);
 }
 
 // 바깥 사각형 b 를 o 픽셀 안쪽(음수면 바깥쪽)으로 옮긴 링을, 바깥 둘레 기준 거리 d 까지 그린다.
@@ -501,15 +516,15 @@ void NeoRageXShell::renderSurface() {
                         qRound(COLOR.text.green() * tt),
                         qRound(COLOR.text.blue()  * tt));
         auto put = [&](const QRect& b, const QString& s) {
-            text(p, s, b.x() + L.text.titleDX, b.y() + L.text.titleDY, tc, L.s, 1, true);
+            text(p, s, b.x() + L.text.titleDX, b.y() + L.text.titleDY, tc, L.s * 8, 1, true);
         };
         put(L.gamelist, QStringLiteral("GAMELIST"));
         put(L.options,  QStringLiteral("OPTIONS"));
         put(L.preview,  QStringLiteral("PREVIEW"));
         put(L.events,   QStringLiteral("EVENTS"));
-        text(p, L.status.left,  L.status.leftX, L.status.y, tc, L.s, 1, true);
-        text(p, L.status.right, L.status.rightX - textW(L.status.right, L.s),
-             L.status.y, tc, L.s, 1, true);
+        text(p, L.status.left,  L.status.leftX, L.status.y, tc, L.s * 8, 1, true);
+        text(p, L.status.right, L.status.rightX - textW(L.status.right, L.s * 8),
+             L.status.y, tc, L.s * 8, 1, true);
     }
     if (m_frame < ph.tit) return;
 
@@ -518,7 +533,7 @@ void NeoRageXShell::renderSurface() {
     drawList(p);
     drawButtons(p);
     if (m_menuFrame >= 0) drawOptionsOpen(p); else drawOptionsIdle(p);
-    drawEvents(p);
+    if (!lobbyVisible()) drawEvents(p);
     drawPreview(p);
 }
 
@@ -583,7 +598,7 @@ int NeoRageXShell::marqueeOverflow(int gi) const {
     if (gi < 0 || gi >= m_games.size()) return 0;
     const QRect area = listArea();
     const int avail = area.right() + 1 - listTextX(area, bodyCellW(), m_L.s) - 2 * m_L.s;
-    const int tw = PixelFont::width(PixelFont::gTo9(m_games.at(gi)), bodyScale());
+    const int tw = PixelFont::widthQ(PixelFont::gTo9(m_games.at(gi)), bodyScale());
     return qMax(0, tw - avail);
 }
 
@@ -790,7 +805,8 @@ void NeoRageXShell::drawButtons(QPainter& p) {
         p.fillRect(r, COLOR.btnFill);
         p.fillRect(QRect(r.x(), r.y(), r.width(), L.s), COLOR.btnTop);
         p.fillRect(QRect(r.x(), r.y() + r.height() - L.s, r.width(), L.s), COLOR.btnBot);
-        const QString lb = (i < m_btnLabels.size()) ? m_btnLabels[i] : L.buttons[i].label;
+        QString lb = (i < m_btnLabels.size()) ? m_btnLabels[i] : L.buttons[i].label;
+        if (i == 0 && m_pickMode && !m_pickLabel.isEmpty()) lb = m_pickLabel;
         text(p, lb, r.x() + (r.width() - textW(lb, bodyScale())) / 2,
              r.y() + (r.height() - bodyCellH()) / 2,
              i == m_hoverBtn ? COLOR.pure : COLOR.text, bodyScale());
@@ -800,7 +816,7 @@ void NeoRageXShell::drawButtons(QPainter& p) {
 // ── 옵션 카테고리 ────────────────────────────────────────────
 int NeoRageXShell::optPitch() const {
     const Layout& L = m_L;
-    const int gh = bodyCellH() * L.options_.scaleY;
+    const int gh = optCellH() * L.options_.scaleY;
     const int avail = L.options.height() - 2 * L.border;
     const int n = qMax(1, int(m_options.size()));
     if (n < 2) return gh + 10 * L.s;
@@ -811,7 +827,7 @@ int NeoRageXShell::optPitch() const {
 int NeoRageXShell::optFirstY() const {
     const Layout& L = m_L;
     const QRect& b = L.options;
-    const int gh = bodyCellH() * L.options_.scaleY;
+    const int gh = optCellH() * L.options_.scaleY;
     const int span = (m_options.size() - 1) * optPitch() + gh;
     return qRound(b.y() + L.border + ((b.height() - 2 * L.border) - span) / 2.0);
 }
@@ -835,9 +851,9 @@ void NeoRageXShell::drawOptionsIdle(QPainter& p) {
         if (cursor) {
             const QRect ob = m_L.options.adjusted(m_L.border + 2 * m_L.s, 0, -(m_L.border + 2 * m_L.s), 0);
             p.fillRect(QRect(ob.x(), optY(i) - 3 * m_L.s, ob.width(),
-                             bodyCellH() * sy + 6 * m_L.s), QColor(0, 0, 150));
+                             optCellH() * sy + 6 * m_L.s), QColor(0, 0, 150));
         }
-        text(p, o.label, optX(o.label, bodyScale()), optY(i), c, bodyScale(), sy);
+        text(p, o.label, optX(o.label, optQ()), optY(i), c, optQ(), sy);
     }
     p.restore();
 }
@@ -853,7 +869,7 @@ QRect NeoRageXShell::backRect() const {
     const Layout& L = m_L;
     const int bh = L.buttons.isEmpty() ? 20 * L.s : L.buttons.first().rect.height();
     const int w = qMax(L.buttons.isEmpty() ? 80 * L.s : L.buttons.first().rect.width(),
-                       textW(m_backLabel, bodyScale()) + 16 * L.s);
+                       textW(m_backLabel, subQ()) + 16 * L.s);
     const int cx = L.options.x() + L.options.width() / 2;
     const int y = L.options.y() + L.options.height() - L.border - bh - 3 * L.s;
     return QRect(cx - w / 2, y, w, bh);
@@ -862,13 +878,13 @@ QRect NeoRageXShell::backRect() const {
 QRect NeoRageXShell::subArea() const {
     const Layout& L = m_L;
     const int top = L.options.y() + L.border + 6 * L.s
-                  + bodyCellH() * L.options_.scaleY + 8 * L.s;
+                  + optCellH() * L.options_.scaleY + 8 * L.s;
     return QRect(L.options.x() + L.border, top,
-                 L.options.width() - 2 * L.border,
+                 L.options.width() - 2 * L.border - sideReserve(),
                  (L.options.y() + L.options.height() - L.border) - top - backReserve());
 }
 
-int NeoRageXShell::subPitch() const { return bodyCellH() + 6 * m_L.s; }
+int NeoRageXShell::subPitch() const { return subCellH() + 6 * m_L.s; }
 
 int NeoRageXShell::subRowsVisible() const {
     return qMax(1, subArea().height() / subPitch());
@@ -882,13 +898,13 @@ int NeoRageXShell::subRowY(int row) const {
 QRect NeoRageXShell::subSpinRect(int row, int dir) const {
     const Layout& L = m_L;
     const QRect a = subArea();
-    const int bw = bodyCellW() + 4 * L.s;
+    const int bw = subCellW() + 4 * L.s;
     const int y  = subRowY(row) - L.s;
-    const int h  = bodyCellH() + 2 * L.s;
+    const int h  = subCellH() + 2 * L.s;
     const int sbw = (m_openIdx >= 0 && m_options[m_openIdx].sub.size() > subRowsVisible())
                         ? L.scrollbar.w + 2 * L.s : 0;
     const int rightEdge = a.x() + a.width() - 2 * L.s - sbw;
-    const int valueW = 13 * bodyCellW();
+    const int valueW = 13 * subCellW();
     if (dir < 0) return QRect(rightEdge - valueW - 2 * bw, y, bw, h);
     return QRect(rightEdge - bw, y, bw, h);
 }
@@ -910,13 +926,15 @@ void NeoRageXShell::drawOptionsOpen(QPainter& p) {
         for (int i = 0; i < m_options.size(); ++i) {
             if (i == m_openIdx) continue;
             const OptionEntry& q = m_options[i];
-            text(p, q.label, optX(q.label, bodyScale()), optY(i),
-                 q.enabled ? COLOR.text : COLOR.textDim, bodyScale(), sy);
+            text(p, q.label, optX(q.label, optQ()), optY(i),
+                 q.enabled ? COLOR.text : COLOR.textDim, optQ(), sy);
         }
     }
-    text(p, o.label, optX(o.label, bodyScale()), y, COLOR.pure, bodyScale(), sy);
+    text(p, o.label, optX(o.label, optQ()), y, COLOR.pure, optQ(), sy);
     if (rt < 1.0) { p.restore(); return; }
+    if (m_lobby.active && o.id == QLatin1String("netplay")) { p.restore(); drawLobby(p); return; }
 
+    drawSideCard(p);
     const int sf = m_menuFrame - TIMING.rise - TIMING.riseGap;
     const QRect a = subArea();
     const int rows = qMin(subRowsVisible(), int(o.sub.size()) - m_subTop);
@@ -929,10 +947,10 @@ void NeoRageXShell::drawOptionsOpen(QPainter& p) {
         const bool hot = !it.info && ((i == m_hoverSub) || (i == m_subSel));
         const QColor fg = it.heading ? QColor(120, 175, 255)
                         : it.info ? COLOR.textDim : (hot ? COLOR.pure : COLOR.text);
-        const int cw = bodyCellW();
+        const int cw = subCellW();
 
         if (hot)
-            p.fillRect(QRect(a.x(), ry - L.s, a.width(), bodyCellH() + 2 * L.s),
+            p.fillRect(QRect(a.x(), ry - L.s, a.width(), subCellH() + 2 * L.s),
                        QColor(0, 0, 150));
 
         const int labelX = a.x() + 4 * L.s;
@@ -953,17 +971,17 @@ void NeoRageXShell::drawOptionsOpen(QPainter& p) {
             const int labelCells = qMax(1, (lft.x() - 3 * L.s - labelX) / cw);
             text(p, it.elideLeft ? PixelFont::fitTail(it.label, labelCells)
                                  : PixelFont::fit(it.label, labelCells),
-                 labelX, ry, fg, bodyScale());
+                 labelX, ry, fg, subQ());
 
             const int valueCells = qMax(1, (rgt.x() - (lft.x() + lft.width()) - 2 * L.s) / cw);
             const QString v = PixelFont::fit(it.value, valueCells);
             const int mid = (lft.x() + lft.width() + rgt.x()) / 2;
-            text(p, v, mid - textW(v, bodyScale()) / 2, ry, fg, bodyScale());
+            text(p, v, mid - textW(v, subQ()) / 2, ry, fg, subQ());
         } else {
             const int labelCells = qMax(1, (rowRight - labelX) / cw);
             text(p, it.elideLeft ? PixelFont::fitTail(it.label, labelCells)
                                  : PixelFont::fit(it.label, labelCells),
-                 labelX, ry, fg, bodyScale());
+                 labelX, ry, fg, subQ());
         }
     }
     p.restore();
@@ -974,9 +992,9 @@ void NeoRageXShell::drawOptionsOpen(QPainter& p) {
         p.fillRect(r, COLOR.btnFill);
         p.fillRect(QRect(r.x(), r.y(), r.width(), L.s), COLOR.btnTop);
         p.fillRect(QRect(r.x(), r.y() + r.height() - L.s, r.width(), L.s), COLOR.btnBot);
-        text(p, m_backLabel, r.x() + (r.width() - textW(m_backLabel, bodyScale())) / 2,
-             r.y() + (r.height() - bodyCellH()) / 2,
-             m_hoverBack ? COLOR.pure : COLOR.text, bodyScale());
+        text(p, m_backLabel, r.x() + (r.width() - textW(m_backLabel, subQ())) / 2,
+             r.y() + (r.height() - subCellH()) / 2,
+             m_hoverBack ? COLOR.pure : COLOR.text, subQ());
     }
 
     // 하위 목록이 길면 게임 목록과 같은 모양의 스크롤바를 단다
@@ -1034,7 +1052,7 @@ void NeoRageXShell::paintEvent(QPaintEvent*) {
 int NeoRageXShell::hitOption(const QPoint& lp) const {
     const Layout& L = m_L;
     const QRect& b = L.options;
-    const int h = bodyCellH() * L.options_.scaleY;
+    const int h = optCellH() * L.options_.scaleY;
     if (lp.x() < b.x() || lp.x() > b.x() + b.width()) return -1;
     for (int i = 0; i < m_options.size(); ++i) {
         const int y = optY(i);
@@ -1051,7 +1069,7 @@ int NeoRageXShell::hitSub(const QPoint& lp) const {
     const int rows = qMin(subRowsVisible(), int(o.sub.size()) - m_subTop);
     for (int r = 0; r < rows; ++r) {
         const int y = subRowY(r);
-        if (lp.y() >= y - m_L.s && lp.y() < y + bodyCellH() + m_L.s)
+        if (lp.y() >= y - m_L.s && lp.y() < y + subCellH() + m_L.s)
             return m_subTop + r;
     }
     return -1;
@@ -1092,6 +1110,8 @@ int NeoRageXShell::hitGame(const QPoint& lp) const {
 void NeoRageXShell::mouseMoveEvent(QMouseEvent* e) {
     const QPoint lp = toLogical(e->pos());
     if (m_dragBar >= 0) { dragScrollbar(lp); return; }
+    if (lobbyVisible()) { int d = 0; const int h = hitLobby(lp, d); if (h != m_lobbyHover) { m_lobbyHover = h; update(); } m_hoverBack = 0; setCursor(m_pointer); return; }
+    m_lobbyHover = -1;
     m_hoverBack = (m_menuFrame >= 0 && menuOpenDone() && backRect().contains(lp)) ? 1 : 0;
     const bool idle = isIdle();
     m_hoverOpt    = (m_menuFrame < 0 && idle) ? hitOption(lp) : -1;
@@ -1109,6 +1129,13 @@ void NeoRageXShell::mouseMoveEvent(QMouseEvent* e) {
 // 한글처럼 조합이 필요한 입력. 조합 중인 글자는 검색어 뒤에 임시로 보이고, 확정되면
 //   검색어에 붙는다.
 void NeoRageXShell::inputMethodEvent(QInputMethodEvent* e) {
+    if (m_chatFocus && lobbyVisible()) {
+        m_chatPre = e->preeditString();
+        if (!e->commitString().isEmpty() && m_chatBuf.size() < 200) m_chatBuf += e->commitString();
+        update();
+        e->accept();
+        return;
+    }
     if (!m_searchFocus) { e->ignore(); return; }
     m_preedit = e->preeditString();
     if (!e->commitString().isEmpty()) editSearch(m_search + e->commitString());
@@ -1117,6 +1144,15 @@ void NeoRageXShell::inputMethodEvent(QInputMethodEvent* e) {
 }
 
 QVariant NeoRageXShell::inputMethodQuery(Qt::InputMethodQuery q) const {
+    if (m_chatFocus && lobbyVisible()) {
+        switch (q) {
+        case Qt::ImEnabled:          return true;
+        case Qt::ImCursorRectangle:  return lobbyGeo().chatBar;
+        case Qt::ImSurroundingText:  return m_chatBuf;
+        case Qt::ImCursorPosition:   return int(m_chatBuf.size());
+        default:                     return QWidget::inputMethodQuery(q);
+        }
+    }
     switch (q) {
     case Qt::ImEnabled:          return m_searchFocus;
     case Qt::ImCursorRectangle:  return searchRect();
@@ -1166,6 +1202,25 @@ void NeoRageXShell::mousePressEvent(QMouseEvent* e) {
         return;
     }
 
+    // 멀티플레이 로비가 열려 있으면 로비의 단추·줄이 먼저 받는다. 게임 목록을 누르면 게임만 고른다
+    //   (방장이 방을 연 채로 게임을 고를 수 있어야 한다).
+    if (lobbyVisible()) {
+        int d = 0;
+        const int it = hitLobby(lp, d);
+        if (it >= 0) {
+            if (it != 4) setChatFocus(false);
+            if (it <= 5) m_lobbySel = it;
+            if (it == 1 && d == 0) { update(); return; }
+            lobbyActivate(it, d);
+            update();
+            return;
+        }
+        const int gi = hitGame(lp);
+        if (gi >= 0) { setChatFocus(false); setSelectedIndex(gi, true); return; }
+        setChatFocus(false);
+        update();
+        return;             // 빈 곳을 눌러도 방 화면은 닫히지 않는다 (나가기 단추로만)
+    }
     if (m_menuFrame >= 0 && m_openIdx >= 0 && menuOpenDone() && backRect().contains(lp)) {
         closeMenu();
         return;
@@ -1190,8 +1245,7 @@ void NeoRageXShell::mousePressEvent(QMouseEvent* e) {
             else               emit optionChosen(m_options[m_openIdx].id, row);
             return;
         }
-        closeMenu();
-        return;
+        return;         // 빈 곳을 눌러도 메뉴는 닫히지 않는다 (마우스는 뒤로 가기 단추로만 나간다)
     }
 
     if (hitSearchClear(lp)) { editSearch(QString()); return; }
@@ -1236,6 +1290,9 @@ void NeoRageXShell::mouseDoubleClickEvent(QMouseEvent* e) {
 void NeoRageXShell::keyPressEvent(QKeyEvent* e) {
     // Alt+Enter 는 전체화면 핫키다. 실행으로 착각하면 안 된다.
     if (e->modifiers() & Qt::AltModifier) { e->ignore(); return; }
+
+    // 멀티플레이 로비의 채팅 입력
+    if (lobbyKey(e)) return;
 
     // ── 검색창 ──────────────────────────────────────────────
     //   입력 중에는 글자·백스페이스를 여기서 먹는다. 위/아래/페이지 이동은 그대로 목록을
@@ -1337,6 +1394,7 @@ bool NeoRageXShell::navigate(Nav a) {
 // 하위 메뉴가 열려 있을 때
 bool NeoRageXShell::navigateMenu(Nav a) {
     const OptionEntry& o = m_options[m_openIdx];
+    if (m_lobby.active && o.id == QLatin1String("netplay")) return lobbyNavigate(a);
     const int n = o.sub.size();
     const int page = qMax(1, subRowsVisible() - 1);
 
@@ -1485,6 +1543,7 @@ bool NeoRageXShell::navigateList(Nav a) {
         return true;        // navigate() 가 먼저 처리한다
 
     case Nav::Back:
+        if (m_pickMode) { emit pickCancelled(); return true; }
         return false;       // 메뉴가 없으면 ESC 는 앱이 처리한다
     }
     if (total == 0) return true;

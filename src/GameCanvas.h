@@ -35,6 +35,7 @@ public:
     void setBezelImage(const QImage& img);   // 빈 이미지면 해제
     bool hasBezel() const { return !m_bezel.isNull(); }
     void setRecording(bool on);   // REC 오버레이 토글
+    void setScoreboard(const QString& text) override { if (m_score != text) { m_score = text; update(); } }
 
     // 플래시 감소 (눈 보호): 화면이 갑자기 밝아지는 순간(카운터/총구 화염)을
     //   감지해 그 프레임을 어둡게 처리 → 눈부심·눈 피로 감소.
@@ -92,6 +93,7 @@ private:
 
     // ── 녹화 오버레이 ─────────────────────────────────────
     bool    m_recording = false;
+    QString m_score;
 
     // ── 플래시 감소 (눈 보호) ─────────────────────────────
     //   "화면 전체가 하얗게 번쩍이는 프레임"만 잡아서 통째로 어둡게 한다.

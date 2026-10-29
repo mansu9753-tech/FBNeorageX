@@ -1,24 +1,24 @@
-// NetplayManager.cpp — Rollback Netcode (UDP 상태머신 + 안전 종료)
+// NetplayManager.cpp — Rollback Netcode (UDP 상태머신 + 안전 종료, 호스트 1 + 참가자 2)
 //
 //  흐름 요약
 //  ─────────────────────────────────────────────────────────────
 //  [연결]
-//    호스트: hostListen() → UDP 바인드 → HELLO 대기
-//    조인  : clientConnect() → HELLO 송신(200ms 재시도) → ACK 수신 → Lobby
+//    호스트: hostListen() → UDP 바인드 → HELLO 대기 (참가자마다 자리 1, 2 를 준다)
+//    참가자: clientConnect() → HELLO 송신(200ms 재시도) → ACK(내 자리 번호) 수신 → Lobby
 //
 //  [게임 시작 Loading Barrier]
-//    호스트: sendLoadGame(rom) → 조인에게 전달
-//    양쪽  : 로딩 완료 → sendReady() → Ready 상태
-//    호스트: 양쪽 Ready 확인 → sendStart() → 양쪽 Playing 진입 Frame 0
+//    호스트: sendLoadGame(rom, 딜레이, 플레이어 자리) → 참가자에게 전달
+//    모두  : 로딩 완료 → 참가자는 sendReady()
+//    호스트: 모든 참가자 Ready 확인 → sendStart() → 모두 Playing 진입 Frame 0
+//
+//  [중계]
+//    참가자끼리는 직접 연결하지 않는다. 호스트가 입력·프로필·채팅을 다른 참가자에게 전달한다.
 //
 //  [게임 종료]
-//    어느쪽이든 sendGameOver() → 양쪽 Lobby 복귀 (소켓 유지)
-//
-//  [안전 종료]
-//    shutdown() → abort() + deleteLater() + 500ms 후 실제 소켓 삭제
-//               → 재연결 시 "Address already in use" 방지
+//    어느쪽이든 sendGameOver() → 모두 Lobby 복귀 (소켓 유지)
 
 #include "NetplayManager.h"
+#include <QTimer>
 #include "StunClient.h"
 #include <QNetworkInterface>
 #include <QHostInfo>
@@ -28,18 +28,14 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
-// ★ Windows UDP 소켓의 SIO_UDP_CONNRESET 동작 비활성화.
-//   기본값: 닫힌 포트로 보낸 UDP 에 대해 ICMP port-unreachable 을 받으면
-//   다음 recvfrom 이 WSAECONNRESET 에러를 반환 → QUdpSocket 오동작 → 크래시.
-//   홀펀칭은 닫힌 포트로 프로브를 마구 보내므로 이 동작을 반드시 꺼야 함.
+// ★ Windows UDP 소켓의 SIO_UDP_CONNRESET 동작 비활성화 (ICMP port-unreachable 로 인한 오동작 방지)
 static void disableUdpConnReset(QUdpSocket* sock) {
     if (!sock) { qDebug("[CONNRESET] sock null"); return; }
     qintptr fd = sock->socketDescriptor();
     if (fd == -1) { qDebug("[CONNRESET] fd 무효 — 적용 실패"); return; }
     BOOL  newBehavior   = FALSE;
     DWORD bytesReturned = 0;
-    // SIO_UDP_CONNRESET = _WSAIOW(IOC_VENDOR, 12) = 0x9800000C
-    DWORD ioctlCode = 0x9800000C;
+    DWORD ioctlCode = 0x9800000C;   // SIO_UDP_CONNRESET
     int r = WSAIoctl(static_cast<SOCKET>(fd), ioctlCode,
              &newBehavior, sizeof(newBehavior),
              nullptr, 0, &bytesReturned, nullptr, nullptr);
@@ -49,15 +45,29 @@ static void disableUdpConnReset(QUdpSocket* sock) {
 static void disableUdpConnReset(QUdpSocket*) {}
 #endif
 
-// ★ UDP 소켓 버퍼 대폭 확대.
-//   상태 스냅샷(KOF98 ~414KB)을 319개 청크로 버스트 전송하면, 기본 소켓
-//   버퍼(~64KB ≈ 49패킷)가 즉시 넘쳐 나머지 ~85%가 OS 단에서 버려진다.
-//   → 송신/수신 버퍼를 8MB 로 키워 한 상태 전체가 버퍼에 들어가게 함.
+// ★ UDP 소켓 버퍼 확대 (상태 스냅샷 버스트 수용)
 static void tuneSocketBuffers(QUdpSocket* sock) {
     if (!sock) return;
-    const int bufBytes = 8 * 1024 * 1024;   // 8MB
+    const int bufBytes = 8 * 1024 * 1024;
     sock->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, QVariant(bufBytes));
     sock->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption,    QVariant(bufBytes));
+}
+
+static bool sameAddr(const QHostAddress& a, const QHostAddress& b) {
+    return a.isEqual(b, QHostAddress::ConvertV4MappedToIPv4);
+}
+
+static inline uint32_t rd32(const QByteArray& d, int o) {
+    return  static_cast<uint8_t>(d[o])         |
+           (static_cast<uint8_t>(d[o+1]) <<  8) |
+           (static_cast<uint8_t>(d[o+2]) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(d[o+3])) << 24);
+}
+static inline void wr32(QByteArray& d, uint32_t v) {
+    d.append(static_cast<char>( v        & 0xFF));
+    d.append(static_cast<char>((v >>  8) & 0xFF));
+    d.append(static_cast<char>((v >> 16) & 0xFF));
+    d.append(static_cast<char>((v >> 24) & 0xFF));
 }
 
 // ── 생성자/소멸자 ────────────────────────────────────────────
@@ -72,12 +82,10 @@ NetplayManager::NetplayManager(QObject* parent)
     m_heartbeatTimer->setInterval(HEARTBEAT_INTERVAL_MS);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &NetplayManager::onHeartbeat);
 
-    // STUN 재시도 타이머 (500ms 간격, 최대 6회 = 3초)
     m_stunTimer = new QTimer(this);
     m_stunTimer->setInterval(500);
     connect(m_stunTimer, &QTimer::timeout, this, &NetplayManager::onStunRetry);
 
-    // 상태 청크 페이싱 타이머 (1ms 마다 8청크씩 전송)
     m_stateTxTimer = new QTimer(this);
     m_stateTxTimer->setInterval(1);
     connect(m_stateTxTimer, &QTimer::timeout, this, &NetplayManager::onStateTxTick);
@@ -96,13 +104,22 @@ void NetplayManager::setState(State s) {
     emit stateChanged(s);
 }
 
+bool NetplayManager::seatConnected(int slot) const {
+    return slot >= 1 && slot < MAX_SEATS && m_peers[slot].used;
+}
+int NetplayManager::peerCount() const {
+    int n = 0;
+    for (int i = 1; i < MAX_SEATS; ++i) if (m_peers[i].used) ++n;
+    return n;
+}
+
 // ── 호스트 바인드 ────────────────────────────────────────────
 void NetplayManager::hostListen(int port) {
     shutdown();
     m_isHost = true;
+    m_mySlot = 0;
 
     m_socket = new QUdpSocket(this);
-    // ReuseAddressHint: 이전 소켓이 TIME_WAIT 상태여도 즉시 재바인드 가능
     if (!m_socket->bind(QHostAddress::Any, static_cast<quint16>(port),
                         QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
         emit error(QString("UDP 바인드 실패 (port %1): %2")
@@ -112,25 +129,22 @@ void NetplayManager::hostListen(int port) {
         return;
     }
     connect(m_socket, &QUdpSocket::readyRead, this, &NetplayManager::onReadyRead);
-    disableUdpConnReset(m_socket);   // Windows ICMP unreachable 크래시 방지
-    tuneSocketBuffers(m_socket);     // 대용량 상태 버스트 수용 (버퍼 8MB)
+    disableUdpConnReset(m_socket);
+    tuneSocketBuffers(m_socket);
     qDebug() << "NetplayManager: 호스트 대기 port=" << port;
 }
 
 // ── 클라이언트 연결 (직접 IP 모드) ───────────────────────────
-// clientPrepare() + clientStartHandshake() 의 합성 — 기존 동작 보존.
 void NetplayManager::clientConnect(const QString& ip, int port) {
     if (!clientPrepare()) return;
     clientStartHandshake(ip, port);
     qDebug() << "NetplayManager: clientConnect →" << ip << ":" << port;
 }
 
-// ── 클라이언트 소켓 바인드만 (HELLO 미발사) ──────────────────
-// 토큰 기반 JOIN 흐름: bind → STUN → 릴레이 → 호스트 주소 확보
-// → clientStartHandshake() 에서 HELLO 시작.
 bool NetplayManager::clientPrepare() {
     shutdown();
     m_isHost     = false;
+    m_mySlot     = 1;
     m_remoteAddr = QHostAddress();
     m_remotePort = 0;
 
@@ -142,21 +156,16 @@ bool NetplayManager::clientPrepare() {
         return false;
     }
     connect(m_socket, &QUdpSocket::readyRead, this, &NetplayManager::onReadyRead);
-    disableUdpConnReset(m_socket);   // Windows ICMP unreachable 크래시 방지
-    tuneSocketBuffers(m_socket);     // 대용량 상태 버스트 수용 (버퍼 8MB)
+    disableUdpConnReset(m_socket);
+    tuneSocketBuffers(m_socket);
     qDebug() << "NetplayManager: clientPrepare localPort=" << m_socket->localPort();
     return true;
 }
 
-// ── 호스트 주소 확정 후 HELLO 발사 시작 ──────────────────────
-// 중복 호출 안전: 이미 연결 완료 상태(Lobby+)면 무시.
 void NetplayManager::clientStartHandshake(const QString& ip, int port) {
     if (!m_socket) {
-        // prepare 안 된 상태로 호출되면 안전하게 bind 수행
         if (!clientPrepare()) return;
     }
-    // 이미 핸드셰이크 성공/진행 후면 재시작 안 함 (relayPollPeer 가
-    // 피어를 여러 번 보고할 수 있으므로 idempotent 동작 보장)
     if (m_state != State::Disconnected) {
         qDebug() << "NetplayManager: clientStartHandshake skipped (state="
                  << (int)m_state << ")";
@@ -167,31 +176,24 @@ void NetplayManager::clientStartHandshake(const QString& ip, int port) {
     m_remotePort = static_cast<quint16>(port);
 
     m_helloRetry = 0;
-    m_helloSentAt.start();   // RTT 측정 시작
+    m_helloSentAt.start();
     m_helloTimer->start();
     onHelloTimer();
     qDebug() << "NetplayManager: HELLO 시작 →" << ip << ":" << port;
 }
 
 // ── STUN: 외부 IP:Port 발견 ──────────────────────────────────
-// 1. DNS 로 STUN 서버 주소 해석
-// 2. 현재 m_socket 으로 Binding Request 송신
-// 3. 응답 수신은 onReadyRead 에서 StunClient::isStunResponse() 로 가로채기
-// 4. 응답 파싱 → externalAddressDiscovered(ip,port) 신호
-// 실패 시 stunFailed(reason) 신호.
 void NetplayManager::discoverExternalAddress(const QString& stunHost, int stunPort) {
     if (!m_socket) {
         emit stunFailed("STUN: 소켓 미바인드");
         return;
     }
-    // 이전 STUN 진행 중이면 정리
     if (m_stunTimer) m_stunTimer->stop();
     m_stunActive  = true;
     m_stunRetries = 0;
     m_stunTxnId.clear();
     m_stunPort = static_cast<quint16>(stunPort);
 
-    // DNS 비동기 조회
     QHostInfo::lookupHost(stunHost, this,
         [this](const QHostInfo& info){
             if (!m_stunActive) return;
@@ -200,7 +202,6 @@ void NetplayManager::discoverExternalAddress(const QString& stunHost, int stunPo
                 emit stunFailed("STUN DNS 실패: " + info.errorString());
                 return;
             }
-            // IPv4 우선
             m_stunAddr = QHostAddress();
             for (const auto& a : info.addresses()) {
                 if (a.protocol() == QAbstractSocket::IPv4Protocol) {
@@ -249,16 +250,20 @@ void NetplayManager::shutdown() {
     setState(State::Disconnected);
 
     m_isHost     = false;
+    m_mySlot     = 0;
     m_remoteAddr = QHostAddress();
     m_remotePort = 0;
     m_helloRetry = 0;
+    m_myRomPackets.clear();
+    m_myVarPackets.clear();
+    m_peerVarChunks.clear();
+    m_peerVarTotal = 0;
+    m_peerVarDone  = true;
+    for (Peer& p : m_peers) p = Peer();
 
     resetGameState();
 
     if (m_socket) {
-        // abort(): 즉시 소켓 닫기 (graceful close 없이)
-        // deleteLater(): 현재 이벤트 루프 사이클 완료 후 삭제
-        // → 동일 포트를 즉시 재바인드해도 "Address already in use" 없음
         m_socket->abort();
         m_socket->deleteLater();
         m_socket = nullptr;
@@ -266,7 +271,6 @@ void NetplayManager::shutdown() {
 }
 
 // ── 게임 데이터만 초기화 (소켓 유지) ────────────────────────
-// Lobby로 돌아가되 연결은 유지
 void NetplayManager::cleanupGame() {
     resetGameState();
     if (m_state == State::Playing || m_state == State::Loading ||
@@ -289,30 +293,179 @@ QString NetplayManager::localIp() const {
 }
 
 // ── 전송 헬퍼 ────────────────────────────────────────────────
+//   호스트는 들어와 있는 모든 참가자에게, 참가자는 호스트에게 보낸다.
 void NetplayManager::sendRaw(const QByteArray& data) {
-    if (!m_socket || m_remoteAddr.isNull() || m_remotePort == 0) return;
-    m_socket->writeDatagram(data, m_remoteAddr, m_remotePort);
+    if (!m_socket) return;
+    if (m_isHost) {
+        for (int i = 1; i < MAX_SEATS; ++i)
+            if (m_peers[i].used) m_socket->writeDatagram(data, m_peers[i].addr, m_peers[i].port);
+    } else if (!m_remoteAddr.isNull() && m_remotePort != 0) {
+        m_socket->writeDatagram(data, m_remoteAddr, m_remotePort);
+    }
+}
+
+void NetplayManager::sendRawTo(int slot, const QByteArray& data) {
+    if (!m_socket || !m_isHost || !seatConnected(slot)) return;
+    m_socket->writeDatagram(data, m_peers[slot].addr, m_peers[slot].port);
 }
 
 void NetplayManager::sendCtrl(const QByteArray& pkt, int times) {
     for (int i = 0; i < times; ++i) sendRaw(pkt);
 }
 
+int NetplayManager::slotOfSender(const QHostAddress& a, quint16 port) const {
+    for (int i = 1; i < MAX_SEATS; ++i)
+        if (m_peers[i].used && m_peers[i].port == port && sameAddr(m_peers[i].addr, a)) return i;
+    return -1;
+}
+
+// 호스트: 참가자 하나를 내보낸다
+void NetplayManager::dropPeer(int slot) {
+    if (slot < 1 || slot >= MAX_SEATS || !m_peers[slot].used) return;
+    m_peers[slot] = Peer();
+    {
+        QMutexLocker lk(&m_mutex);
+        m_remoteInputs[slot].clear();
+        m_predicted[slot].clear();
+        m_remoteMaxFrame[slot] = 0;
+        m_lastRemote[slot] = 0;
+    }
+    emit peerLeft(slot);
+}
+
 // ── 게임 흐름 메시지 ─────────────────────────────────────────
 
-// 호스트: 선택한 게임을 조인에게 알림 → Lobby→Loading 전이
-void NetplayManager::sendLoadGame(const QString& romName, int inputDelay) {
+// 호스트: 선택한 게임을 참가자에게 알림 → Lobby→Loading 전이
+void NetplayManager::sendLoadGame(const QString& romName, int inputDelay, int playerMask) {
     m_inputDelay = qBound(0, inputDelay, 8);
     QByteArray pkt;
     pkt.append(static_cast<char>(MSG_LOAD_GAME));
-    pkt.append(static_cast<char>(m_inputDelay));  // byte 1: 입력 지연 프레임
-    pkt.append(romName.toUtf8());                 // byte 2+: ROM 이름
+    pkt.append(static_cast<char>(m_inputDelay));
+    pkt.append(static_cast<char>(playerMask & 0xFF));
+    pkt.append(romName.toUtf8());
     sendCtrl(pkt, 5);
     setState(State::Loading);
 }
 
-// 로딩 완료 선언 → Loading→Ready 전이
-// 클라이언트는 페이로드에 RTT(ms)를 포함 → 호스트가 동시 시작 지연 계산에 사용
+// ── ROM 목록 교환 ────────────────────────────────────────────
+void NetplayManager::sendRomList(const QStringList& roms) {
+    m_myRomPackets = qCompress(roms.join(QLatin1Char('\n')).toUtf8(), 9);
+    transmitMyRomList();
+    QTimer::singleShot(400, this, [this] { transmitMyRomList(); });
+}
+
+// ── 머신 세팅 교환 (호스트 → 참가자) ─────────────────────────
+void NetplayManager::sendVars(const QStringList& lines) {
+    ++m_varGen;
+    m_myVarPackets = qCompress(lines.join(QLatin1Char('\n')).toUtf8(), 9);
+    transmitMyVars();
+    QTimer::singleShot(250, this, [this] { transmitMyVars(); });
+    QTimer::singleShot(700, this, [this] { transmitMyVars(); });
+}
+
+void NetplayManager::transmitMyVars() {
+    if (m_myVarPackets.isEmpty() || !active()) return;
+    constexpr int kChunk = 1000;
+    const int total = (m_myVarPackets.size() + kChunk - 1) / kChunk;
+    for (int i = 0; i < total; ++i) {
+        QByteArray pkt;
+        pkt.append(static_cast<char>(MSG_VARS));
+        pkt.append(static_cast<char>(m_varGen));
+        pkt.append(static_cast<char>(total & 0xFF));  pkt.append(static_cast<char>((total >> 8) & 0xFF));
+        pkt.append(static_cast<char>(i & 0xFF));      pkt.append(static_cast<char>((i >> 8) & 0xFF));
+        pkt.append(m_myVarPackets.mid(i * kChunk, kChunk));
+        sendRaw(pkt);
+    }
+}
+
+// ── 로비 메시지 ───────────────────────────────────────────────
+//   UDP 라 하나씩 잃을 수 있어서 3번씩 보낸다. 받는 쪽은 같은 내용을 여러 번 받아도 문제가 없게 처리한다.
+static QByteArray buildProfile(int slot, const QString& id, const QString& nick, int level, bool account, const QString& parts) {
+    QByteArray pkt;
+    const QByteArray idb = id.toUtf8().left(32);
+    const QByteArray nb = nick.toUtf8().left(48);
+    pkt.append(static_cast<char>(NetplayManager::MSG_PROFILE));
+    pkt.append(static_cast<char>(slot));
+    pkt.append(static_cast<char>(idb.size()));
+    pkt.append(idb);
+    pkt.append(static_cast<char>(nb.size()));
+    pkt.append(nb);
+    pkt.append(static_cast<char>(qBound(1, level, 100)));
+    pkt.append(static_cast<char>(account ? 1 : 0));
+    pkt.append(parts.toUtf8().left(120));
+    return pkt;
+}
+
+// 호스트: slot 번 자리의 프로필을 모든 참가자에게 / 참가자: 내 프로필을 호스트에게
+void NetplayManager::sendProfile(int slot, const QString& id, const QString& nick, int level, bool account, const QString& parts) {
+    sendCtrl(buildProfile(m_isHost ? slot : m_mySlot, id, nick, level, account, parts), 3);
+}
+
+void NetplayManager::sendChat(const QString& text) {
+    QByteArray pkt;
+    ++m_chatSeq;
+    pkt.append(static_cast<char>(MSG_CHAT));
+    pkt.append(static_cast<char>(m_chatSeq & 0xFF));
+    pkt.append(static_cast<char>((m_chatSeq >> 8) & 0xFF));
+    pkt.append(static_cast<char>(m_isHost ? 0 : m_mySlot));
+    pkt.append(text.toUtf8().left(400));
+    sendCtrl(pkt, 3);
+}
+
+void NetplayManager::sendLobbyReady(bool ready, int rev) {
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_LREADY));
+    pkt.append(static_cast<char>(ready ? 1 : 0));
+    pkt.append(static_cast<char>(rev & 0xFF));
+    sendCtrl(pkt, 3);
+}
+
+void NetplayManager::sendSeatMode(bool wantSpectator) {
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_SEATMODE));
+    pkt.append(static_cast<char>(wantSpectator ? 1 : 0));
+    sendCtrl(pkt, 3);
+}
+
+void NetplayManager::sendSeats(const uint8_t flags[MAX_SEATS]) {
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_SEATS));
+    for (int i = 0; i < MAX_SEATS; ++i) pkt.append(static_cast<char>(flags[i]));
+    sendCtrl(pkt, 3);
+}
+
+void NetplayManager::sendRoomInfo(const QString& romName, int inputDelay, int rev, const QString& roomCode) {
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_ROOMINFO));
+    pkt.append(static_cast<char>(qBound(0, inputDelay, 8)));
+    pkt.append(static_cast<char>(rev & 0xFF));
+    QByteArray code = roomCode.toLatin1().left(6);
+    while (code.size() < 6) code.append(' ');
+    pkt.append(code);
+    pkt.append(romName.toUtf8());
+    sendCtrl(pkt, 3);
+}
+
+void NetplayManager::requestRomList() {
+    for (Peer& p : m_peers) { p.romChunks.clear(); p.romTotal = 0; p.romDone = false; }
+    sendCtrl(QByteArray(1, static_cast<char>(MSG_ROMLIST_REQ)), 2);
+}
+
+void NetplayManager::transmitMyRomList() {
+    if (m_myRomPackets.isEmpty() || !active()) return;
+    constexpr int kChunk = 1000;
+    const int total = (m_myRomPackets.size() + kChunk - 1) / kChunk;
+    for (int i = 0; i < total; ++i) {
+        QByteArray pkt;
+        pkt.append(static_cast<char>(MSG_ROMLIST));
+        pkt.append(static_cast<char>(total & 0xFF));  pkt.append(static_cast<char>((total >> 8) & 0xFF));
+        pkt.append(static_cast<char>(i & 0xFF));      pkt.append(static_cast<char>((i >> 8) & 0xFF));
+        pkt.append(m_myRomPackets.mid(i * kChunk, kChunk));
+        sendRaw(pkt);
+    }
+}
+
+// 로딩 완료 선언 → Loading→Ready 전이 (참가자는 호스트에게 RTT 와 함께 알린다)
 void NetplayManager::sendReady() {
     QByteArray pkt(3, Qt::Uninitialized);
     pkt[0] = static_cast<char>(MSG_READY);
@@ -322,11 +475,12 @@ void NetplayManager::sendReady() {
     setState(State::Ready);
 }
 
-// 호스트 전용: 양쪽 Ready 확인 후 동시 시작
-// ACK 기반 동시 시작: 클라이언트가 MSG_START 수신 후 즉시 Playing 진입 + MSG_START_ACK 전송
-// 호스트는 ACK 수신 시 Playing 진입 → 양쪽 시작 시점 차이 ≈ RTT/2
+// 호스트 전용: 모든 참가자가 Ready 인 뒤 동시 시작.
+//   참가자는 MSG_START 수신 즉시 Playing + MSG_START_ACK. 호스트는 모든 ACK 가 모이면 Playing 으로 간다.
 void NetplayManager::sendStart() {
     if (!m_isHost) return;
+    if (m_state == State::Loading) setState(State::Ready);      // 호스트는 READY 를 보내지 않으므로 여기서 Ready 로 간다
+    for (Peer& p : m_peers) p.startAcked = false;
     sendCtrl(QByteArray(1, static_cast<char>(MSG_START)), 5);
     m_waitingStartAck = true;
 
@@ -348,6 +502,7 @@ void NetplayManager::sendGameOver() {
 }
 
 // ── 입력 번들 전송 ───────────────────────────────────────────
+//   [MSG_INPUT, 자리, 개수, (프레임, 비트)*]  호스트가 받으면 다른 참가자에게 그대로 전달한다.
 void NetplayManager::sendInput(uint32_t frame, uint16_t bits) {
     m_localInputHistory.prepend({frame, bits});
     if (m_localInputHistory.size() > INPUT_REDUNDANCY)
@@ -355,37 +510,34 @@ void NetplayManager::sendInput(uint32_t frame, uint16_t bits) {
 
     int count = m_localInputHistory.size();
     QByteArray pkt;
-    pkt.reserve(2 + count * 6);
+    pkt.reserve(3 + count * 6);
     pkt.append(static_cast<char>(MSG_INPUT));
+    pkt.append(static_cast<char>(m_mySeat));
     pkt.append(static_cast<char>(count));
     for (const auto& e : m_localInputHistory) {
-        pkt.append(static_cast<char>( e.frame        & 0xFF));
-        pkt.append(static_cast<char>((e.frame >>  8) & 0xFF));
-        pkt.append(static_cast<char>((e.frame >> 16) & 0xFF));
-        pkt.append(static_cast<char>((e.frame >> 24) & 0xFF));
+        wr32(pkt, e.frame);
         pkt.append(static_cast<char>( e.bits         & 0xFF));
         pkt.append(static_cast<char>((e.bits  >>  8) & 0xFF));
     }
     sendRaw(pkt);
 }
 
-// ── 상태 청크 전송 ───────────────────────────────────────────
-void NetplayManager::sendState(uint32_t frame, const QByteArray& rawData) {
-    // ★ 상태 압축 (zlib level 1 = 빠름). 게임 RAM 은 0/반복 패턴이 많아
-    //   414KB → ~100~150KB 로 줄어듦 → 청크 수 1/3 → 더 자주 동기화 가능.
+// ── 상태 청크 전송 (호스트 → slot 번 참가자) ──────────────────
+void NetplayManager::sendState(int slot, uint32_t frame, const QByteArray& rawData) {
+    // ★ 상태 압축 (zlib level 1 = 빠름).
     QByteArray data = qCompress(rawData, 1);
     int total = static_cast<int>((data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE);
     if (total < 1) total = 1;
     {
         static int s_txCount = 0;
         if ((++s_txCount % 5) == 1)
-            qDebug("[SYNC-TX] #%d frame=%u raw=%d comp=%d total=%d (queued)",
-                   s_txCount, frame, (int)rawData.size(), (int)data.size(), total);
+            qDebug("[SYNC-TX] #%d slot=%d frame=%u raw=%d comp=%d total=%d (queued)",
+                   s_txCount, slot, frame, (int)rawData.size(), (int)data.size(), total);
     }
 
-    // ★ 모든 청크를 큐에 넣고 타이머로 페이싱 전송 (버스트 드롭 방지).
-    //   이전 상태가 아직 전송 중이면 버리고 최신 상태로 교체 (오래된 상태 무의미).
-    m_stateTxQueue.clear();
+    // 모든 청크를 큐에 넣고 타이머로 페이싱 전송 (버스트 드롭 방지). 같은 참가자의 이전 큐는 버린다.
+    for (int i = m_stateTxQueue.size() - 1; i >= 0; --i)
+        if (m_stateTxQueue[i].slot == slot) m_stateTxQueue.removeAt(i);
     for (int i = 0; i < total; ++i) {
         QByteArray pkt(9, Qt::Uninitialized);
         pkt[0] = static_cast<char>(MSG_STATE);
@@ -398,14 +550,12 @@ void NetplayManager::sendState(uint32_t frame, const QByteArray& rawData) {
         pkt[7] = static_cast<char>( i            & 0xFF);
         pkt[8] = static_cast<char>((i     >>  8) & 0xFF);
         pkt.append(data.mid(i * CHUNK_SIZE, CHUNK_SIZE));
-        m_stateTxQueue.append(std::move(pkt));
+        m_stateTxQueue.append({ slot, std::move(pkt) });
     }
     if (m_stateTxTimer && !m_stateTxTimer->isActive())
         m_stateTxTimer->start();
 }
 
-// 상태 청크 페이싱: 1ms 마다 소량씩 전송 → 네트워크 버스트 드롭 방지.
-// 319청크를 8개/tick 로 보내면 ~40tick(=~40ms) 에 걸쳐 분산.
 void NetplayManager::onStateTxTick() {
     if (m_stateTxQueue.isEmpty()) {
         if (m_stateTxTimer) m_stateTxTimer->stop();
@@ -413,41 +563,30 @@ void NetplayManager::onStateTxTick() {
     }
     const int perTick = 8;
     for (int i = 0; i < perTick && !m_stateTxQueue.isEmpty(); ++i) {
-        sendRaw(m_stateTxQueue.front());
+        const TxChunk c = m_stateTxQueue.front();
         m_stateTxQueue.pop_front();
+        sendRawTo(c.slot, c.pkt);
     }
 }
 
 // ── GGPO desync 감지: 체크섬 전송 ────────────────────────────
-// 페이로드: [MSG_CHECKSUM, frame(4), crc(4)]  = 9바이트 (초경량)
 void NetplayManager::sendChecksum(uint32_t frame, uint32_t crc) {
-    QByteArray pkt(9, Qt::Uninitialized);
-    pkt[0] = static_cast<char>(MSG_CHECKSUM);
-    pkt[1] = static_cast<char>( frame        & 0xFF);
-    pkt[2] = static_cast<char>((frame >>  8) & 0xFF);
-    pkt[3] = static_cast<char>((frame >> 16) & 0xFF);
-    pkt[4] = static_cast<char>((frame >> 24) & 0xFF);
-    pkt[5] = static_cast<char>( crc          & 0xFF);
-    pkt[6] = static_cast<char>((crc   >>  8) & 0xFF);
-    pkt[7] = static_cast<char>((crc   >> 16) & 0xFF);
-    pkt[8] = static_cast<char>((crc   >> 24) & 0xFF);
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_CHECKSUM));
+    wr32(pkt, frame);
+    wr32(pkt, crc);
     sendRaw(pkt);
 }
 
-// 클라→호스트 재동기(풀스테이트) 요청 — desync 감지 시 (신뢰성 위해 3회)
+// 참가자→호스트 재동기(풀스테이트) 요청 — desync 감지 시 (신뢰성 위해 3회)
 void NetplayManager::sendResyncReq(uint32_t frame) {
-    QByteArray pkt(5, Qt::Uninitialized);
-    pkt[0] = static_cast<char>(MSG_RESYNC_REQ);
-    pkt[1] = static_cast<char>( frame        & 0xFF);
-    pkt[2] = static_cast<char>((frame >>  8) & 0xFF);
-    pkt[3] = static_cast<char>((frame >> 16) & 0xFF);
-    pkt[4] = static_cast<char>((frame >> 24) & 0xFF);
+    QByteArray pkt;
+    pkt.append(static_cast<char>(MSG_RESYNC_REQ));
+    wr32(pkt, frame);
     sendCtrl(pkt, 3);
 }
 
 // ── 홀펀칭 프로브 ────────────────────────────────────────────
-// 호스트가 클라이언트의 외부 IP:Port 에 UDP 패킷을 먼저 보내
-// 호스트 공유기 NAT 에 매핑을 생성 → 이후 클라이언트 HELLO 가 통과
 void NetplayManager::sendProbeTo(const QString& ip, int port)
 {
     if (!m_socket) return;
@@ -471,39 +610,38 @@ void NetplayManager::onHelloTimer() {
 
 // ── Heartbeat: 연결 유지 + 끊김 감지 ────────────────────────
 void NetplayManager::onHeartbeat() {
-    // 무응답 → Disconnect 처리
-    if (m_lastRecvClock.isValid() &&
-        m_lastRecvClock.elapsed() > DISCONNECT_TIMEOUT_MS) {
+    if (m_isHost) {
+        // 호스트: 참가자마다 따로 본다. 한 명이 나가도 방은 그대로 열려 있다.
+        for (int i = 1; i < MAX_SEATS; ++i) {
+            if (m_peers[i].used && m_peers[i].lastRecv.isValid() &&
+                m_peers[i].lastRecv.elapsed() > DISCONNECT_TIMEOUT_MS) {
+                qWarning() << "NetplayManager: 참가자" << i << "무응답 → 내보냄";
+                dropPeer(i);
+            }
+        }
+    } else if (m_lastRecvClock.isValid() &&
+               m_lastRecvClock.elapsed() > DISCONNECT_TIMEOUT_MS) {
         qWarning() << "NetplayManager: 연결 타임아웃 (무응답" << DISCONNECT_TIMEOUT_MS << "ms)";
         emit disconnected();
         shutdown();
         return;
     }
-    // Heartbeat 전송 (상대도 나를 살아있다고 인식)
     sendRaw(QByteArray(1, static_cast<char>(MSG_HEARTBEAT)));
 }
 
 // ── 수신 처리 ────────────────────────────────────────────────
 void NetplayManager::onReadyRead() {
-    // ★ 에러 데이터그램 가드: Windows ICMP 에러 상태에서 pendingDatagramSize() 가
-    //   비정상값을 반복 반환할 때만 탈출. 정상 패킷(MSG_STATE 청크 등)은 제한 없이
-    //   모두 처리 — 그렇지 않으면 큰 상태 스냅샷(NeoGeo ~수백 청크)이 잘려서
-    //   재조립 실패 → 주기적 동기화 깨짐.
     int errorGuard = 0;
     while (m_socket && m_socket->hasPendingDatagrams()) {
         QHostAddress sender;
         quint16      senderPort = 0;
         QByteArray   data;
 
-        // ★ Windows UDP: 닫힌/도달불가 포트로 프로브 → ICMP port-unreachable →
-        //   소켓 에러 상태 → pendingDatagramSize() 가 -1 또는 비정상 거대값 반환.
-        //   그대로 resize() 하면 크래시 → 크기를 [1, 65535] 로 엄격히 검증.
         qint64 dgSize = m_socket->pendingDatagramSize();
         if (dgSize <= 0 || dgSize > 65535) {
-            // 에러/비정상 데이터그램 → 고정 버퍼로 dequeue 후 건너뜀
             char discard[2048];
             m_socket->readDatagram(discard, sizeof(discard));
-            if (++errorGuard > 64) break;   // 연속 에러만 탈출 (정상 패킷은 무제한)
+            if (++errorGuard > 64) break;
             continue;
         }
         data.resize(static_cast<int>(dgSize));
@@ -512,78 +650,90 @@ void NetplayManager::onReadyRead() {
         if (rd < data.size()) data.resize(static_cast<int>(rd));
         if (data.isEmpty()) continue;
 
-        // ── STUN 응답 가로채기 (게임 패킷 dispatch 전에 처리) ──
-        // 게임 메시지는 1바이트 type 으로 시작하므로 STUN 응답(20+바이트,
-        // magic cookie 검증)과 충돌하지 않음.
+        // ── STUN 응답 가로채기 ──
         if (StunClient::isStunResponse(data)) {
             QString extIp; int extPort = 0;
             if (StunClient::parseBindingResponse(data, m_stunTxnId, extIp, extPort)) {
                 if (m_stunTimer) m_stunTimer->stop();
                 m_stunActive = false;
-                qDebug("[STUN] external addr %s:%d",
-                       extIp.toUtf8().constData(), extPort);
+                qDebug("[STUN] external addr %s:%d", extIp.toUtf8().constData(), extPort);
                 emit externalAddressDiscovered(extIp, extPort);
-                qDebug("[STUN] emit externalAddressDiscovered 반환 — onReadyRead 계속");
             }
-            continue;  // 게임 dispatch 로 보내지 않음
+            continue;
         }
 
-        // 마지막 수신 시각 갱신 (heartbeat watchdog)
-        m_lastRecvClock.start();
-
         uint8_t type = static_cast<uint8_t>(data[0]);
-        // 핵심 연결 이벤트만 진단: HELLO/ACK/LOAD_GAME/GAME_OVER/RESYNC_REQ.
-        // 고빈도(INPUT/STATE/HEARTBEAT/CHECKSUM)·재전송(READY/START) 은 제외(플러드 방지).
         if (type == MSG_HELLO || type == MSG_ACK ||
             type == MSG_LOAD_GAME || type == MSG_GAME_OVER ||
             type == MSG_RESYNC_REQ)
             qDebug("[NM] recv type=%u sz=%d state=%d isHost=%d",
                    (unsigned)type, data.size(), (int)m_state, m_isHost ? 1 : 0);
 
-        // ── UDP 핸드셰이크 ──────────────────────────────────
+        // ── UDP 핸드셰이크: 호스트가 새 참가자에게 자리를 준다 ──────────
         if (type == MSG_HELLO) {
             if (m_isHost) {
-                if (m_state == State::Disconnected) {
-                    m_remoteAddr = sender;
-                    m_remotePort = senderPort;
-                    qDebug("[NM] HOST: HELLO recv → setState(Lobby)");
-                    setState(State::Lobby);
-                    qDebug("[NM] HOST: setState done → heartbeat start");
-                    m_heartbeatTimer->start();
-                    m_lastRecvClock.start();
-                    qDebug("[NM] HOST: emit connected(true)");
-                    emit connected(true);
-                    qDebug("[NM] HOST: emit connected(true) done. addr=%s port=%u",
-                           sender.toString().toUtf8().constData(), (unsigned)senderPort);
+                int slot = slotOfSender(sender, senderPort);
+                const bool fresh = (slot < 0);
+                if (fresh) {
+                    // 게임이 진행 중이면 새로 받지 않는다 (중간 입장은 지원하지 않는다)
+                    if (m_state == State::Playing || m_state == State::Loading || m_state == State::Ready) continue;
+                    for (int i = 1; i < MAX_SEATS; ++i) if (!m_peers[i].used) { slot = i; break; }
+                    if (slot < 0) continue;                                 // 방이 가득 찼다
+                    m_peers[slot] = Peer();
+                    m_peers[slot].addr = sender;
+                    m_peers[slot].port = senderPort;
+                    m_peers[slot].used = true;
+                    m_peers[slot].lastRecv.start();
                 }
-                QByteArray ack(1, static_cast<char>(MSG_ACK));
+                QByteArray ack;
+                ack.append(static_cast<char>(MSG_ACK));
+                ack.append(static_cast<char>(slot));
                 m_socket->writeDatagram(ack, sender, senderPort);
+                if (fresh) {
+                    const bool first = (m_state == State::Disconnected);
+                    if (first) {
+                        qDebug("[NM] HOST: HELLO recv → setState(Lobby)");
+                        setState(State::Lobby);
+                        m_heartbeatTimer->start();
+                        m_lastRecvClock.start();
+                        emit connected(true);
+                    }
+                    qDebug("[NM] HOST: 참가자 입장 slot=%d addr=%s port=%u", slot,
+                           sender.toString().toUtf8().constData(), (unsigned)senderPort);
+                    emit peerJoined(slot);
+                }
             }
             continue;
 
         } else if (type == MSG_ACK) {
             if (!m_isHost && m_state == State::Disconnected) {
-                // RTT = HELLO 첫 송신~ACK 수신 시간
+                m_mySlot = (data.size() >= 2) ? qBound(1, int(static_cast<uint8_t>(data[1])), MAX_SEATS - 1) : 1;
                 if (m_helloSentAt.isValid())
                     m_rttMs = static_cast<int>(std::min<qint64>(1000, m_helloSentAt.elapsed()));
                 m_helloTimer->stop();
-                qDebug("[NM] CLIENT: ACK recv rtt=%d → setState(Lobby)", m_rttMs);
+                qDebug("[NM] CLIENT: ACK recv rtt=%d slot=%d → setState(Lobby)", m_rttMs, m_mySlot);
                 setState(State::Lobby);
-                qDebug("[NM] CLIENT: setState done → heartbeat start");
                 m_heartbeatTimer->start();
                 m_lastRecvClock.start();
-                qDebug("[NM] CLIENT: emit connected(false)");
                 emit connected(false);
-                qDebug("[NM] CLIENT: emit connected(false) done");
             }
             continue;
         }
 
-        processPacket(data);
+        // ── 보낸 사람 확인: 호스트는 자기 참가자만, 참가자는 호스트로 본다 ──
+        int fromSlot = 0;
+        if (m_isHost) {
+            fromSlot = slotOfSender(sender, senderPort);
+            if (fromSlot < 0) continue;                                      // 모르는 사람의 패킷은 버린다
+            m_peers[fromSlot].lastRecv.start();
+        } else {
+            m_lastRecvClock.start();
+        }
+        processPacket(data, fromSlot);
     }
 }
 
-void NetplayManager::processPacket(const QByteArray& data) {
+void NetplayManager::processPacket(const QByteArray& data, int fromSlot) {
     if (data.isEmpty()) return;
     uint8_t type = static_cast<uint8_t>(data[0]);
 
@@ -591,77 +741,187 @@ void NetplayManager::processPacket(const QByteArray& data) {
 
     // ── 입력 번들 ──────────────────────────────────────────
     case MSG_INPUT: {
-        if (data.size() < 2) break;
-        int count = static_cast<uint8_t>(data[1]);
-        if (data.size() < 2 + count * 6) break;
+        if (data.size() < 3) break;
+        const int count = static_cast<uint8_t>(data[2]);
+        if (data.size() < 3 + count * 6) break;
+        // 호스트는 보낸 참가자의 자리를 주소로 안다. 참가자는 패킷에 적힌 자리를 쓴다 (호스트=0, 중계된 다른 참가자).
+        const int seat = m_isHost ? fromSlot : static_cast<int>(static_cast<uint8_t>(data[1]));
+        if (seat < 0 || seat >= MAX_SEATS || seat == m_mySeat) break;
 
-        QMutexLocker lk(&m_mutex);
-        for (int i = 0; i < count; ++i) {
-            int o = 2 + i * 6;
-            uint32_t frame =
-                static_cast<uint8_t>(data[o  ])         |
-                (static_cast<uint8_t>(data[o+1]) <<  8) |
-                (static_cast<uint8_t>(data[o+2]) << 16) |
-                (static_cast<uint8_t>(data[o+3]) << 24);
-            uint16_t bits =
-                static_cast<uint8_t>(data[o+4]) |
-                (static_cast<uint8_t>(data[o+5]) << 8);
-            if (!m_remoteInputs.contains(frame)) {
-                m_remoteInputs[frame] = bits;
-                m_lastRemote = bits;
-                if (frame > m_remoteMaxFrame) m_remoteMaxFrame = frame;
+        {
+            QMutexLocker lk(&m_mutex);
+            for (int i = 0; i < count; ++i) {
+                const int o = 3 + i * 6;
+                const uint32_t frame = rd32(data, o);
+                const uint16_t bits = static_cast<uint8_t>(data[o+4]) | (static_cast<uint8_t>(data[o+5]) << 8);
+                if (!m_remoteInputs[seat].contains(frame)) {
+                    static const bool kDbg = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+                    static uint16_t sPrev[MAX_SEATS] = { 0, 0, 0 };
+                    if (kDbg && bits != sPrev[seat]) { qDebug("[NPRECV] f=%u seat=%d bits=%04x", frame, seat, bits); sPrev[seat] = bits; }
+                    m_remoteInputs[seat][frame] = bits;
+                    m_lastRemote[seat] = bits;
+                    if (frame > m_remoteMaxFrame[seat]) m_remoteMaxFrame[seat] = frame;
+                }
             }
+        }
+        if (m_isHost) {                                    // 다른 참가자에게 그대로 전달 (자리 번호를 보낸 사람으로 고쳐서)
+            QByteArray fwd = data;
+            fwd[1] = static_cast<char>(fromSlot);
+            for (int i = 1; i < MAX_SEATS; ++i)
+                if (i != fromSlot && m_peers[i].used) sendRawTo(i, fwd);
         }
         break;
     }
 
     // ── 게임 선택 동기화 ───────────────────────────────────
     case MSG_LOAD_GAME: {
-        // byte 1: 입력 지연 프레임, byte 2+: ROM 이름
-        int delay = (data.size() >= 2) ? static_cast<uint8_t>(data[1]) : 0;
-        m_inputDelay = qBound(0, delay, 8);
-        QString romName = QString::fromUtf8(data.mid(2));
+        if (m_isHost || data.size() < 3) break;
+        m_inputDelay = qBound(0, int(static_cast<uint8_t>(data[1])), 8);
+        const int mask = static_cast<uint8_t>(data[2]);
+        const QString romName = QString::fromUtf8(data.mid(3));
         setState(State::Loading);
-        emit loadGameReceived(romName, m_inputDelay);
+        emit loadGameReceived(romName, m_inputDelay, mask);
         break;
     }
 
-    // ── 로딩 완료 선언 ─────────────────────────────────────
-    // 페이로드: [MSG_READY, rtt_lo, rtt_hi]  (클라이언트 RTT 포함)
+    // ── 로딩 완료 선언 (참가자 → 호스트) ───────────────────
     case MSG_READY:
-        // 호스트: 클라이언트의 RTT 수신 → 동시 시작 지연 계산에 사용
         if (m_isHost && data.size() >= 3) {
-            int peerRtt = static_cast<uint8_t>(data[1]) |
-                          (static_cast<uint8_t>(data[2]) << 8);
-            if (peerRtt > 0 && peerRtt < 2000)
-                m_rttMs = peerRtt;
+            int peerRtt = static_cast<uint8_t>(data[1]) | (static_cast<uint8_t>(data[2]) << 8);
+            if (peerRtt > 0 && peerRtt < 2000) m_rttMs = std::max(m_rttMs, peerRtt);
+            emit readyReceived(fromSlot);
         }
-        emit readyReceived();
         break;
 
-    // ── 시작 신호 (호스트→클라이언트) ─────────────────────
-    // 클라이언트: Playing 진입 + ACK 전송
-    // 호스트는 ACK 수신 후 Playing 진입 (sendStart 참조)
+    // ── 시작 신호 (호스트→참가자) ──────────────────────────
     case MSG_START:
+        if (m_isHost) break;
         setState(State::Playing);
         emit startReceived();
-        if (!m_isHost) {
-            // 클라이언트: ACK 전송 (호스트가 Playing에 진입하는 트리거)
-            sendCtrl(QByteArray(1, static_cast<char>(MSG_START_ACK)), 3);
+        sendCtrl(QByteArray(1, static_cast<char>(MSG_START_ACK)), 3);
+        break;
+
+    // ── 시작 확인 (참가자→호스트): 모두 모이면 Playing ──────
+    case MSG_START_ACK:
+        if (m_isHost && m_waitingStartAck) {
+            m_peers[fromSlot].startAcked = true;
+            bool all = true;
+            for (int i = 1; i < MAX_SEATS; ++i) if (m_peers[i].used && !m_peers[i].startAcked) all = false;
+            if (all) {
+                m_waitingStartAck = false;
+                if (m_state == State::Ready) setState(State::Playing);
+            }
         }
         break;
 
-    // ── 시작 확인 (클라이언트→호스트) ─────────────────────
-    case MSG_START_ACK:
-        if (m_isHost && m_waitingStartAck) {
-            m_waitingStartAck = false;
-            if (m_state == State::Ready)
-                setState(State::Playing);
+    // ── ROM 목록 ────────────────────────────────────────────
+    case MSG_ROMLIST: {
+        if (data.size() < 6) break;
+        Peer& pr = m_peers[m_isHost ? fromSlot : 0];
+        if (pr.romDone) break;
+        const int total = static_cast<uint8_t>(data[1]) | (static_cast<uint8_t>(data[2]) << 8);
+        const int index = static_cast<uint8_t>(data[3]) | (static_cast<uint8_t>(data[4]) << 8);
+        if (total <= 0 || index >= total) break;
+        if (pr.romTotal != total) { pr.romChunks.clear(); pr.romTotal = total; }
+        pr.romChunks.insert(index, data.mid(5));
+        if (pr.romChunks.size() == total) {
+            QByteArray all;
+            for (auto it = pr.romChunks.constBegin(); it != pr.romChunks.constEnd(); ++it) all += it.value();
+            const QByteArray raw = qUncompress(all);
+            pr.romDone = true;
+            emit romListReceived(m_isHost ? fromSlot : 0,
+                                 QString::fromUtf8(raw).split(QLatin1Char('\n'), Qt::SkipEmptyParts));
         }
         break;
+    }
+    case MSG_ROMLIST_REQ:
+        transmitMyRomList();
+        break;
+
+    // ── 로비 ────────────────────────────────────────────────
+    case MSG_PROFILE: {
+        if (data.size() < 5) break;
+        int slot = static_cast<uint8_t>(data[1]);
+        const int n = static_cast<uint8_t>(data[2]);
+        if (data.size() < 4 + n) break;
+        const int nl = static_cast<uint8_t>(data[3 + n]);
+        if (data.size() < 6 + n + nl) break;
+        if (m_isHost) slot = fromSlot;                      // 참가자가 보낸 프로필의 자리는 주소로 정한다
+        if (slot < 0 || slot >= MAX_SEATS) break;
+        const QString id = QString::fromUtf8(data.mid(3, n));
+        const QString nick = QString::fromUtf8(data.mid(4 + n, nl));
+        const int level = static_cast<uint8_t>(data[4 + n + nl]);
+        const bool acct = static_cast<uint8_t>(data[5 + n + nl]) & 1;
+        const QString parts = QString::fromUtf8(data.mid(6 + n + nl));
+        emit profileReceived(slot, id, nick, level, acct, parts);
+        break;
+    }
+    case MSG_CHAT: {
+        if (data.size() < 5) break;
+        const uint16_t seq = static_cast<uint8_t>(data[1]) | (static_cast<uint8_t>(data[2]) << 8);
+        int from = static_cast<uint8_t>(data[3]);
+        if (m_isHost) from = fromSlot;
+        if (from < 0 || from >= MAX_SEATS) break;
+        const uint32_t key = (uint32_t(from) << 16) | seq;
+        Peer& pr = m_peers[m_isHost ? fromSlot : 0];
+        if (pr.chatSeen.contains(key)) break;
+        pr.chatSeen.append(key);
+        while (pr.chatSeen.size() > 32) pr.chatSeen.removeFirst();
+        emit chatReceived(from, QString::fromUtf8(data.mid(4)));
+        if (m_isHost) {                                      // 다른 참가자에게 전달 (보낸 자리를 적어서)
+            QByteArray fwd = data;
+            fwd[3] = static_cast<char>(fromSlot);
+            for (int i = 1; i < MAX_SEATS; ++i)
+                if (i != fromSlot && m_peers[i].used) { sendRawTo(i, fwd); sendRawTo(i, fwd); sendRawTo(i, fwd); }
+        }
+        break;
+    }
+    case MSG_LREADY:
+        if (m_isHost && data.size() >= 3)
+            emit lobbyReadyReceived(fromSlot, data[1] != 0, static_cast<uint8_t>(data[2]));
+        break;
+    case MSG_SEATMODE:
+        if (m_isHost && data.size() >= 2) emit seatModeReceived(fromSlot, data[1] != 0);
+        break;
+    case MSG_SEATS:
+        if (!m_isHost && data.size() >= 1 + MAX_SEATS)
+            emit seatsReceived(static_cast<uint8_t>(data[1]), static_cast<uint8_t>(data[2]), static_cast<uint8_t>(data[3]));
+        break;
+    case MSG_ROOMINFO:
+        if (!m_isHost && data.size() >= 9)
+            emit roomInfoReceived(QString::fromUtf8(data.mid(9)), static_cast<uint8_t>(data[1]), static_cast<uint8_t>(data[2]),
+                                  QString::fromLatin1(data.mid(3, 6)).trimmed());
+        break;
+
+    // ── 호스트의 머신 세팅 ──────────────────────────────────
+    case MSG_VARS: {
+        if (data.size() < 7 || m_isHost) break;
+        const uint8_t gen = static_cast<uint8_t>(data[1]);
+        const int total = static_cast<uint8_t>(data[2]) | (static_cast<uint8_t>(data[3]) << 8);
+        const int index = static_cast<uint8_t>(data[4]) | (static_cast<uint8_t>(data[5]) << 8);
+        if (total <= 0 || index >= total) break;
+        if (gen != m_peerVarGen || m_peerVarTotal != total) {
+            m_peerVarGen = gen; m_peerVarChunks.clear(); m_peerVarTotal = total; m_peerVarDone = false;
+        }
+        if (m_peerVarDone) break;
+        m_peerVarChunks.insert(index, data.mid(6));
+        if (m_peerVarChunks.size() == total) {
+            QByteArray all;
+            for (auto it = m_peerVarChunks.constBegin(); it != m_peerVarChunks.constEnd(); ++it) all += it.value();
+            const QByteArray raw = qUncompress(all);
+            m_peerVarDone = true;
+            emit varsReceived(QString::fromUtf8(raw).split(QLatin1Char('\n'), Qt::SkipEmptyParts));
+        }
+        break;
+    }
 
     // ── 게임 종료 ──────────────────────────────────────────
     case MSG_GAME_OVER:
+        if (m_isHost) {                                      // 참가자가 끝냈다 → 다른 참가자에게도 알린다
+            for (int i = 1; i < MAX_SEATS; ++i)
+                if (i != fromSlot && m_peers[i].used)
+                    for (int k = 0; k < 3; ++k) sendRawTo(i, QByteArray(1, static_cast<char>(MSG_GAME_OVER)));
+        }
         cleanupGame();
         emit gameOverReceived();
         break;
@@ -669,51 +929,26 @@ void NetplayManager::processPacket(const QByteArray& data) {
     // ── GGPO 체크섬 수신 (desync 감지) ─────────────────────
     case MSG_CHECKSUM: {
         if (data.size() < 9) break;
-        uint32_t frame =
-            static_cast<uint8_t>(data[1])        |
-            (static_cast<uint8_t>(data[2]) <<  8) |
-            (static_cast<uint8_t>(data[3]) << 16) |
-            (static_cast<uint8_t>(data[4]) << 24);
-        uint32_t crc =
-            static_cast<uint8_t>(data[5])        |
-            (static_cast<uint8_t>(data[6]) <<  8) |
-            (static_cast<uint8_t>(data[7]) << 16) |
-            (static_cast<uint8_t>(data[8]) << 24);
-        emit checksumReceived(frame, crc);
+        emit checksumReceived(fromSlot, rd32(data, 1), rd32(data, 5));
         break;
     }
 
-    // ── 재동기 요청 (클라→호스트) ──────────────────────────
+    // ── 재동기 요청 (참가자→호스트) ────────────────────────
     case MSG_RESYNC_REQ: {
         if (data.size() < 5) break;
-        uint32_t frame =
-            static_cast<uint8_t>(data[1])        |
-            (static_cast<uint8_t>(data[2]) <<  8) |
-            (static_cast<uint8_t>(data[3]) << 16) |
-            (static_cast<uint8_t>(data[4]) << 24);
-        if (m_isHost) emit resyncRequested(frame);
+        if (m_isHost) emit resyncRequested(fromSlot, rd32(data, 1));
         break;
     }
 
     // ── 상태 청크 ──────────────────────────────────────────
     case MSG_STATE: {
-        if (data.size() < 9) break;
-        uint32_t frame =
-            static_cast<uint8_t>(data[1])        |
-            (static_cast<uint8_t>(data[2]) <<  8) |
-            (static_cast<uint8_t>(data[3]) << 16) |
-            (static_cast<uint8_t>(data[4]) << 24);
-        uint16_t total =
-            static_cast<uint8_t>(data[5]) | (static_cast<uint8_t>(data[6]) << 8);
-        uint16_t idx =
-            static_cast<uint8_t>(data[7]) | (static_cast<uint8_t>(data[8]) << 8);
+        if (data.size() < 9 || m_isHost) break;
+        uint32_t frame = rd32(data, 1);
+        uint16_t total = static_cast<uint8_t>(data[5]) | (static_cast<uint8_t>(data[6]) << 8);
+        uint16_t idx   = static_cast<uint8_t>(data[7]) | (static_cast<uint8_t>(data[8]) << 8);
 
         // ★ chunkBuf 스래싱 방지: 더 "최신" 프레임이 올 때만 버퍼를 새로 시작.
-        //   고지연/재정렬로 늦게 도착한 '이전 프레임' 청크는 무시 → 현재 재조립
-        //   중인 최신 프레임이 망가지지 않게 한다. (이전엔 어떤 프레임이든 리셋 →
-        //   계속 미완성 → 동기화 불가)
         if (frame > m_chunkBuf.frame || m_chunkBuf.totalChunks == 0) {
-            // 이전 프레임이 미완성이었으면 진단 (throttled)
             if (m_chunkBuf.totalChunks > 0 &&
                 static_cast<int>(m_chunkBuf.chunks.size()) < m_chunkBuf.totalChunks) {
                 static int s_incCount = 0;
@@ -725,7 +960,7 @@ void NetplayManager::processPacket(const QByteArray& data) {
             m_chunkBuf.frame = frame; m_chunkBuf.totalChunks = total;
             m_chunkBuf.chunks.clear();
         } else if (frame < m_chunkBuf.frame) {
-            break;   // 오래된 프레임 청크 — 무시 (현재 재조립 보호)
+            break;
         }
         m_chunkBuf.chunks[idx] = data.mid(9);
 
@@ -735,7 +970,6 @@ void NetplayManager::processPacket(const QByteArray& data) {
             for (uint16_t k = 0; k < total; ++k)
                 assembled.append(m_chunkBuf.chunks.value(k));
             m_chunkBuf.chunks.clear();
-            // ★ 압축 해제 (송신측 qCompress 대응)
             QByteArray decompressed = qUncompress(assembled);
             {
                 static int s_rxCount = 0;
@@ -750,7 +984,6 @@ void NetplayManager::processPacket(const QByteArray& data) {
         break;
     }
 
-    // ── Heartbeat: 수신만 해도 watchdog 갱신 (onReadyRead에서 처리됨) ─
     case MSG_HEARTBEAT:
         break;
 
@@ -761,18 +994,25 @@ void NetplayManager::processPacket(const QByteArray& data) {
     }
 }
 
-
-// ── Rollback API ─────────────────────────────────────────────
-int16_t NetplayManager::getRemoteInput(uint32_t frame) const {
+// ── Rollback API (자리별) ────────────────────────────────────
+void NetplayManager::setPlayers(int playerMask, int mySeat) {
     QMutexLocker lk(&m_mutex);
-    auto it = m_remoteInputs.find(frame);
-    if (it != m_remoteInputs.end()) return static_cast<int16_t>(it.value());
-    return static_cast<int16_t>(m_lastRemote); // hold-last 예측
+    m_playerMask = playerMask;
+    m_mySeat = mySeat;
 }
 
-void NetplayManager::recordPrediction(uint32_t frame, uint16_t bits) {
+int16_t NetplayManager::getRemoteInput(uint32_t frame, int seat) const {
+    if (seat < 0 || seat >= MAX_SEATS) return 0;
     QMutexLocker lk(&m_mutex);
-    m_predicted[frame] = bits;
+    auto it = m_remoteInputs[seat].find(frame);
+    if (it != m_remoteInputs[seat].end()) return static_cast<int16_t>(it.value());
+    return static_cast<int16_t>(m_lastRemote[seat]);      // hold-last 예측
+}
+
+void NetplayManager::recordPrediction(uint32_t frame, int seat, uint16_t bits) {
+    if (seat < 0 || seat >= MAX_SEATS) return;
+    QMutexLocker lk(&m_mutex);
+    m_predicted[seat][frame] = bits;
 }
 
 int NetplayManager::getRollbackFrame(uint32_t currentFrame) const {
@@ -780,11 +1020,17 @@ int NetplayManager::getRollbackFrame(uint32_t currentFrame) const {
     int rollbackTo = -1;
     uint32_t earliest = (currentFrame > static_cast<uint32_t>(MAX_ROLLBACK))
                         ? currentFrame - MAX_ROLLBACK : 0;
-    for (uint32_t f = earliest; f < currentFrame; ++f) {
-        auto ri = m_remoteInputs.find(f);
-        auto pi = m_predicted.find(f);
-        if (ri == m_remoteInputs.end() || pi == m_predicted.end()) continue;
-        if (ri.value() != pi.value()) { rollbackTo = static_cast<int>(f); break; }
+    for (int s = 0; s < MAX_SEATS; ++s) {
+        if (s == m_mySeat || !(m_playerMask & (1 << s))) continue;
+        for (uint32_t f = earliest; f < currentFrame; ++f) {
+            auto ri = m_remoteInputs[s].find(f);
+            auto pi = m_predicted[s].find(f);
+            if (ri == m_remoteInputs[s].end() || pi == m_predicted[s].end()) continue;
+            if (ri.value() != pi.value()) {
+                if (rollbackTo < 0 || static_cast<int>(f) < rollbackTo) rollbackTo = static_cast<int>(f);
+                break;
+            }
+        }
     }
     return rollbackTo;
 }
@@ -793,25 +1039,36 @@ void NetplayManager::confirmFramesUpTo(uint32_t frame) {
     QMutexLocker lk(&m_mutex);
     uint32_t cutoff = (frame > static_cast<uint32_t>(MAX_ROLLBACK + 2))
                       ? frame - MAX_ROLLBACK - 2 : 0;
-    QList<uint32_t> toRemove;
-    for (auto it = m_remoteInputs.begin(); it != m_remoteInputs.end(); ++it)
-        if (it.key() < cutoff) toRemove.append(it.key());
-    for (auto k : toRemove) { m_remoteInputs.remove(k); m_predicted.remove(k); }
+    for (int s = 0; s < MAX_SEATS; ++s) {
+        QList<uint32_t> toRemove;
+        for (auto it = m_remoteInputs[s].begin(); it != m_remoteInputs[s].end(); ++it)
+            if (it.key() < cutoff) toRemove.append(it.key());
+        for (auto k : toRemove) { m_remoteInputs[s].remove(k); m_predicted[s].remove(k); }
+    }
 }
 
+// 나 말고 입력을 내는 자리들 중 가장 느린 쪽의 프레임
 uint32_t NetplayManager::remoteMaxFrame() const {
     QMutexLocker lk(&m_mutex);
-    return m_remoteMaxFrame;
+    uint32_t m = 0; bool any = false;
+    for (int s = 0; s < MAX_SEATS; ++s) {
+        if (s == m_mySeat || !(m_playerMask & (1 << s))) continue;
+        if (!any || m_remoteMaxFrame[s] < m) m = m_remoteMaxFrame[s];
+        any = true;
+    }
+    return any ? m : 0;
 }
 
 // ── 게임 데이터 리셋 ─────────────────────────────────────────
 void NetplayManager::resetGameState() {
     QMutexLocker lk(&m_mutex);
-    m_remoteInputs.clear();
-    m_predicted.clear();
+    for (int s = 0; s < MAX_SEATS; ++s) {
+        m_remoteInputs[s].clear();
+        m_predicted[s].clear();
+        m_lastRemote[s] = 0;
+        m_remoteMaxFrame[s] = 0;
+    }
     m_localInputHistory.clear();
-    m_lastRemote      = 0;
-    m_remoteMaxFrame  = 0;
     m_chunkBuf.chunks.clear();
     m_chunkBuf.frame       = 0;
     m_chunkBuf.totalChunks = 0;

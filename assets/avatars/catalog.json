@@ -1,0 +1,426 @@
+[
+  {
+    "slot": "body",
+    "id": "body_m",
+    "ko": "남자",
+    "en": "MALE",
+    "level": 1,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face01",
+    "ko": "검은 단발",
+    "en": "BLACK SHORT",
+    "level": 1,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face02",
+    "ko": "금발 스파이크",
+    "en": "BLOND SPIKY",
+    "level": 1,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face03",
+    "ko": "갈색 가르마",
+    "en": "BROWN PART",
+    "level": 5,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face04",
+    "ko": "빨강 머리",
+    "en": "RED HAIR",
+    "level": 10,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face05",
+    "ko": "긴 묶음 머리",
+    "en": "LONG TIED",
+    "level": 20,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face06",
+    "ko": "모히칸",
+    "en": "MOHAWK",
+    "level": 30,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face07",
+    "ko": "곱슬머리",
+    "en": "CURLY",
+    "level": 40,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face08",
+    "ko": "흰 머리",
+    "en": "WHITE HAIR",
+    "level": 50,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face09",
+    "ko": "대머리 수염",
+    "en": "BALD BEARD",
+    "level": 70,
+    "gender": "m"
+  },
+  {
+    "slot": "face",
+    "id": "m_face10",
+    "ko": "파란 머리",
+    "en": "BLUE HAIR",
+    "level": 90,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top01",
+    "ko": "빨간 티셔츠",
+    "en": "RED TEE",
+    "level": 1,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top02",
+    "ko": "초록 티셔츠",
+    "en": "GREEN TEE",
+    "level": 1,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top03",
+    "ko": "파란 후드",
+    "en": "BLUE HOODIE",
+    "level": 5,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top04",
+    "ko": "가죽 재킷",
+    "en": "LEATHER JACKET",
+    "level": 10,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top05",
+    "ko": "도복",
+    "en": "GI",
+    "level": 20,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top06",
+    "ko": "정장",
+    "en": "SUIT",
+    "level": 30,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top07",
+    "ko": "노랑 탱크톱",
+    "en": "YELLOW TANK",
+    "level": 40,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top08",
+    "ko": "청재킷",
+    "en": "DENIM JACKET",
+    "level": 50,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top09",
+    "ko": "격투 조끼",
+    "en": "FIGHT VEST",
+    "level": 70,
+    "gender": "m"
+  },
+  {
+    "slot": "top",
+    "id": "m_top10",
+    "ko": "갑옷",
+    "en": "ARMOR",
+    "level": 90,
+    "gender": "m"
+  },
+  {
+    "slot": "body",
+    "id": "body_f",
+    "ko": "여자",
+    "en": "FEMALE",
+    "level": 1,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face01",
+    "ko": "포니테일",
+    "en": "PONYTAIL",
+    "level": 1,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face02",
+    "ko": "양갈래",
+    "en": "TWIN TAILS",
+    "level": 1,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face03",
+    "ko": "긴 생머리",
+    "en": "LONG STRAIGHT",
+    "level": 5,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face04",
+    "ko": "분홍 단발",
+    "en": "PINK BOB",
+    "level": 10,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face05",
+    "ko": "땋은 머리",
+    "en": "BRAID",
+    "level": 20,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face06",
+    "ko": "파란 숏컷",
+    "en": "BLUE SHORT",
+    "level": 30,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face07",
+    "ko": "올림머리",
+    "en": "BUN",
+    "level": 40,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face08",
+    "ko": "빨강 긴머리",
+    "en": "LONG RED",
+    "level": 50,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face09",
+    "ko": "금발 웨이브",
+    "en": "BLOND WAVY",
+    "level": 70,
+    "gender": "f"
+  },
+  {
+    "slot": "face",
+    "id": "f_face10",
+    "ko": "흰 머리 앞머리",
+    "en": "WHITE BANGS",
+    "level": 90,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top01",
+    "ko": "분홍 티셔츠",
+    "en": "PINK TEE",
+    "level": 1,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top02",
+    "ko": "하늘 티셔츠",
+    "en": "SKY TEE",
+    "level": 1,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top03",
+    "ko": "빨간 후드",
+    "en": "RED HOODIE",
+    "level": 5,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top04",
+    "ko": "가죽 재킷",
+    "en": "LEATHER JACKET",
+    "level": 10,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top05",
+    "ko": "도복",
+    "en": "GI",
+    "level": 20,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top06",
+    "ko": "세일러복",
+    "en": "SAILOR",
+    "level": 30,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top07",
+    "ko": "노랑 탱크톱",
+    "en": "YELLOW TANK",
+    "level": 40,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top08",
+    "ko": "청재킷",
+    "en": "DENIM JACKET",
+    "level": 50,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top09",
+    "ko": "격투 조끼",
+    "en": "FIGHT VEST",
+    "level": 70,
+    "gender": "f"
+  },
+  {
+    "slot": "top",
+    "id": "f_top10",
+    "ko": "갑옷",
+    "en": "ARMOR",
+    "level": 90,
+    "gender": "f"
+  },
+  {
+    "slot": "hat",
+    "id": "none",
+    "ko": "없음",
+    "en": "NONE",
+    "level": 1,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat01",
+    "ko": "빨간 야구모자",
+    "en": "RED CAP",
+    "level": 1,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat02",
+    "ko": "머리띠",
+    "en": "HEADBAND",
+    "level": 1,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat03",
+    "ko": "비니",
+    "en": "BEANIE",
+    "level": 5,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat04",
+    "ko": "왕관",
+    "en": "CROWN",
+    "level": 10,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat05",
+    "ko": "밀짚모자",
+    "en": "STRAW HAT",
+    "level": 20,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat06",
+    "ko": "마법사 모자",
+    "en": "WIZARD HAT",
+    "level": 30,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat07",
+    "ko": "헬멧",
+    "en": "HELMET",
+    "level": 40,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat08",
+    "ko": "고양이 귀",
+    "en": "CAT EARS",
+    "level": 50,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat09",
+    "ko": "중절모",
+    "en": "FEDORA",
+    "level": 70,
+    "gender": ""
+  },
+  {
+    "slot": "hat",
+    "id": "hat10",
+    "ko": "해적 모자",
+    "en": "PIRATE HAT",
+    "level": 90,
+    "gender": ""
+  }
+]

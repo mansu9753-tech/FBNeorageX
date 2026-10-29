@@ -359,7 +359,8 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data) {
         // → null이면 true 반환(지원 표명)만 하고 쓰지 않는다
         // → 이후 valid ptr로 다시 호출 시 실제 컨텍스트 값 기록
         if (!data) return true;
-        bool netActive = gNetplay().active();
+        static const bool kForceCtx = qEnvironmentVariableIsSet("FBNRX_SOLO_CTX");
+        bool netActive = gNetplay().active() || kForceCtx;
         int ctx = netActive
                   ? RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY
                   : RETRO_SAVESTATE_CONTEXT_NORMAL;

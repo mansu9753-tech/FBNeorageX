@@ -1,6 +1,8 @@
 // MainWindow.cpp — 메인 윈도우 (Phase 3 완전 구현)
 
 #include "MainWindow.h"
+#include <functional>
+#include <memory>
 
 #include <QProcess>
 #include <QScreen>
@@ -60,9 +62,11 @@
 #include <QTableWidget>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QClipboard>
@@ -270,6 +274,9 @@ static bool isValidRoomCode(const QString& raw) {
 
 // ── 생성자 ─────────────────────────────────────────────────
 static constexpr int kScreensaverIdleSec = 300;      // 이 시간(초) 동안 조작이 없으면 화면보호기가 켜진다
+
+// 진단용: FBNRX_TEST_WC 를 켜면 넷플레이가 아니어도 승수를 센다/보여 준다
+static const bool kTestWinCounter = qEnvironmentVariableIsSet("FBNRX_TEST_WC");
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -600,11 +607,69 @@ MainWindow::MainWindow(QWidget* parent)
     });
     m_uiNavTimer->start();
 
+    // 진단: 넷플레이 자동 시험 (FBNRX_NP_TEST=host|guest). 사람이 클릭하지 않아도 방 만들기·참가·READY·시작을 한다.
+    //   FBNRX_NP_GAME=롬 이름 (방장이 고를 게임). 가짜 입력은 FBNRX_NP_AUTO=1 (onEmuTimer 에서 사용).
+    if (qEnvironmentVariableIsSet("FBNRX_NP_TEST")) {
+        const QString role = qEnvironmentVariable("FBNRX_NP_TEST");
+        auto* t = new QTimer(this);
+        t->setInterval(700);
+        auto* step = new int(0);
+        connect(t, &QTimer::timeout, this, [this, t, role, step] {
+            ++*step;
+            if (*step == 2 && qEnvironmentVariableIsSet("FBNRX_TEST_LOGIN") && m_acct) {      // 진단: 자동 로그인(없으면 가입)
+                const QStringList idpw = qEnvironmentVariable("FBNRX_TEST_LOGIN").split(':');
+                if (idpw.size() == 2) {
+                    auto c = std::make_shared<QMetaObject::Connection>();
+                    *c = connect(m_acct, &AccountClient::authDone, this, [this, c, idpw](bool ok, const QString&) {
+                        disconnect(*c);
+                        if (!ok) m_acct->registerAccount(idpw[0], idpw[1], idpw[0]);
+                    });
+                    m_acct->login(idpw[0], idpw[1]);
+                }
+            }
+            if (role == QLatin1String("idle")) return;
+            if (role == QLatin1String("solo")) {
+                if (*step == 6) { selectGame(qEnvironmentVariable("FBNRX_NP_GAME")); launchGame(); }
+                return;
+            }
+            if (role == QLatin1String("host")) {
+                if (*step == 5) { netHost(); }
+                if (*step == 12) {
+                    const QString g = qEnvironmentVariable("FBNRX_NP_GAME");
+                    if (!g.isEmpty()) selectGame(g);
+                }
+                if (*step > 14 && m_netConnected && !m_selectedGame.isEmpty() && !gNetplay().playing()
+                        && gNetplay().netState() == NetplayManager::State::Lobby && (*step % 6) == 0) {
+                    onLobbyAction(QStringLiteral("main"), 0);
+                }
+            } else {
+                const int delay = qEnvironmentVariable("FBNRX_NP_DELAY", "6").toInt();
+                if (*step == delay) { m_net.joinCode.clear(); m_net.joinIp = QStringLiteral("127.0.0.1"); netJoin(); }
+                if (*step > 14 && m_netConnected && !m_roomGame.isEmpty() && !m_myLobbyReady && !gNetplay().playing()
+                        && gNetplay().netState() == NetplayManager::State::Lobby && (*step % 4) == 0) {
+                    onLobbyAction(QStringLiteral("main"), 0);
+                }
+            }
+            Q_UNUSED(t);
+        });
+        t->start();
+    }
+
     connect(m_core, &LibretroCore::logMessage, this, &MainWindow::log);
 
     // 넷플레이 시그널
     connect(&gNetplay(), &NetplayManager::connected,       this, &MainWindow::onNetConnected);
     connect(&gNetplay(), &NetplayManager::disconnected,    this, &MainWindow::onNetDisconnected);
+    connect(&gNetplay(), &NetplayManager::romListReceived, this, &MainWindow::onNetRomList);
+    connect(&gNetplay(), &NetplayManager::varsReceived,    this, &MainWindow::onNetVars);
+    connect(&gNetplay(), &NetplayManager::profileReceived,    this, &MainWindow::onNetProfile);
+    connect(&gNetplay(), &NetplayManager::chatReceived,       this, &MainWindow::onNetChat);
+    connect(&gNetplay(), &NetplayManager::lobbyReadyReceived, this, &MainWindow::onNetLobbyReady);
+    connect(&gNetplay(), &NetplayManager::roomInfoReceived,   this, &MainWindow::onNetRoomInfo);
+    connect(&gNetplay(), &NetplayManager::peerJoined,         this, &MainWindow::onNetPeerJoined);
+    connect(&gNetplay(), &NetplayManager::peerLeft,           this, &MainWindow::onNetPeerLeft);
+    connect(&gNetplay(), &NetplayManager::seatsReceived,      this, &MainWindow::onNetSeats);
+    connect(&gNetplay(), &NetplayManager::seatModeReceived,   this, &MainWindow::onNetSeatMode);
     connect(&gNetplay(), &NetplayManager::error,           this, &MainWindow::onNetError);
     connect(&gNetplay(), &NetplayManager::stateChanged,    this, &MainWindow::onNetStateChanged);
     connect(&gNetplay(), &NetplayManager::loadGameReceived,
@@ -881,7 +946,8 @@ void MainWindow::buildShell() {
     }
 
     connect(m_shell, &NeoRageXShell::launchRequested, this,
-            [this](const QString&) { launchGame(); });
+            [this](const QString&) { if (m_pickingRoom) hostPickDone(); else launchGame(); });
+    connect(m_shell, &NeoRageXShell::pickCancelled, this, [this] { hostPickCancel(); });
 
     connect(m_shell, &NeoRageXShell::importRequested, this, [this] {
         log(QStringLiteral("ROM 폴더를 다시 읽습니다..."));
@@ -924,6 +990,9 @@ void MainWindow::buildShell() {
             [pick](const QString&, int i) { pick(i); });
 
     // 즐겨찾기 토글 (목록에서 Space)
+    connect(m_shell, &NeoRageXShell::lobbyAction, this, &MainWindow::onLobbyAction);
+    connect(m_shell, &NeoRageXShell::lobbyChatSend, this, &MainWindow::lobbySendChat);
+
     connect(m_shell, &NeoRageXShell::favoriteToggled, this, [this](int index) {
         if (index < 0 || index >= m_rows.size()) return;
         toggleFavorite(m_rows.at(index).rom);
@@ -953,8 +1022,10 @@ void MainWindow::syncShellFilters() {
          << Tab{ QStringLiteral("nofav"), QStringLiteral("NOFAV") };
 
     QHash<QString, int> hwCount;
-    for (const auto& pair : m_allRoms)
+    for (const auto& pair : m_allRoms) {
+        if (m_peerRomsKnown && !m_peerRoms.contains(pair.second)) continue;   // 넷플레이: 상대에게 없는 게임은 세지 않는다
         ++hwCount[gameHardwareGroup(gameHardwareOf(pair.second))];
+    }
     for (const auto& d : gameHardwareList()) {
         const QString id = QString::fromLatin1(d.id);
         if (hwCount.value(id, 0) <= 0) continue;
@@ -1094,6 +1165,19 @@ void MainWindow::buildShellMenu() {
     {
         NetApi& n = h.net;
         n.state       = [this]() { return netState(); };
+        n.profile     = [this]() { return netProfileView(); };
+        n.rooms       = [this]() { return netRoomRows(); };
+        n.refreshRooms = [this]() { m_roomsStamp = 0; if (m_acct) m_acct->fetchRooms(); };
+        n.joinRoom    = [this](const QString& c) { joinListedRoom(c); };
+        n.auth        = [this]() { return netAuthView(); };
+        n.authEdit    = [this](const QString& f) { authEdit(f); };
+        n.authGender  = [this](int d) { authGender(d); };
+        n.authSubmit  = [this]() { authSubmit(); };
+        n.authMode    = [this](bool b) { authMode(b); };
+        n.hostPick    = [this]() { hostPick(); };
+        n.logout      = [this]() { if (m_acct) m_acct->logout(); m_auth = AuthForm(); m_rooms.clear(); log(isEn() ? "Logged out" : "로그아웃했습니다"); refreshNetUi(); updateSideCard(); };
+        n.editNick    = [this]() { onLobbyAction(QStringLiteral("nick"), 0); };
+        n.cyclePart   = [this](const QString& slot, int d) { cycleAvatarPart(slot, d); };
         n.host        = [this]() { netHost(); };
         n.join        = [this]() { netJoin(); };
         n.start       = [this]() { netplayStartGame(); };
@@ -1117,7 +1201,33 @@ void MainWindow::buildShellMenu() {
         v.clearBezel      = [this](const QString& k) { clearBezelAssign(k); };
     }
 
+    avatar::loadCatalog(QCoreApplication::applicationDirPath());
+    m_acct = new AccountClient(this);
+    connect(m_acct, &AccountClient::profileChanged, this, &MainWindow::onAccountChanged);
+    connect(m_acct, &AccountClient::userLooked, this, &MainWindow::onPeerLookup);
+    QTimer::singleShot(1500, this, [this] { m_acct->restore(); });
+    connect(m_acct, &AccountClient::roomsFetched, this, [this](bool ok, const QVector<AccountClient::RoomInfo>& r) {
+        if (ok) { m_rooms = r; }
+        m_roomsStamp = QDateTime::currentMSecsSinceEpoch();
+        if (m_shell && m_shell->openCategoryId() == QLatin1String("netplay") && !m_net.canDisc) m_menu->refreshOpen();
+    });
+    m_roomTimer = new QTimer(this);
+    m_roomTimer->setInterval(5000);
+    connect(m_roomTimer, &QTimer::timeout, this, [this] {
+        if (m_acct && m_acct->loggedIn() && m_shell && m_shell->openCategoryId() == QLatin1String("netplay") && !m_net.canDisc)
+            m_acct->fetchRooms();                                 // 로비가 열려 있는 동안 5초마다 방 목록을 새로 받는다
+        publishRoom();                                            // 내가 방장이면 방 정보를 갱신한다 (서버에서 45초 안에 갱신이 없으면 사라진다)
+    });
+    m_roomTimer->start();
     m_netDelay = gSettings.netplayInputDelay;
+    if (gSettings.netId.isEmpty()) {                       // 아이디: 처음 한 번만 만든다 (헷갈리는 글자 I, O, 0, 1 제외)
+        static const char kChars[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        QString id;
+        for (int i = 0; i < 6; ++i) id += QLatin1Char(kChars[QRandomGenerator::global()->bounded(int(sizeof(kChars) - 1))]);
+        gSettings.netId = id;
+        if (gSettings.netNick.isEmpty()) gSettings.netNick = QStringLiteral("Player") + id.right(3);
+        gSettings.save();
+    }
     fetchPublicIp();
 
     m_menu = new ShellMenu(m_shell, this);
@@ -1130,7 +1240,7 @@ void MainWindow::buildShellMenu() {
     m_menu->addPage(makeMachinePage(h),                        "MACHINE SETTINGS");
     m_menu->addPage(makeShotsPage(h),                          "SHOTS FACTORY");
     m_menu->addPage(makeCheatsPage(h),                         "CHEATS");
-    m_menu->addPage(makeNetplayPage(h),                        "MULTIPLAYER");
+    m_menu->addPage(makeNetplayPage(h),                        "MULTIPLAYER (UNDER CONSTRUCTION)");
     m_menu->addPage(makeSystemPage(h),                         "SYSTEM");
     m_menu->setKoreanProvider([]() { return !isEn(); });
     m_menu->install();
@@ -1523,6 +1633,8 @@ void MainWindow::applyResolvedSoundMode() {
 // ════════════════════════════════════════════════════════════
 void MainWindow::refreshNetUi() {
     if (m_menu) m_menu->refreshOpen();
+    pushLobby();
+    updateSideCard();
 }
 
 NetState MainWindow::netState() const {
@@ -1570,11 +1682,20 @@ void MainWindow::fetchPublicIp() {
 }
 
 void MainWindow::netHost() {
+    if (m_acct && !m_acct->loggedIn()) {                                   // 로그인이 먼저
+        log(isEn() ? "🌐 Log in first" : "🌐 먼저 로그인하세요");
+        return;
+    }
+    m_netIsHost = true;
+    m_roomPublished = false;
+    m_probedClients.clear();
+    resetLobby();
                 // 중복 클릭 방지 (룸코드 갱신되어 매칭 깨지는 문제 차단)
             // 재시도하려면 DISCONNECT 후 다시 HOST GAME.
             m_net.canHost = false;
             m_net.canJoin = false;
             m_net.canDisc = true;
+            refreshNetUi();
             // 버튼 비활성화 시 포커스가 Relay URL 로 튀는 것 방지
 
             int port  = gSettings.netplayPort;
@@ -1590,6 +1711,8 @@ void MainWindow::netHost() {
             // 2. 토큰 룸 코드 생성 (워커가 토큰→IP:Port 매핑 관리)
             QString code = generateRoomCode();
             m_net.roomCode = code;
+            refreshNetUi();
+            QTimer::singleShot(300, this, [this] { publishRoom(); });
             log("🎫 룸 코드: " + code + "  (상대에게 공유하세요)");
             log(QString("포트 %1 대기 중 (딜레이 %2f)").arg(port).arg(delay));
 
@@ -1603,14 +1726,14 @@ void MainWindow::netHost() {
             connect(&gNetplay(), &NetplayManager::externalAddressDiscovered, this,
                 [this, code](const QString& extIp, int extPort){
                     log(QString("✓ STUN: 내 외부 주소 %1:%2").arg(extIp).arg(extPort));
-                    if (gSettings.netplayRelayUrl.isEmpty()) {
+                    if (gSettings.relayBase().isEmpty()) {
                         log("⚠ 릴레이 URL 미설정 — 직접 IP 접속만 가능");
                         return;
                     }
                     // 소켓 read 핸들러 재진입 방지 — 다음 이벤트 루프로 지연
                     QTimer::singleShot(0, this, [this, code, extIp, extPort]{
                         relayRegister(code, "host", extIp, extPort);
-                        relayPollPeer(code, "host");
+                        relayPollClients(code);
                     });
                 }, Qt::SingleShotConnection);
 
@@ -1618,10 +1741,10 @@ void MainWindow::netHost() {
                 [this, code, port](const QString& reason){
                     log("⚠ STUN 실패(" + reason + ") → ipify 폴백");
                     QString ip = m_publicIp.isEmpty() ? gNetplay().localIp() : m_publicIp;
-                    if (gSettings.netplayRelayUrl.isEmpty()) return;
+                    if (gSettings.relayBase().isEmpty()) return;
                     QTimer::singleShot(0, this, [this, code, ip, port]{
                         relayRegister(code, "host", ip, port);
-                        relayPollPeer(code, "host");
+                        relayPollClients(code);
                     });
                 }, Qt::SingleShotConnection);
 
@@ -1645,10 +1768,16 @@ void MainWindow::netHost() {
 }
 
 void MainWindow::netJoin() {
+    if (m_relayKey.isEmpty() || true) {
+        m_relayKey = QString::number(QRandomGenerator::global()->generate64(), 16);
+    }
+    m_netIsHost = false;
+    resetLobby();
                 // 중복 클릭 방지 (재시도는 DISCONNECT 후 다시 JOIN GAME)
             m_net.canJoin = false;
             m_net.canHost = false;
             m_net.canDisc = true;
+            refreshNetUi();
             // 버튼 비활성화 시 Qt 가 포커스를 다음 위젯(Relay URL)으로 옮기는 것 방지
 
 
@@ -1659,6 +1788,13 @@ void MainWindow::netJoin() {
 
             // ── 직접 IP 입력 모드 (룸 코드 비어있음) ──
             // 동일 LAN 테스트 / 포트포워딩 직결 환경용. 릴레이/STUN 미사용.
+            static const QRegularExpression kIpRe(QStringLiteral("^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$"));
+            const QRegularExpressionMatch ipm = kIpRe.match(rawCode);
+            if (ipm.hasMatch()) {          // 입장 코드 칸에 IP(:포트)를 적으면 직접 연결 (같은 공유기·포트포워딩용)
+                m_net.joinIp = ipm.captured(1);
+                if (!ipm.captured(2).isEmpty()) gSettings.netplayPort = ipm.captured(2).toInt();
+                code.clear();
+            }
             if (code.isEmpty()) {
                 QString ip = m_net.joinIp.trimmed();
                 int port   = gSettings.netplayPort;
@@ -1673,7 +1809,7 @@ void MainWindow::netJoin() {
                 log("❌ 잘못된 룸 코드 (6자 영숫자)");
                 return;
             }
-            if (gSettings.netplayRelayUrl.isEmpty()) {
+            if (gSettings.relayBase().isEmpty()) {
                 log("❌ 릴레이 URL 미설정 — Relay URL 항목을 입력하세요");
                 return;
             }
@@ -1728,6 +1864,11 @@ void MainWindow::netDisconnect() {
             cleanupNetplay();               // 릴레이 폴링·게임 상태 완전 정리
             gNetplay().shutdown();          // 소켓 완전 종료
             m_relayPeerHandled = false;     // 다음 연결을 위해 피어 플래그 리셋
+            if (m_netIsHost && m_roomPublished && m_acct && m_acct->loggedIn() && !m_net.roomCode.isEmpty())
+                m_acct->closeRoom(m_net.roomCode);                  // 로비 목록에서 내린다
+            m_roomPublished = false;
+            ++m_hostPollGen;
+            m_probedClients.clear();
             m_net.roomCode.clear();
             m_net.rtt.clear();
             // 상태 라벨도 OFFLINE 으로 되돌린다 (안 하면 'CONNECTED' 로 남음)
@@ -1738,6 +1879,9 @@ void MainWindow::netDisconnect() {
             m_net.canStart = false;
             m_net.canDisc = false;
             log("✖ 연결 해제됨");
+            m_netConnected = false;
+            resetLobby();
+            pushLobby();
         
 }
 
@@ -1808,6 +1952,9 @@ void MainWindow::filterRoms() {
         if (m_glFilter != 1 && !m_hwFilter.isEmpty()
             && gameHardwareGroup(gameHardwareOf(rom)) != m_hwFilter) continue;
 
+        // ── 넷플레이: 상대도 가진 게임만 ────────────────
+        if (m_peerRomsKnown && !m_peerRoms.contains(rom)) continue;
+
         // ── 검색어 필터 (게임 이름 또는 롬 이름에 포함) ──
         if (!q.isEmpty() && !disp.toLower().contains(q) && !rom.toLower().contains(q)) continue;
 
@@ -1848,6 +1995,7 @@ void MainWindow::selectGame(const QString& romName) {
     applyBezel();            // 선택 게임에 맞는 베젤로 갱신
 
     loadPreview(romName);
+    lobbyRoomChanged();      // 방장이 방에서 게임을 바꿨다면 참가자에게 알리고 레디를 푼다
 }
 
 void MainWindow::loadPreview(const QString& romName) {
@@ -1979,6 +2127,24 @@ bool MainWindow::loadRomInternal() {
         for (auto it = gameVars.begin(); it != gameVars.end(); ++it)
             gState.variables[it.key()] = it.value();   // 게임별이 기종별을 덮어씀
     }
+    // 넷플레이 조인: 호스트의 머신 세팅(딥스위치·BIOS·CPU 속도 등)이 내 설정보다 우선한다.
+    //   두 PC 의 게임 설정이 다르면 같은 입력이라도 결과가 달라져 어긋나기 때문이다. (내 저장값은 건드리지 않는다)
+    if (gNetplay().active() && !gNetplay().isHost() && m_npHostVarsReady) {
+        int changed = 0;
+        QStringList diffs;
+        for (auto it = m_npHostVars.constBegin(); it != m_npHostVars.constEnd(); ++it) {
+            const QString mine = gState.variables.value(it.key());
+            if (!mine.isEmpty() && mine != it.value()) {
+                ++changed;
+                if (diffs.size() < 4) diffs << QString("%1: %2 → %3").arg(it.key().section('-', -1)).arg(mine, it.value());
+            }
+            gState.variables[it.key()] = it.value();
+        }
+        log(isEn() ? QString("🌐 Applied the host's machine settings (%1 items, %2 differed)").arg(m_npHostVars.size()).arg(changed)
+                   : QString("🌐 호스트의 머신 세팅 적용 (%1개 항목, 내 설정과 다른 것 %2개)").arg(m_npHostVars.size()).arg(changed));
+        if (!diffs.isEmpty()) log("   " + diffs.join(" / "));
+        m_npHostVarsReady = false;
+    }
 
     // 컨트롤 매핑 해석·적용 (게임별 > 기종별 > 전역 > 기본)
     resolveAndApplyControls(m_selectedGame);
@@ -2011,7 +2177,7 @@ bool MainWindow::loadRomInternal() {
 void MainWindow::startEmu() {
     qDebug("[emu] startEmu() gameLoaded=%d npPlaying=%d",
            gState.gameLoaded ? 1 : 0, gNetplay().playing() ? 1 : 0);
-    m_npStates.clear();
+    m_npStates.clear(); m_npRamCrc.clear();
     m_npInputHistory.clear();
     m_frameDelay     = 0.0;
     m_pendingResimTo = -1;
@@ -2115,6 +2281,7 @@ void MainWindow::launchGame() {
 
     if (loadRomInternal()) {
         m_loadedGame = m_selectedGame;  // 로드된 게임 이름 기록
+        if (kTestWinCounter) { m_wc.setGame(m_selectedGame); m_wcHist.clear(); }   // 진단용: 혼자 하는 판에서도 승수 집계
         // 코어의 실제 샘플레이트로 오디오 재초기화 (끊김 방지)
         int sr = static_cast<int>(gState.coreSampleRate > 8000 ? gState.coreSampleRate : 44100);
         qDebug().noquote() << QString("[audio] %1 Hz, %2 ms").arg(sr).arg(gSettings.audioBufferMs);
@@ -2250,22 +2417,102 @@ void MainWindow::toggleFastForward(bool on) {
     gState.fastForward = on;
 }
 
+// 벨트스크롤 액션 넷플레이가 끝날 때: 1P / 2P 최고 점수를 scores/<롬>.csv 에 한 줄 남긴다.
+//   파일: 날짜,롬,1P 점수,2P 점수  (이전 기록과 비교해 최고 기록이면 알려 준다)
+void MainWindow::recordScores() {
+    if (m_wc.mode() != WinCounter::Mode::Score) return;
+    const int s1 = m_wc.maxScore1(), s2 = m_wc.maxScore2();
+    if (s1 <= 0 && s2 <= 0) return;
+    const QString dir = gSettings.savePath + "/scores";
+    QDir().mkpath(dir);
+    const QString path = dir + "/" + m_selectedGame + ".csv";
+    int best1 = 0, best2 = 0;
+    {
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            const QStringList rows = QString::fromUtf8(f.readAll()).split(QLatin1Char(10), Qt::SkipEmptyParts);
+            for (const QString& r : rows) {
+                const QStringList c = r.trimmed().split(QLatin1Char(','));
+                if (c.size() >= 4) { best1 = qMax(best1, c[2].toInt()); best2 = qMax(best2, c[3].toInt()); }
+            }
+        }
+    }
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        f.write(QString("%1,%2,%3,%4").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+                                           m_selectedGame).arg(s1).arg(s2).toUtf8() + QByteArray(1, 10));
+    }
+    const QLocale en(QLocale::English);
+    QString msg = isEn() ? QString("🏆 Score saved: 1P %1 / 2P %2").arg(en.toString(s1), en.toString(s2))
+                         : QString("🏆 점수 기록: 1P %1 / 2P %2").arg(en.toString(s1), en.toString(s2));
+    if (s1 > best1 && s1 > 0) msg += isEn() ? "  (1P new best!)" : "  (1P 최고 기록!)";
+    if (s2 > best2 && s2 > 0) msg += isEn() ? "  (2P new best!)" : "  (2P 최고 기록!)";
+    log(msg);
+    m_wc.setGame(m_selectedGame);   // 같은 판을 두 번 기록하지 않도록 점수를 비운다
+}
+
+// 프레임 하나를 실행한 직후: 게임 RAM 의 "쓰러진 캐릭터 수" 카운터로 세트 승수를 센다
+void MainWindow::wcAfterRun() {
+    if (!m_wc.active() || !m_core || !gSettings.winCounter) return;
+    const bool decided = m_wc.update(static_cast<const uint8_t*>(m_core->getMemoryData(RETRO_MEMORY_SYSTEM_RAM)),
+                                     m_core->getMemorySize(RETRO_MEMORY_SYSTEM_RAM));
+    // 세트가 끝났다 → 롤백으로 번복될 수 있으니 3초 뒤에 확정된 승수로 서버에 보고한다
+    if (decided && m_wc.mode() == WinCounter::Mode::Fight && gNetplay().playing() && !m_expTimerOn) {
+        m_expTimerOn = true;
+        QTimer::singleShot(3000, this, [this] { m_expTimerOn = false; checkExpReport(); });
+    }
+}
+
+// 세트 승리 → 경험치. 양쪽이 같은 결과를 보고해야 서버가 인정한다 (KOF 대전 게임만, 로그인한 두 사람 사이에서만).
+void MainWindow::checkExpReport() {
+    if (!gNetplay().playing() || !m_acct || !m_acct->loggedIn()) return;
+    const int d1 = m_wc.wins1() - m_expRep1, d2 = m_wc.wins2() - m_expRep2;
+    m_expRep1 = m_wc.wins1(); m_expRep2 = m_wc.wins2();
+    if (!((d1 == 1 && d2 == 0) || (d1 == 0 && d2 == 1))) return;       // 애매하면 기록만 맞추고 넘어간다
+    int portSeat[2] = { -1, -1 }, port = 0;
+    for (int seat = 0; seat < 3 && port < 2; ++seat)
+        if ((m_npPlayerMask >> seat) & 1) portSeat[port++] = seat;
+    if (portSeat[1] < 0) return;
+    const Seat& s1 = m_seats[portSeat[0]];
+    const Seat& s2 = m_seats[portSeat[1]];
+    const QString myId = myProfile().id;
+    auto idOf = [&](int seat) { return seat == m_mySeat ? myId : (m_seats[seat].verified && !m_seats[seat].guest ? m_seats[seat].id : QString()); };
+    const QString id1 = idOf(portSeat[0]), id2 = idOf(portSeat[1]);
+    Q_UNUSED(s1); Q_UNUSED(s2);
+    if (id1.isEmpty() || id2.isEmpty() || id1.compare(id2, Qt::CaseInsensitive) == 0) return;
+    const QString code = m_netIsHost ? m_net.roomCode : m_roomCodeShared;
+    if (code.size() < 4) return;                                       // 직접 IP 로 들어온 방은 보고하지 않는다
+    const bool p1Won = (d1 == 1);
+    m_acct->reportResult(code, m_wc.wins1() + m_wc.wins2(), m_selectedGame, p1Won ? id1 : id2, p1Won ? id2 : id1);
+}
+
 // ════════════════════════════════════════════════════════════
 //  넷플레이 입력 합성 헬퍼
 //  호스트: lb=P1(로컬), rb=P2(원격)
 //  클라이언트: lb=P2(로컬), rb=P1(원격)
 // ════════════════════════════════════════════════════════════
-void MainWindow::npApplyInput(uint16_t lb, uint16_t rb) {
-    if (gNetplay().isHost()) {
-        for (int i = 0; i < 16; ++i) {
-            gState.keys[i]   = (lb >> i) & 1;
-            gState.p2Keys[i] = (rb >> i) & 1;
-        }
-    } else {
-        for (int i = 0; i < 16; ++i) {
-            gState.keys[i]   = (rb >> i) & 1;
-            gState.p2Keys[i] = (lb >> i) & 1;
-        }
+// 입력 합성: 플레이어인 자리를 번호 순서대로 포트 0, 1, 2 에 꽂는다 (방장이 항상 1P).
+//   관전 자리는 포트가 없다. 예) 방장 + 3번 자리만 플레이 → 방장 1P, 3번 자리 2P.
+void MainWindow::npApplyInputs(const NpInputState& is) {
+    std::array<int,16>* ports[3] = { &gState.keys, &gState.p2Keys, &gState.p3Keys };
+    for (auto* pk : ports) pk->fill(0);
+    int port = 0;
+    for (int seat = 0; seat < 3 && port < 3; ++seat) {
+        if (!((m_npPlayerMask >> seat) & 1)) continue;
+        const uint16_t b = is.bits[seat];
+        for (int i = 0; i < 16; ++i) (*ports[port])[i] = (b >> i) & 1;
+        ++port;
+    }
+}
+
+// 나 말고 플레이하는 자리들의 입력을 모은다 (아직 안 온 것은 직전 값으로 예측)
+void MainWindow::npFillRemote(NpInputState& is, uint32_t frame) {
+    for (int seat = 0; seat < 3; ++seat) {
+        if (seat == m_mySeat) continue;
+        if (!((m_npPlayerMask >> seat) & 1)) { is.bits[seat] = 0; continue; }
+        const uint16_t b = static_cast<uint16_t>(gNetplay().getRemoteInput(frame, seat));
+        is.bits[seat] = b;
+        gNetplay().recordPrediction(frame, seat, b);
     }
 }
 
@@ -2307,6 +2554,10 @@ void MainWindow::onEmuTimer() {
         double targetMs = std::clamp(baseMs + m_frameDelay,
                                      baseMs * 0.70, baseMs * 1.30);
 
+        {   // 진단: 앱 단독 시험에서 한쪽만 속도를 바꿔 본다
+            static const double kSpd = qEnvironmentVariable("FBNRX_SOLO_SPEED", "1").toDouble();
+            targetMs *= kSpd;
+        }
         double elapsedMs = m_aflClock.nsecsElapsed() / 1.0e6;
         m_aflClock.start();
         m_frameAccum += elapsedMs;
@@ -2370,6 +2621,11 @@ void MainWindow::onEmuTimer() {
 
                 m_core->unserialize(syncData.constData(),
                                     static_cast<size_t>(syncData.size()));
+                m_wcHist.clear();
+                if (m_wc.active()) {
+                    m_wc.resync(static_cast<const uint8_t*>(m_core->getMemoryData(RETRO_MEMORY_SYSTEM_RAM)),
+                                m_core->getMemorySize(RETRO_MEMORY_SYSTEM_RAM));
+                }
                 gState.frameCount = sf;
                 gNetplay().confirmFramesUpTo(static_cast<uint32_t>(sf));
 
@@ -2380,7 +2636,7 @@ void MainWindow::onEmuTimer() {
                 m_lastChecksumFrame = 0;
 
                 // 동기화 이전 스냅샷/입력은 호스트 state 와 호환 불가 → 전부 삭제
-                m_npStates.clear();
+                m_npStates.clear(); m_npRamCrc.clear();
                 m_npInputHistory.clear();
 
                 // 격차에 따라 따라잡기 방법 결정.
@@ -2409,19 +2665,18 @@ void MainWindow::onEmuTimer() {
             int chunkEnd = std::min(cur + MAX_RESIM_PER_TICK, m_pendingResimTo);
             for (int rf = cur; rf < chunkEnd; ++rf) {
                 NpInputState& is = m_npInputHistory[rf];
-                uint16_t lb = is.local;
-                uint16_t rb = static_cast<uint16_t>(
-                    gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
-                is.remote = rb;
-                gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
-                npApplyInput(lb, rb);
+                npFillRemote(is, static_cast<uint32_t>(rf));
+                npApplyInputs(is);
+                m_wcHist[rf] = m_wc.state();
                 m_core->run();
+                wcAfterRun();
                 gState.frameCount = rf + 1;
                 size_t sz = m_core->serializeSize();
                 if (sz > 0) {
                     QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
                     if (m_core->serialize(buf.data(), sz))
                         m_npStates[rf + 1] = buf;
+                        m_npRamCrc[rf + 1] = ramCrc();
                 }
             }
             if (gState.frameCount >= m_pendingResimTo) {
@@ -2468,23 +2723,40 @@ void MainWindow::onEmuTimer() {
                     || static_cast<size_t>(rbState.size()) != expectedSz) {
                 log(QString("⚠ 롤백 크기 불일치 — 건너뜀 (frame=%1 size=%2 expected=%3)")
                     .arg(rollbackTo).arg(rbState.size()).arg(expectedSz));
-                m_npStates.clear();   // 불량 상태 전체 제거
+                m_npStates.clear(); m_npRamCrc.clear();   // 불량 상태 전체 제거
             } else {
                 gState.netplayResim = true;
                 m_core->unserialize(rbState.constData(), rbState.size());
+                if (m_wcHist.contains(rollbackTo)) m_wc.setState(m_wcHist.value(rollbackTo));
                 gState.frameCount = rollbackTo;
 
                 for (int rf = rollbackTo; rf < cur; ++rf) {
                     NpInputState& is = m_npInputHistory[rf];
-                    uint16_t lb = is.local;
-                    uint16_t rb = static_cast<uint16_t>(
-                        gNetplay().getRemoteInput(static_cast<uint32_t>(rf)));
-                    is.remote = rb;
                     // 재시뮬 확정값으로 예측 덮어씀 → 무한 롤백 루프 차단
-                    gNetplay().recordPrediction(static_cast<uint32_t>(rf), rb);
-                    npApplyInput(lb, rb);
+                    npFillRemote(is, static_cast<uint32_t>(rf));
+                    npApplyInputs(is);
+                    {
+                        static const bool kDbgY = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+                        if (kDbgY && rf >= 1050 && rf <= 1075) qDebug("[NPREX] f=%d bits=%04x/%04x/%04x (rollback to %d)", rf, is.bits[0], is.bits[1], is.bits[2], rollbackTo);
+                    }
+                    m_wcHist[rf] = m_wc.state();
                     m_core->run();
+                    wcAfterRun();
                     gState.frameCount = rf + 1;
+                    // 다시 계산한 프레임의 스냅샷을 새 값으로 바꿔 둔다. (옛 예측으로 만든 낡은 스냅샷이 남아 있으면
+                    //   나중에 체크섬을 비교할 때 서로 다른 값이 나와 가짜 desync 가 계속 난다 — 3인 방에서 특히 심했다)
+                    if (rf + 1 < cur) {
+                        const size_t rsz = m_core->serializeSize();
+                        if (rsz > 0) {
+                            QByteArray rbuf(static_cast<int>(rsz), Qt::Uninitialized);
+                            if (m_core->serialize(rbuf.data(), rsz)) {
+                                m_npStates[rf + 1] = rbuf;
+                                m_npRamCrc[rf + 1] = ramCrc();
+                                static const bool kDbgR = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+                                if (kDbgR && rf + 1 >= 1040 && rf + 1 <= 1200) qDebug("[NPCRC2] f=%d crc=%08x", rf + 1, npChecksum(rbuf));
+                            }
+                        }
+                    }
                 }
                 gState.netplayResim = false;
             }  // else (크기 정상)
@@ -2500,6 +2772,15 @@ void MainWindow::onEmuTimer() {
                 QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
                 if (m_core->serialize(buf.data(), sz)) {
                     m_npStates[cur] = buf;
+                    m_npRamCrc[cur] = ramCrc();
+                    {
+                        static const bool kDbgC = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+                        if (kDbgC && cur >= 0 && cur <= 80) qDebug("[NPCRC] f=%d crc=%08x", cur, npChecksum(buf));
+                        if (kDbgC && cur >= 0 && cur <= 40) {
+                            QFile df(QStringLiteral("C:/Temp/npdump_seat%1_f%2.bin").arg(m_mySeat).arg(cur));
+                            if (df.open(QIODevice::WriteOnly)) { df.write(buf); df.close(); }
+                        }
+                    }
 
                     // ── 체크섬 교환 (desync 감지) ──────────────────
                     // 확정 프레임(양쪽 입력 final, 더 이상 롤백 안 됨)에서만 계산.
@@ -2511,8 +2792,18 @@ void MainWindow::onEmuTimer() {
                             && (confirmed % NetplayManager::CHECKSUM_INTERVAL) == 0
                             && confirmed > m_lastChecksumFrame
                             && m_npStates.contains(static_cast<int>(confirmed))) {
-                        const QByteArray& cs = m_npStates[static_cast<int>(confirmed)];
-                        uint32_t crc = npChecksum(cs);
+                        {   // 진단: 확정 프레임 근처에 실제로 적용한 입력을 남긴다 (FBNRX_NP_DEBUG)
+                            static const bool kDbg = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+                            if (kDbg) {
+                                for (int df = 2; df >= 0; --df) {
+                                    auto it = m_npInputHistory.find(static_cast<int>(confirmed) - df);
+                                    if (it != m_npInputHistory.end())
+                                        qDebug("[NPDBG] f=%d bits=%04x/%04x/%04x", (int)confirmed - df,
+                                               it->second.bits[0], it->second.bits[1], it->second.bits[2]);
+                                }
+                            }
+                        }
+                        uint32_t crc = m_npRamCrc.value(static_cast<int>(confirmed), 0);
                         m_localChecksums[confirmed] = crc;
                         gNetplay().sendChecksum(confirmed, crc);
                         m_lastChecksumFrame = confirmed;
@@ -2530,6 +2821,31 @@ void MainWindow::onEmuTimer() {
         for (int i = 0; i < 16; ++i)
             if (gState.rawKeys[i]) rawBits |= (1 << i);
 
+        // 진단: FBNRX_NP_AUTO 가 켜져 있으면 키보드 대신 정해진 규칙의 가짜 입력을 낸다 (자리마다 다른 패턴)
+        static const bool kNpAuto = qEnvironmentVariableIsSet("FBNRX_NP_AUTO");
+        if (kNpAuto) {
+            static const uint32_t kOff = qEnvironmentVariable("FBNRX_NP_OFFSET", "0").toUInt();
+            const uint32_t f = (static_cast<uint32_t>(cur) >= kOff) ? static_cast<uint32_t>(cur) - kOff : 0;
+            const uint32_t seat = static_cast<uint32_t>(m_mySeat);
+            rawBits = 0;
+            if (qEnvironmentVariable("FBNRX_NP_AUTO") == QLatin1String("pulse")) {     // 키보드처럼 짧은 코인 펄스만
+                if (seat == 0 && ((f >= 1058 && f < 1061) || (f >= 1090 && f < 1093))) rawBits |= (1 << 2);
+                if (seat == 1 && ((f >= 1108 && f < 1112) || (f >= 1158 && f < 1163))) rawBits |= (1 << 2);
+            } else {
+            if (f >= 60 + seat * 7  && f < 66 + seat * 7)  rawBits |= (1 << 2);    // 코인
+            if (f >= 120 + seat * 7 && f < 126 + seat * 7) rawBits |= (1 << 3);    // 스타트
+            if (f >= 200 && f < 900 && ((f / 25) % 2) == 0) rawBits |= (1 << 0);   // 캐릭터 선택 확정(A 반복)
+            if (f >= 900) {
+                uint32_t h = (f / 17) * 2654435761u + seat * 40503u;
+                h ^= h >> 13;
+                const int dir = h % 5;                                               // 0 없음 1 위 2 아래 3 왼쪽 4 오른쪽
+                if (dir == 1) rawBits |= (1 << 4); else if (dir == 2) rawBits |= (1 << 5);
+                else if (dir == 3) rawBits |= (1 << 6); else if (dir == 4) rawBits |= (1 << 7);
+                if (((f / 5) + seat) % 3 == 0) rawBits |= (1 << 0);                  // 공격
+                if (((f / 41) + seat) % 4 == 0) rawBits |= (1 << 8);                 // 점프
+            }
+            }
+        }
         // ── 입력 지연 큐 (Fightcade-style delay-based netcode) ──
         // rawBits를 (cur + delay) 프레임에 예약, cur 프레임은 큐에서 꺼냄
         // delay=0이면 즉시 전송 (롤백 전용)
@@ -2545,19 +2861,30 @@ void MainWindow::onEmuTimer() {
             }
         }
 
-        gNetplay().sendInput(static_cast<uint32_t>(cur), localBits);
+        // ── 입력 지연 큐 (Fightcade-style delay-based netcode) ──
+        const bool iPlay = (m_npPlayerMask >> m_mySeat) & 1;
+        {
+            static const bool kDbgS = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+            static uint16_t sPrev = 0;
+            if (kDbgS && localBits != sPrev) { qDebug("[NPSEND] f=%d seat=%d bits=%04x raw=%04x", cur, m_mySeat, localBits, rawBits); sPrev = localBits; }
+        }
+        if (iPlay) gNetplay().sendInput(static_cast<uint32_t>(cur), localBits);
 
-        // 입력 히스토리: local + remote 동시 보관 (재시뮬 시 사용)
+        // 입력 히스토리: 자리별 입력을 함께 보관 (재시뮬 시 사용)
         NpInputState& his = m_npInputHistory[cur];
-        his.local  = localBits;
-        uint16_t remoteBits = static_cast<uint16_t>(
-            gNetplay().getRemoteInput(static_cast<uint32_t>(cur)));
-        his.remote = remoteBits;
-        gNetplay().recordPrediction(static_cast<uint32_t>(cur), remoteBits);
+        his.bits[m_mySeat] = iPlay ? localBits : 0;
+        npFillRemote(his, static_cast<uint32_t>(cur));
 
         // ── ⑥ 프레임 실행 ──────────────────────────────────────
-        npApplyInput(localBits, remoteBits);
+        npApplyInputs(his);
+        {
+            static const bool kDbgX = qEnvironmentVariableIsSet("FBNRX_NP_DEBUG");
+            if (kDbgX && cur >= 1050 && cur <= 1075)
+                qDebug("[NPEXEC] f=%d bits=%04x/%04x/%04x remoteMax=%u", cur, his.bits[0], his.bits[1], his.bits[2], gNetplay().remoteMaxFrame());
+        }
+        m_wcHist[cur] = m_wc.state();
         m_core->run();
+        wcAfterRun();
         gState.frameCount++;
 
         // ── ⑦ 오래된 버퍼 정리 ─────────────────────────────────
@@ -2565,11 +2892,17 @@ void MainWindow::onEmuTimer() {
         int cutoff = cur - NetplayManager::MAX_ROLLBACK - 2;
         for (auto it = m_npStates.begin(); it != m_npStates.end(); )
             it = (it.key() < cutoff) ? m_npStates.erase(it) : ++it;
+        for (auto it = m_npRamCrc.begin(); it != m_npRamCrc.end(); )
+            it = (it.key() < cutoff) ? m_npRamCrc.erase(it) : ++it;
         while (!m_npInputHistory.empty() &&
                m_npInputHistory.begin()->first < cutoff)
             m_npInputHistory.erase(m_npInputHistory.begin());
+        while (!m_wcHist.isEmpty() && m_wcHist.firstKey() < cutoff)
+            m_wcHist.erase(m_wcHist.begin());
 
     } else {
+        if (m_npStarted)    // 진단: 넷플레이가 시작됐는데 싱글 경로를 타면 입력이 어긋난다
+            qDebug("[NP] WARN 싱글플레이 경로 실행 (넷 상태=%d, frame=%d)", (int)gNetplay().netState(), gState.frameCount);
         // ── 싱글 플레이어 ─────────────────────────────────
         // 터보 처리: 활성 버튼을 turboPeriod 주기로 ON/OFF
         gState.turboFrame++;
@@ -2618,8 +2951,29 @@ void MainWindow::onEmuTimer() {
         // → CPS 등 다른 시스템은 위의 L2(index 12) 차단으로 처리됨.
         m_startHoldFrames = 0;  // 사용 안 함 (변수 유지, 향후 확장용)
 
+        {   // 진단: 앱 단독 결정성 시험 (FBNRX_NP_TEST=solo) — 정해진 프레임에 코인을 넣고 상태를 파일로 남긴다
+            static const bool kSolo = qEnvironmentVariable("FBNRX_NP_TEST") == QLatin1String("solo");
+            if (kSolo) {
+                const int f = gState.frameCount;
+                gState.keys.fill(0); gState.p2Keys.fill(0); gState.p3Keys.fill(0);
+                if ((f >= 1058 && f < 1061) || (f >= 1090 && f < 1093)) gState.keys[2] = 1;
+                if (qEnvironmentVariableIsSet("FBNRX_SOLO_SER")) {          // 넷플레이처럼 매 프레임 직렬화
+                    const size_t sz2 = m_core->serializeSize();
+                    QByteArray b2(static_cast<int>(sz2), Qt::Uninitialized);
+                    m_core->serialize(b2.data(), sz2);
+                }
+                if (f == 1060 || f == 1070 || f == 1100) {
+                    const size_t sz = m_core->serializeSize();
+                    QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
+                    if (m_core->serialize(buf.data(), sz)) {
+                        QFile df(QStringLiteral("C:/Temp/solo_%1_f%2.bin").arg(qEnvironmentVariable("FBNRX_SOLO_TAG", "x")).arg(f));
+                        if (df.open(QIODevice::WriteOnly)) { df.write(buf); df.close(); }
+                    }
+                }
+            }
+        }
         int runs = gState.fastForward ? 3 : 1;
-        for (int i = 0; i < runs; ++i) m_core->run();
+        for (int i = 0; i < runs; ++i) { m_core->run(); if (kTestWinCounter) wcAfterRun(); }
         gState.frameCount++;
         pushFrameHistory();
     }
@@ -2652,6 +3006,11 @@ void MainWindow::onEmuTimer() {
             gState.audioRecBuf.clear();
         }
     }
+
+    // ── 세트 승수 표시줄 (넷플레이 + 지원 게임) ───────────────
+    if (m_canvas)
+        m_canvas->setScoreboard(((gNetplay().playing() || kTestWinCounter) && gSettings.winCounter && m_wc.active())
+                                    ? m_wc.text() : QString());
 
     // ── 렌더링 ─────────────────────────────────────────────
     if (m_stack->currentIndex() == 1 && m_canvas)
@@ -4228,20 +4587,6 @@ void MainWindow::clearPadScope(const QString& scope) {
 // ════════════════════════════════════════════════════════════
 //  넷플레이 슬롯
 // ════════════════════════════════════════════════════════════
-void MainWindow::onNetConnected(bool isHost) {
-    qDebug("[NP-conn] onNetConnected isHost=%d", isHost ? 1 : 0);
-    log(QString("🌐 연결됨 — %1").arg(isHost ? "HOST(P1)" : "CLIENT(P2)"));
-    m_net.status   = isHost ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중";
-    m_net.canStart = isHost;
-    m_net.canDisc  = true;
-    m_net.canHost  = false;
-    m_net.canJoin  = false;
-    refreshNetUi();
-
-    // 토큰 방식: 룸 코드는 HOST GAME 클릭 시점에 이미 생성·표시됨.
-    // 연결 성립 시점에 재생성하지 않음 (코드 안정성 유지).
-    Q_UNUSED(isHost);
-}
 
 // ════════════════════════════════════════════════════════════
 //  릴레이 홀펀칭 (Cloudflare Worker 기반)
@@ -4259,7 +4604,7 @@ QNetworkAccessManager* MainWindow::relayNam() {
 // 윈도우·스팀덱 공통으로 육안 노출을 막기 위해 URL 과 호스트를 "***" 로 치환.
 QString MainWindow::redactRelayUrl(const QString& s) {
     QString out = s;
-    QString base = gSettings.netplayRelayUrl;
+    QString base = gSettings.relayBase();
     if (!base.isEmpty()) {
         if (base.endsWith('/')) base.chop(1);
         out.replace(base, "***");
@@ -4273,7 +4618,7 @@ void MainWindow::relayRegister(const QString& code, const QString& role,
                                 const QString& ip,  int port)
 {
     log(QString("[DIAG] relayRegister 진입 role=%1 ip=%2:%3").arg(role).arg(ip).arg(port));
-    QString base = gSettings.netplayRelayUrl;
+    QString base = gSettings.relayBase();
     if (base.isEmpty()) { log("[DIAG] relayRegister: base 비어있음 → return"); return; }
     if (base.endsWith('/')) base.chop(1);
     log("[DIAG] relayRegister: QNAM 생성 직전");
@@ -4281,6 +4626,7 @@ void MainWindow::relayRegister(const QString& code, const QString& role,
     QJsonObject body;
     body["code"] = code;
     body["role"] = role;
+    if (role == QLatin1String("client")) body["key"] = m_relayKey;
     body["ip"]   = ip;
     body["port"] = port;
 
@@ -4303,6 +4649,10 @@ void MainWindow::relayRegister(const QString& code, const QString& role,
         //   peer 는 QJsonValue(값 복사)로 받는다. auto 로 받으면
         //   QJsonValueConstRef(임시 참조) → 댕글링 → toObject() 크래시.
         QJsonObject root = doc.object();
+        if (root.contains("ok") && !root.value("ok").toBool()) {
+            log(isEn() ? "🌐 The room is full" : "🌐 방이 가득 찼습니다");
+            return;
+        }
         QJsonValue  peer = root.value("peer");
         log("[DIAG] relayRegister 응답 파싱 완료");
         if (peer.isObject()) {
@@ -4330,6 +4680,48 @@ void MainWindow::relayRegister(const QString& code, const QString& role,
     });
 }
 
+// 방장: 릴레이에 등록한 참가자(최대 2명)를 2초마다 확인해서, 새로 온 사람마다 홀펀칭 프로브를 보낸다.
+void MainWindow::relayPollClients(const QString& code, int tries) {
+    if (tries == 0) ++m_hostPollGen;
+    const int gen = m_hostPollGen;
+    if (!m_netIsHost || !m_net.canDisc || tries > 900) return;
+    QString base = gSettings.relayBase();
+    if (base.isEmpty()) return;
+    if (base.endsWith('/')) base.chop(1);
+
+    QNetworkRequest req(QUrl(base + "/room/" + code + "/clients"));
+    auto* reply = relayNam()->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, code, tries, gen] {
+        reply->deleteLater();
+        if (gen != m_hostPollGen) return;
+        if (reply->error() == QNetworkReply::NoError) {
+            const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+            const QJsonArray arr = root.value("clients").toArray();
+            for (const QJsonValue& v : arr) {
+                const QJsonObject o = v.toObject();
+                const QString ip = o.value("ip").toString();
+                const int port = o.value("port").toInt();
+                const QString key = ip + ":" + QString::number(port);
+                if (ip.isEmpty() || port <= 0 || m_probedClients.contains(key)) continue;
+                m_probedClients.insert(key);
+                log(QString("릴레이: 참가자 발견 %1 → 홀펀칭").arg(key));
+                for (int i = 0; i < 5; ++i) gNetplay().sendProbeTo(ip, port);
+                auto* t = new QTimer(this);                         // 이후 10초 동안 500ms 간격으로 계속 프로브
+                t->setInterval(500);
+                int* cnt = new int(0);
+                connect(t, &QTimer::timeout, this, [this, t, cnt, ip, port] {
+                    if (++(*cnt) >= 20 || !m_net.canDisc) { t->stop(); t->deleteLater(); delete cnt; return; }
+                    gNetplay().sendProbeTo(ip, port);
+                });
+                t->start();
+            }
+        }
+        QTimer::singleShot(2000, this, [this, code, tries, gen] {
+            if (gen == m_hostPollGen) relayPollClients(code, tries + 1);
+        });
+    });
+}
+
 // 피어가 나타날 때까지 1초 간격으로 폴링 (최대 60초)
 // ※ active() 대신 playing() 사용 — hostListen/clientConnect 후 active()는 즉시 true가 되므로
 void MainWindow::relayPollPeer(const QString& code, const QString& myRole, int tries)
@@ -4341,7 +4733,7 @@ void MainWindow::relayPollPeer(const QString& code, const QString& myRole, int t
     if (tries >= 60) { log("릴레이 폴링 타임아웃"); return; }
     if (gNetplay().playing()) return;  // 게임 중이면 중단
 
-    QString base = gSettings.netplayRelayUrl;
+    QString base = gSettings.relayBase();
     if (base.isEmpty()) return;
     if (base.endsWith('/')) base.chop(1);
 
@@ -4420,17 +4812,9 @@ void MainWindow::relayPollPeer(const QString& code, const QString& myRole, int t
     });
 }
 
-void MainWindow::onNetDisconnected() {
-    log("🌐 연결 끊김");
-    m_relayPeerHandled = false;   // 다음 연결을 위해 피어 처리 플래그 리셋
-    cleanupNetplay();
-    m_net.status   = "● DISCONNECTED";
-    m_net.canStart = false;
-    m_net.canDisc  = false;
-    m_net.canHost  = true;
-    m_net.canJoin  = true;
-    refreshNetUi();
-}
+// 상대 ROM 목록이 왔다 → 목록을 양쪽이 모두 가진 게임으로 줄인다.
+
+
 
 void MainWindow::onNetError(const QString& msg) {
     log("🌐 오류: " + msg);
@@ -4467,82 +4851,294 @@ void MainWindow::onNetStateChanged(NetplayManager::State s) {
     refreshNetUi();
 }
 
-// 조인: 호스트가 선택한 게임을 자동 로드 → 로딩 완료 시 READY 전송
-void MainWindow::onNetLoadGame(const QString& romName, int inputDelay) {
-    qDebug("[NP-conn] onNetLoadGame rom=%s delay=%d",
-           romName.toUtf8().constData(), inputDelay);
+// ════════════════════════════════════════════════════════════
+//  멀티플레이 로비 (방): 아이디·닉네임, 입장 표시, 레디, 채팅, 방 설정
+// ════════════════════════════════════════════════════════════
 
-    // ★ 중복 LOAD_GAME 무시: 호스트가 신뢰성 위해 5회+재전송하므로 같은 메시지가
-    //   여러 번 옴. 이미 같은 ROM 을 로드 완료했으면 재로드(각 ~600ms) 하지 말고
-    //   READY 만 재전송한다. (이전엔 매번 재로드 → 수 초 지연 → 시작 늦음)
-    if (m_npSelfLoaded && gState.gameLoaded && m_selectedGame == romName) {
-        gNetplay().sendReady();   // 호스트가 내 READY 를 놓쳤을 수 있으니 재전송
+
+
+// ── 로비(방 목록) ────────────────────────────────────────────
+QVector<NetRoomRow> MainWindow::netRoomRows() {
+    // 목록은 5초마다 새로 받는다. 화면을 그릴 때 오래됐으면 요청만 보내 둔다.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_acct && m_acct->loggedIn() && now - m_roomsStamp > 4000) { m_roomsStamp = now; m_acct->fetchRooms(); }
+    QVector<NetRoomRow> out;
+    const bool en = isEn();
+    for (const AccountClient::RoomInfo& r : m_rooms) {
+        NetRoomRow row;
+        row.code = r.code; row.host = r.host; row.level = r.level;
+        row.game = r.gameName.isEmpty() ? r.game : r.gameName;
+        row.seats = QString("%1/%2").arg(r.seats).arg(r.max);
+        bool have = r.game.isEmpty();                              // 아직 게임을 안 골랐으면 일단 들어갈 수 있다
+        for (const auto& pr : m_allRoms) if (pr.second == r.game) { have = true; break; }
+        if (r.playing)               { row.joinable = false; row.reason = en ? "PLAYING" : "진행 중"; }
+        else if (r.seats >= r.max)   { row.joinable = false; row.reason = en ? "FULL" : "가득 참"; }
+        else if (!have)              { row.joinable = false; row.reason = en ? "NO ROM" : "ROM 없음"; }
+        out.append(row);
+    }
+    return out;
+}
+
+void MainWindow::joinListedRoom(const QString& code) {
+    for (const AccountClient::RoomInfo& r : m_rooms) {
+        if (r.code != code) continue;
+        bool have = r.game.isEmpty();
+        for (const auto& pr : m_allRoms) if (pr.second == r.game) { have = true; break; }
+        if (!have) { log(isEn() ? "🌐 You do not have this game's ROM" : "🌐 이 게임의 ROM 이 없어 입장할 수 없습니다"); return; }
+        m_net.joinCode = code;
+        m_net.joinIp.clear();
+        netJoin();
         return;
     }
-
-    // 플래그 초기화
-    m_npSelfLoaded = false;
-    m_npPeerReady  = false;
-    m_npStarted    = false;
-
-    // 호스트가 지정한 입력 지연 반영 + 딜레이 큐 초기화
-    gSettings.netplayInputDelay = inputDelay;
-    m_npDelayQueue.clear();
-    m_netDelay = inputDelay;
-
-    log(QString("🌐 게임 수신: %1  (딜레이 %2f)").arg(romName).arg(inputDelay));
-    m_selectedGame = romName;
-    if (loadRomInternal()) {
-        m_npSelfLoaded = true;
-        log("🌐 로딩 완료 → READY 전송");
-        gNetplay().sendReady();
-        // 상대(호스트) READY 수신 전까지 300ms마다 재전송
-        m_npReadyRetry->start();
-    } else {
-        log("🌐 ROM 없음 — 같은 ROM 파일을 ROM 폴더에 넣어주세요");
-    }
+    log(isEn() ? "🌐 That room is gone - refresh the list" : "🌐 그 방이 사라졌습니다 — 새로고침하세요");
 }
+
+// 방장: 로비 목록에 내 방을 올리고 15초 안팎으로 갱신한다 (게임·인원·진행 여부)
+void MainWindow::publishRoom() {
+    if (!m_netIsHost || !m_net.canDisc || m_net.roomCode.isEmpty() || !m_acct || !m_acct->loggedIn()) return;
+    const QString name = m_selectedGame.isEmpty() ? QString() : getGameDisplayName(m_selectedGame);
+    m_acct->openRoom(m_net.roomCode, m_selectedGame, name, 1 + gNetplay().peerCount(), 3, gNetplay().playing(), m_roomPublished);
+    m_roomPublished = true;
+}
+
+// ── 내 프로필 (계정·닉네임·캐릭터 꾸미기) ────────────────────────
+NetProfileView MainWindow::netProfileView() const {
+    NetProfileView v;
+    const MyProfile mp = myProfile();
+    const bool en = isEn();
+    v.loggedIn = mp.account;
+    v.serverSet = true;
+    v.accountId = mp.account ? mp.id : QString();
+    v.nick = mp.nick;
+    v.level = mp.level; v.into = mp.into; v.need = mp.need;
+    v.tier = avatar::tierName(avatar::tierOf(mp.level), en);
+    const avatar::Parts parts = avatar::partsFromString(mp.parts);
+    for (const QString& slot : avatar::slotNames()) {
+        NetProfileView::Slot s;
+        s.key = slot;
+        s.label = avatar::slotLabel(slot, en);
+        QString cur = parts.value(slot);
+        int nextLv = 0; QString nextName;
+        const QVector<avatar::Item> choices = avatar::itemsFor(slot, parts);
+        if (choices.isEmpty()) continue;                    // 이 칸의 부품이 없으면 줄을 만들지 않는다 (예: 얼굴 그림이 아직 없을 때)
+        for (const avatar::Item& it : choices) {
+            if (it.id == cur) s.value = en ? it.nameEn : it.nameKo;
+            if (!avatar::allowed(it, mp.level) && (nextLv == 0 || it.minLevel < nextLv)) { nextLv = it.minLevel; nextName = en ? it.nameEn : it.nameKo; }
+        }
+        if (s.value.isEmpty()) s.value = cur;
+        if (nextLv > 0) s.nextUnlock = en ? QString("  NEXT: %1 (LV%2)").arg(nextName).arg(nextLv)
+                                          : QString("  다음 해금: %1 (Lv%2)").arg(nextName).arg(nextLv);
+        v.slotList.append(s);
+    }
+    return v;
+}
+
+// 칸마다 지금 레벨에서 쓸 수 있는 부품만 돌아가며 고른다
+void MainWindow::cycleAvatarPart(const QString& slot, int delta) {
+    const MyProfile mp = myProfile();
+    avatar::Parts parts = avatar::partsFromString(mp.parts);
+    QVector<avatar::Item> ok;
+    for (const avatar::Item& it : avatar::itemsFor(slot, parts)) if (avatar::allowed(it, mp.level)) ok.append(it);
+    if (ok.isEmpty()) return;
+    int idx = 0;
+    for (int i = 0; i < ok.size(); ++i) if (ok[i].id == parts.value(slot)) idx = i;
+    idx = ((idx + (delta < 0 ? -1 : 1)) % ok.size() + ok.size()) % ok.size();
+    parts[slot] = ok[idx].id;
+    parts = avatar::sanitize(parts, mp.level);              // 몸(성별)을 바꾸면 안 맞는 얼굴·상의는 같은 성별 것으로 바뀐다
+    if (mp.account && m_acct) {
+        m_acct->saveProfile(mp.nick, parts);               // 서버에 저장 (응답이 오면 프로필이 갱신된다)
+        // 응답이 오기 전에도 화면이 바로 바뀌도록 로컬 사본을 먼저 고친다
+        m_acct->setLocalParts(parts);
+    } else {
+        gSettings.avatarParts = avatar::partsToString(parts);
+        gSettings.save();
+    }
+    if (m_netConnected) sendMyProfile();
+    refreshNetUi();
+    updateSideCard();
+}
+
+void MainWindow::updateSideCard() {
+    if (!m_shell) return;
+    const MyProfile mp = myProfile();
+    NeoRageXShell::LobbyMember m;
+    m.nick = mp.nick; m.id = mp.id; m.level = mp.level; m.into = mp.into; m.need = mp.need; m.parts = mp.parts;
+    m.present = true; m.guest = !mp.account; m.joinSerial = 1;
+    QString cap = QString("%1  Lv%2").arg(avatar::tierName(avatar::tierOf(mp.level), isEn())).arg(mp.level);
+    if (mp.need > 0) cap += QString("  %1/%2").arg(mp.into).arg(mp.need);
+    m_shell->setSideCard(m, !m_net.canDisc && mp.account, cap);
+}
+
+// ── 로그인 / 회원가입 (멀티플레이 첫 화면) ───────────────────────
+NetAuthView MainWindow::netAuthView() const {
+    NetAuthView v;
+    const bool en = isEn();
+    v.signup = m_auth.signup; v.busy = m_auth.busy;
+    v.id = m_auth.id; v.nick = m_auth.nick; v.gender = m_auth.gender;
+    v.pwMask = QString(m_auth.pw.size(), QChar(0x2022));
+    v.genderLabel = m_auth.gender == QLatin1String("f") ? (en ? QStringLiteral("FEMALE") : QString::fromUtf8("여자"))
+                                                         : (en ? QStringLiteral("MALE")   : QString::fromUtf8("남자"));
+    v.message = m_auth.msg;
+    return v;
+}
+
+void MainWindow::authMode(bool signup) {
+    if (m_auth.busy) return;
+    m_auth.signup = signup;
+    m_auth.msg.clear();
+    m_auth.pw.clear();
+    refreshNetUi();
+}
+
+void MainWindow::authGender(int) {
+    m_auth.gender = m_auth.gender == QLatin1String("f") ? QStringLiteral("m") : QStringLiteral("f");
+    refreshNetUi();
+}
+
+void MainWindow::authEdit(const QString& field) {
+    if (m_auth.busy) return;
+    const bool en = isEn();
+    bool ok = false;
+    QString t;
+    if (field == QLatin1String("id")) {
+        t = QInputDialog::getText(this, en ? "ID" : "아이디",
+                                  en ? "ID (letters, digits, _ ; 3-16)" : "아이디 (영문·숫자·밑줄 3~16자)",
+                                  QLineEdit::Normal, m_auth.id, &ok).trimmed();
+        if (ok) m_auth.id = t;
+    } else if (field == QLatin1String("pw")) {
+        t = QInputDialog::getText(this, en ? "PASSWORD" : "비밀번호",
+                                  en ? "Password (6-64)" : "비밀번호 (6~64자)", QLineEdit::Password, QString(), &ok);
+        if (ok) m_auth.pw = t;
+    } else if (field == QLatin1String("nick")) {
+        t = QInputDialog::getText(this, en ? "NICKNAME" : "닉네임",
+                                  en ? "Nickname (shown to other players, up to 16)" : "닉네임 (다른 사람에게 보이는 이름, 16자까지)",
+                                  QLineEdit::Normal, m_auth.nick, &ok).trimmed().left(16);
+        if (ok) m_auth.nick = t;
+    }
+    m_auth.msg.clear();
+    refreshNetUi();
+}
+
+// 가입할 때 고른 성별의 몸으로 시작하는 아바타
+static avatar::Parts initialPartsFor(const QString& gender) {
+    avatar::Parts p;
+    for (const avatar::Item& it : avatar::itemsFor(QStringLiteral("body")))
+        if (it.gender == gender) { p["body"] = it.id; break; }
+    return avatar::sanitize(p, 1);
+}
+
+void MainWindow::authSubmit() {
+    if (!m_acct || m_auth.busy) return;
+    const bool en = isEn();
+    const bool creating = m_auth.signup;
+    auto fail = [&](const QString& ko, const QString& e) { m_auth.msg = en ? e : ko; refreshNetUi(); };
+    if (m_auth.id.isEmpty()) { fail(QString::fromUtf8("아이디를 입력하세요"), QStringLiteral("ENTER YOUR ID")); return; }
+    if (m_auth.pw.isEmpty()) { fail(QString::fromUtf8("비밀번호를 입력하세요"), QStringLiteral("ENTER YOUR PASSWORD")); return; }
+    if (creating && m_auth.nick.isEmpty()) m_auth.nick = m_auth.id;
+
+    m_auth.busy = true;
+    m_auth.msg = en ? QStringLiteral("Contacting the server...") : QString::fromUtf8("서버에 연결하는 중...");
+    refreshNetUi();
+
+    const QString nick = m_auth.nick, gender = m_auth.gender;
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_acct, &AccountClient::authDone, this, [this, conn, en, creating, nick, gender](bool good, const QString& msg) {
+        disconnect(*conn);
+        m_auth.busy = false;
+        m_auth.pw.clear();
+        if (good) {
+            const auto& me = m_acct->me();
+            log(en ? QString("Logged in: %1 (Lv%2)").arg(me.id).arg(me.level)
+                   : QString("%1 로그인했습니다 (Lv%2)").arg(me.id).arg(me.level));
+            if (creating) m_acct->saveProfile(nick.isEmpty() ? me.id : nick, initialPartsFor(gender));
+            m_auth = AuthForm();
+            m_rooms.clear(); m_roomsStamp = 0;
+            m_acct->fetchRooms();
+        } else {
+            m_auth.msg = (creating ? (en ? QStringLiteral("Sign-up failed: ") : QString::fromUtf8("가입 실패: "))
+                                   : (en ? QStringLiteral("Login failed: ")   : QString::fromUtf8("로그인 실패: "))) + msg;
+        }
+        refreshNetUi();
+    });
+    if (creating) m_acct->registerAccount(m_auth.id, m_auth.pw, nick);
+    else          m_acct->login(m_auth.id, m_auth.pw);
+}
+
+// ── 방 만들기: 게임 목록에서 게임을 고르면 방이 만들어진다 ─────────────────
+void MainWindow::hostPick() {
+    if (!m_acct || !m_acct->loggedIn() || m_net.canDisc) return;
+    if (m_allRoms.isEmpty()) {
+        log(isEn() ? "🌐 No ROMs found - add ROMs first" : "🌐 게임 ROM 이 없습니다 — 먼저 ROM 을 추가하세요");
+        return;
+    }
+    m_pickingRoom = true;
+    m_shell->setPickMode(true, isEn() ? QStringLiteral("CREATE ROOM") : QString::fromUtf8("방 만들기"));
+    log(isEn() ? "🌐 Pick the room's game from the list (Enter = create, Esc = cancel)"
+               : "🌐 방에서 할 게임을 목록에서 고르세요 (엔터 = 방 만들기, ESC = 취소)");
+}
+
+void MainWindow::hostPickDone() {
+    if (!m_pickingRoom) return;
+    m_pickingRoom = false;
+    m_shell->setPickMode(false, QString());
+    const int i = m_shell->selectedIndex();
+    if (i < 0 || i >= m_rows.size()) return;
+    selectGame(m_rows.at(i).rom);
+    netHost();
+    m_shell->openCategory(QStringLiteral("netplay"));        // 방 화면이 열리는 곳
+}
+
+void MainWindow::hostPickCancel() {
+    if (!m_pickingRoom) return;
+    m_pickingRoom = false;
+    m_shell->setPickMode(false, QString());
+    log(isEn() ? "🌐 Room creation cancelled" : "🌐 방 만들기를 취소했습니다");
+}
+
+// 화면(로비)에 현재 방 상태를 밀어 넣는다
+
+// 호스트: 방 설정(게임·딜레이)이 바뀌었다 → 참가자에게 알리고, 낡은 레디를 푼다
+
+
+
+
+
+
+
+
+
+// 게임 결과에 영향을 주는 코어 변수인가 (딥스위치, BIOS/네오지오 모드, CPU 속도, SOCD 등).
+//   화면·소리 설정(해상도, 샘플레이트 등)은 사람마다 달라도 결과가 같으므로 맞추지 않는다.
+static bool isSimVar(const QString& k) {
+    return k.startsWith(QLatin1String("fbneo-dipswitch-")) || k.startsWith(QLatin1String("fbneo-debug-dip-"))
+        || k == QLatin1String("fbneo-neogeo-mode") || k == QLatin1String("fbneo-cpu-speed-adjust")
+        || k == QLatin1String("fbneo-allow-patched-romsets") || k == QLatin1String("fbneo-memcard-mode")
+        || k == QLatin1String("fbneo-socd");
+}
+
+QStringList MainWindow::netSyncVarLines() const {
+    QStringList out;
+    for (auto it = gState.variables.constBegin(); it != gState.variables.constEnd(); ++it)
+        if (isSimVar(it.key())) out << it.key() + QLatin1Char('=') + it.value();
+    out.sort();
+    return out;
+}
+
+void MainWindow::onNetVars(const QStringList& lines) {
+    m_npHostVars.clear();
+    for (const QString& l : lines) {
+        const int eq = l.indexOf(QLatin1Char('='));
+        if (eq > 0 && isSimVar(l.left(eq))) m_npHostVars[l.left(eq)] = l.mid(eq + 1);
+    }
+    m_npHostVarsReady = !m_npHostVars.isEmpty();
+    qDebug("[NP] host vars received: %d", (int)m_npHostVars.size());
+}
+
+// 조인: 호스트가 선택한 게임을 자동 로드 → 로딩 완료 시 READY 전송
 
 // 양쪽: 상대방 READY 수신
-void MainWindow::onNetReady() {
-    qDebug("[NP-conn] onNetReady host=%d selfLoaded=%d",
-           gNetplay().isHost() ? 1 : 0, m_npSelfLoaded ? 1 : 0);
-    log("🌐 상대 READY");
-    m_npPeerReady = true;
-
-    if (gNetplay().isHost()) {
-        // 호스트: 내가 이미 로딩 완료했으면 START 전송
-        if (m_npSelfLoaded) {
-            m_npReadyRetry->stop();
-            gNetplay().sendStart();   // 조인에게 MSG_START 전송 + 상태→Playing
-            onNetStart();             // 호스트 자신도 즉시 시작
-        }
-        // 아직 로딩 중이면 netplayStartGame() 마지막에서 m_npPeerReady 플래그 확인
-    }
-    // 조인: MSG_START 수신 시 onNetStart() 자동 호출 — 여기선 아무것도 안 함
-}
 
 // 양쪽: START 수신 → 프레임 0부터 동시 시작
-void MainWindow::onNetStart() {
-    // 이중 시작 방지: MSG_START 중복 수신 or processEvents 재진입 시 크래시 차단
-    // (호스트가 신뢰성 위해 START 를 여러 번 보내므로 중복은 정상 — 로그 안 함)
-    if (m_npStarted) return;
-    m_npStarted = true;
-    qDebug("[NP] onNetStart() begin — gameLoaded=%d core=%p",
-           gState.gameLoaded ? 1 : 0, (void*)m_core);
-    log(QString("🌐 START — Frame 0 동시 시작 (딜레이 %1f)").arg(gSettings.netplayInputDelay));
-    // READY 재전송 타이머 중지
-    if (m_npReadyRetry) m_npReadyRetry->stop();
-    gState.frameCount  = 0;
-    m_npStates.clear();
-    m_npInputHistory.clear();
-    m_npDelayQueue.clear();
-    m_frameDelay     = 0.0;
-    m_pendingSyncSf  = -1;
-    m_pendingSyncCur = -1;
-    m_pendingSyncData.clear();
-    startEmu();
-}
 
 // 양쪽: 게임 종료 → Lobby 복귀 (소켓 유지)
 void MainWindow::onNetGameOver() {
@@ -4555,6 +5151,16 @@ void MainWindow::onNetGameOver() {
 // ════════════════════════════════════════════════════════════
 
 // 상태 CRC32 (FNV-1a 32bit — 빠르고 결정론적, 충돌 무시 가능 수준)
+uint32_t MainWindow::ramCrc() const {
+    uint32_t h = 2166136261u;
+    if (!m_core) return h;
+    const auto* p = static_cast<const unsigned char*>(m_core->getMemoryData(RETRO_MEMORY_SYSTEM_RAM));
+    const size_t n = m_core->getMemorySize(RETRO_MEMORY_SYSTEM_RAM);
+    if (!p || n == 0) return h;
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
 uint32_t MainWindow::npChecksum(const QByteArray& data) {
     uint32_t h = 2166136261u;               // FNV offset basis
     const unsigned char* p =
@@ -4568,93 +5174,753 @@ uint32_t MainWindow::npChecksum(const QByteArray& data) {
 }
 
 // 상대 체크섬 수신 → 저장 후 같은 프레임 비교
-void MainWindow::onNetChecksum(quint32 frame, quint32 crc) {
-    if (gNetplay().isHost()) {
-        // 호스트도 체크섬을 받지만, 재동기는 클라가 요청하므로
-        // 호스트는 비교만 (로그용). 저장만 해둠.
+
+// 같은 프레임의 로컬/원격 CRC 비교 → 불일치면 desync
+
+// 호스트: 클라의 재동기 요청 받음 → 현재 풀스테이트 1회 전송
+
+// ── 호스트: 게임 선택 후 START 버튼 ─────────────────────────
+
+// ════════════════════════════════════════════════════════════
+//  멀티플레이 로비 (방): 자리 3개, 입장 표시, READY, 채팅, 방 설정
+//    [0] 방장  [1] [2] 참가자.  방장이 자리 상태를 정하고 모두에게 알린다. 참가자끼리는 방장을 거쳐 이야기한다.
+// ════════════════════════════════════════════════════════════
+QString MainWindow::myNick() const {
+    return gSettings.netNick.isEmpty() ? QStringLiteral("Player") : gSettings.netNick;
+}
+
+// 이 게임에서 동시에 플레이할 수 있는 인원. 3인 이상 지원 게임은 3자리까지 모두 플레이어가 될 수 있고,
+//   나머지(대전 게임 등)는 2명만 플레이하고 세 번째 자리는 관전이다.
+int MainWindow::playersForGame(const QString& rom) const {
+    static const char* const k3[] = { "dino", "wof", "captcomm", "knights", "ffightae", "avsp", "nbbatman", "ninjabat",
+                                      "simpsons", "tmnt", "xmen", "vendetta", "sunsetbl", "gaiapolis", "bucky", "cadillac", "punisher" };
+    for (const char* p : k3)
+        if (rom.startsWith(QLatin1String(p), Qt::CaseInsensitive)) return 3;
+    return 2;
+}
+
+void MainWindow::resetLobby() {
+    for (Seat& s : m_seats) s = Seat();
+    m_mySeat = m_netIsHost ? 0 : 1;
+    m_myLobbyReady = false;
+    m_roomRev = 0;
+    m_roomGame.clear();
+    m_roomCodeShared.clear();
+    m_roomDelay = m_netDelay;
+    m_lobbyChat.clear();
+    m_npPlayerMask = 0; m_npReadyMask = 0; m_npRequiredMask = 0;
+    m_expRep1 = m_expRep2 = m_expSeq = 0;
+    for (int i = 0; i < 3; ++i) m_seats[i].romsKnown = false;
+    clearNetRomFilter();
+}
+
+void MainWindow::lobbyChatAdd(int kind, const QString& who, const QString& text) {
+    NeoRageXShell::LobbyChatLine l;
+    l.kind = kind; l.who = who; l.text = text;
+    m_lobbyChat.append(l);
+    while (m_lobbyChat.size() > 60) m_lobbyChat.removeFirst();
+    pushLobby();
+}
+
+MainWindow::MyProfile MainWindow::myProfile() const {
+    MyProfile r;
+    if (m_acct && m_acct->loggedIn()) {
+        const AccountClient::Profile& a = m_acct->me();
+        r.id = a.id; r.nick = a.nick; r.level = a.level; r.into = a.into; r.need = a.need; r.account = true;
+        r.parts = avatar::partsToString(avatar::sanitize(a.parts, a.level));
+    } else {
+        r.id = gSettings.netId; r.nick = myNick(); r.level = 1; r.account = false;
+        r.parts = avatar::partsToString(avatar::sanitize(avatar::partsFromString(gSettings.avatarParts), 1));
     }
+    return r;
+}
+
+// 내 자리에 내 프로필을 채우고 방에 알린다 (참가자: 방장에게 / 방장: 모두에게)
+void MainWindow::sendMyProfile() {
+    const MyProfile m = myProfile();
+    Seat& me = m_seats[m_mySeat];
+    me.present = true; me.id = m.id; me.nick = m.nick; me.level = m.level; me.into = m.into; me.need = m.need;
+    me.parts = m.parts; me.guest = !m.account; me.verified = m.account; me.profileSeen = true;
+    gNetplay().sendProfile(m_mySeat, m.id, m.nick, m.level, m.account, m.parts);
+}
+
+// 방장: 알고 있는 모든 자리의 프로필을 모두에게 다시 보낸다 (새로 들어온 사람이 다른 사람을 알 수 있게)
+void MainWindow::broadcastProfiles() {
+    if (!m_netIsHost) return;
+    for (int i = 0; i < 3; ++i) {
+        const Seat& s = m_seats[i];
+        if (!s.present || !s.profileSeen) continue;
+        gNetplay().sendProfile(i, s.id, s.nick, s.guest ? 1 : s.level, !s.guest, s.parts);
+    }
+}
+
+// 방장: 게임에 맞춰 누가 플레이어이고 누가 관전인지 정한다. 방장은 항상 플레이어.
+void MainWindow::computeSeatRoles() {
+    if (!m_netIsHost) return;
+    const int maxP = playersForGame(m_selectedGame);
+    int players = 1;
+    m_seats[0].spectator = false;
+    for (int i = 1; i < 3; ++i) {
+        Seat& s = m_seats[i];
+        if (!s.present) { s.spectator = false; continue; }
+        if (!s.wantSpec && players < maxP) { s.spectator = false; ++players; }
+        else s.spectator = true;
+    }
+}
+
+void MainWindow::broadcastSeats() {
+    if (!m_netIsHost) return;
+    computeSeatRoles();
+    uint8_t f[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3; ++i) {
+        const Seat& s = m_seats[i];
+        if (i == 0) f[i] = NetplayManager::SEAT_PRESENT;
+        else if (s.present) {
+            f[i] = NetplayManager::SEAT_PRESENT | (s.ready ? NetplayManager::SEAT_READY : 0)
+                 | (s.spectator ? NetplayManager::SEAT_SPECTATOR : 0) | (s.wantSpec ? NetplayManager::SEAT_WANTSPEC : 0);
+        }
+    }
+    gNetplay().sendSeats(f);
+    pushLobby();
+}
+
+// 화면(로비)에 현재 방 상태를 밀어 넣는다
+void MainWindow::pushLobby() {
+    if (!m_shell) return;
+    NeoRageXShell::LobbyView v;
+    v.active = m_net.canDisc;                       // 방을 만들었거나 들어가는 중이거나 들어가 있다
+    if (v.active) {
+        const bool en = isEn();
+        v.isHost = m_netIsHost;
+        v.connected = m_netConnected;
+        v.myReady = m_myLobbyReady;
+        v.roomCode = m_netIsHost ? m_net.roomCode : m_net.joinCode;
+        if (!m_netIsHost && v.roomCode.isEmpty()) v.roomCode = m_net.joinIp;
+        v.winCounter = gSettings.winCounter;
+        v.delayEditable = m_netIsHost && !gNetplay().playing();
+        v.delay = m_netIsHost ? m_netDelay : m_roomDelay;
+        const QString g = m_netIsHost ? m_selectedGame : m_roomGame;
+        v.gameLabel = g.isEmpty() ? QString() : getGameDisplayName(g);
+        v.status = m_netConnected ? (gNetplay().rttMs() > 0 ? QString("RTT %1ms").arg(gNetplay().rttMs()) : QString())
+                                  : (m_netIsHost ? QString(en ? "WAITING FOR PLAYER..." : "상대를 기다리는 중...")
+                                                 : QString(en ? "CONNECTING..." : "연결하는 중..."));
+
+        // 내 자리는 내 프로필(계정 레벨)로 그린다
+        const MyProfile mp = myProfile();
+        v.members.resize(3);
+        for (int i = 0; i < 3; ++i) {
+            const Seat& s = m_seats[i];
+            NeoRageXShell::LobbyMember& m = v.members[i];
+            m.present = s.present;
+            m.host = (i == 0);
+            m.ready = s.ready;
+            m.spectator = s.spectator;
+            m.guest = s.guest;
+            m.joinSerial = s.joinSerial;
+            m.nick = s.nick; m.id = s.id; m.parts = s.parts;
+            m.level = s.level; m.into = s.into; m.need = s.need;
+            if (i == m_mySeat) {
+                m.present = true;
+                m.nick = mp.nick; m.id = mp.id; m.parts = mp.parts; m.level = mp.level; m.into = mp.into; m.need = mp.need;
+                m.guest = !mp.account;
+                m.ready = (i == 0) ? false : m_myLobbyReady;
+                m.joinSerial = 1;
+            } else if (s.present && !s.profileSeen) {
+                m.nick = QStringLiteral("..."); m.id = QStringLiteral("------");
+            }
+        }
+        // 참가자는 방장 연결 전에는 자리를 비워 둔다
+        if (!m_netIsHost && !m_netConnected) { v.members[0].present = false; v.members[m_mySeat].present = false; }
+        v.mySlot = m_mySeat;
+        v.mySpectator = m_seats[m_mySeat].spectator;
+        v.seatSwitchable = !m_netIsHost && m_netConnected && playersForGame(m_roomGame) >= 3;
+
+        // 시작 조건: 플레이어인 참가자가 1명 이상 있고, 플레이어인 참가자는 모두 READY
+        int playerGuests = 0; bool allReady = true;
+        for (int i = 1; i < 3; ++i)
+            if (m_seats[i].present && !m_seats[i].spectator) { ++playerGuests; if (!m_seats[i].ready) allReady = false; }
+        v.canStart = m_netIsHost && m_netConnected && !m_selectedGame.isEmpty() && playerGuests >= 1 && allReady
+                     && !gNetplay().playing() && gNetplay().netState() == NetplayManager::State::Lobby;
+        auto& T = v.L;
+        T.room = en ? "ROOM" : "방";
+        T.copy = en ? "COPY" : "복사";
+        T.close = en ? "CLOSE" : "닫기";
+        T.settings = en ? "ROOM SETTINGS" : "방 설정";
+        T.game = en ? "GAME" : "게임";
+        T.delay = en ? "DELAY" : "딜레이";
+        T.win = en ? "WIN/SCORE" : "승수·점수";
+        T.open = en ? "- OPEN -" : "- 비어 있음 -";
+        T.spectator = en ? "SPECTATOR" : "관전";
+        T.seat = en ? "MY SEAT" : "내 자리";
+        T.seatPlayer = en ? "PLAYER" : "플레이어";
+        T.seatSpec = en ? "SPECTATOR" : "관전";
+        T.seatFixed = en ? "SPECTATOR (2P GAME)" : "관전 (2인 게임)";
+        T.ready = "READY";
+        T.readyOn = en ? "READY!" : "READY 완료";
+        T.start = en ? "START GAME" : "게임 시작";
+        T.leave = en ? "LEAVE ROOM" : "방 나가기";
+        T.waiting = en ? "- WAITING -" : "- 대기 중 -";
+        T.joined = en ? "JOINED!" : "입장!";
+        T.hostTag = en ? "HOST" : "방장";
+        T.chatHint = en ? "Type to chat (Enter)" : "채팅 입력 (Enter 전송)";
+        T.on = en ? "ON" : "켜짐";
+        T.off = en ? "OFF" : "꺼짐";
+        T.you = en ? "YOU" : "나";
+        if (m_netIsHost) {
+            if (!m_netConnected)              T.startHint = en ? "Waiting for a player to join" : "참가자를 기다리는 중";
+            else if (m_selectedGame.isEmpty()) T.startHint = en ? "Pick a game in the list" : "게임 목록에서 게임을 고르세요";
+            else if (playerGuests < 1)         T.startHint = en ? "No other player yet" : "함께 플레이할 사람이 없습니다";
+            else if (!allReady)                T.startHint = en ? "Waiting for READY" : "참가자의 READY 를 기다리는 중";
+        }
+        v.chat = m_lobbyChat;
+    }
+    m_shell->setLobby(v);
+}
+
+// 방장: 방 설정(게임·딜레이)이 바뀌었다 → 낡은 레디를 풀고 참가자에게 알린다
+void MainWindow::lobbyRoomChanged() {
+    if (!m_netIsHost || !m_netConnected) return;
+    ++m_roomRev;
+    for (int i = 1; i < 3; ++i) m_seats[i].ready = false;
+    gNetplay().sendRoomInfo(m_selectedGame, m_netDelay, m_roomRev, m_net.roomCode);
+    broadcastSeats();
+}
+
+// 방장: 참가자가 들어왔다. 자리를 열고, 모두에게 프로필을 돌리고, ROM 목록을 주고받는다.
+void MainWindow::onNetPeerJoined(int slot) {
+    if (slot < 1 || slot > 2) return;
+    Seat& s = m_seats[slot];
+    s = Seat();
+    s.present = true;
+    s.joinSerial = ++m_joinCounter;
+    m_netConnected = true;
+    sendMyProfile();
+    QStringList mine;
+    for (const auto& pr : m_allRoms) mine << pr.second;
+    gNetplay().sendRomList(mine);
+    QTimer::singleShot(3000, this, [this, slot] {
+        if (gNetplay().seatConnected(slot) && !m_seats[slot].romsKnown) gNetplay().requestRomList();
+    });
+    QTimer::singleShot(400, this, [this] { if (m_netConnected) lobbyRoomChanged(); });
+    QTimer::singleShot(1200, this, [this] { if (m_netConnected) { broadcastProfiles(); broadcastSeats(); } });
+    pushLobby();
+}
+
+// 방장: 참가자가 나갔다 (무응답). 그 사람이 플레이 중이었으면 게임을 끝낸다.
+void MainWindow::onNetPeerLeft(int slot) {
+    if (slot < 1 || slot > 2) return;
+    const Seat gone = m_seats[slot];
+    const bool wasPlayer = (m_npPlayerMask & (1 << slot)) != 0;
+    m_seats[slot] = Seat();
+    lobbyChatAdd(2, QString(), isEn() ? QString("%1 left the room").arg(gone.nick.isEmpty() ? QStringLiteral("Player") : gone.nick)
+                                      : QString("%1 님이 나갔습니다").arg(gone.nick.isEmpty() ? QStringLiteral("플레이어") : gone.nick));
+    m_netConnected = gNetplay().peerCount() > 0;
+    if (m_npStarted && wasPlayer) {
+        gNetplay().sendGameOver();
+        cleanupNetplay();
+    }
+    recomputeNetRoms();
+    if (m_netConnected) { broadcastProfiles(); lobbyRoomChanged(); } else pushLobby();
+}
+
+void MainWindow::onNetProfile(int slot, const QString& id, const QString& nick, int level, bool account, const QString& parts) {
+    if (slot < 0 || slot > 2 || slot == m_mySeat) return;
+    Seat& s = m_seats[slot];
+    const bool first = !s.profileSeen;
+    if (!m_netIsHost && slot > 0 && !s.present) s.present = true;
+    s.profileSeen = true;
+    s.id = id;
+    s.nick = nick.isEmpty() ? QStringLiteral("Player") : nick;
+    // 상대가 말한 레벨은 믿지 않는다. 계정이면 서버에서 확인한 값으로 바꾸고, 그 전까지(또는 게스트는) 레벨 1.
+    s.guest = !account;
+    s.verified = false;
+    s.level = 1; s.into = 0; s.need = 0;
+    s.parts = avatar::partsToString(avatar::sanitize(avatar::partsFromString(parts), 1));
+    if (account && m_acct && m_acct->configured()) m_acct->lookup(id);
+    Q_UNUSED(level);
+    if (first && slot > 0) {
+        if (m_netIsHost || s.joinSerial == 0) s.joinSerial = ++m_joinCounter;
+        lobbyChatAdd(2, QString(), isEn() ? QString("%1 joined the room").arg(s.nick) : QString("%1 님이 입장했습니다").arg(s.nick));
+        log(isEn() ? QString("🌐 %1 joined").arg(s.nick) : QString("🌐 %1 님이 입장했습니다").arg(s.nick));
+    }
+    if (m_netIsHost) {
+        gNetplay().sendProfile(slot, id, nick, level, account, parts);    // 다른 참가자에게도 알린다
+        if (first) lobbyRoomChanged();
+    }
+    pushLobby();
+}
+
+// 계정 서버가 상대의 레벨·캐릭터를 알려 줬다 (공개 정보)
+void MainWindow::onPeerLookup(const AccountClient::Profile& p) {
+    for (int i = 0; i < 3; ++i) {
+        Seat& s = m_seats[i];
+        if (i == m_mySeat || s.guest || s.id.compare(p.id, Qt::CaseInsensitive) != 0) continue;
+        s.verified = true;
+        s.level = p.level; s.into = p.into; s.need = p.need;
+        if (!p.nick.isEmpty()) s.nick = p.nick;
+        s.parts = avatar::partsToString(avatar::sanitize(p.parts, p.level));
+    }
+    pushLobby();
+}
+
+void MainWindow::onAccountChanged() {
+    if (m_netConnected || gNetplay().active()) sendMyProfile();
+    refreshNetUi();
+    updateSideCard();
+}
+
+void MainWindow::onNetChat(int slot, const QString& text) {
+    const QString who = (slot >= 0 && slot < 3 && !m_seats[slot].nick.isEmpty()) ? m_seats[slot].nick : QStringLiteral("?");
+    lobbyChatAdd(1, who, text);
+}
+
+// 참가자: 방장이 알려 준 자리 상태 (입장 여부, READY, 관전)
+void MainWindow::onNetSeats(int f0, int f1, int f2) {
+    if (m_netIsHost) return;
+    const int fl[3] = { f0, f1, f2 };
+    for (int i = 0; i < 3; ++i) {
+        Seat& s = m_seats[i];
+        const bool present = (fl[i] & NetplayManager::SEAT_PRESENT) != 0;
+        if (i == m_mySeat) {
+            s.present = true;
+            s.ready = (fl[i] & NetplayManager::SEAT_READY) != 0;
+            s.spectator = (fl[i] & NetplayManager::SEAT_SPECTATOR) != 0;
+            s.wantSpec = (fl[i] & NetplayManager::SEAT_WANTSPEC) != 0;
+            m_myLobbyReady = s.ready;
+            continue;
+        }
+        if (s.present && !present && i > 0) {                // 누가 나갔다
+            lobbyChatAdd(2, QString(), isEn() ? QString("%1 left the room").arg(s.nick) : QString("%1 님이 나갔습니다").arg(s.nick));
+            s = Seat();
+            continue;
+        }
+        if (present && !s.present) { s.present = true; if (i > 0) s.joinSerial = ++m_joinCounter; }
+        s.ready = (fl[i] & NetplayManager::SEAT_READY) != 0;
+        s.spectator = (fl[i] & NetplayManager::SEAT_SPECTATOR) != 0;
+        s.wantSpec = (fl[i] & NetplayManager::SEAT_WANTSPEC) != 0;
+    }
+    m_netConnected = true;
+    pushLobby();
+}
+
+// 방장: 참가자가 플레이어/관전 희망을 바꿨다
+void MainWindow::onNetSeatMode(int slot, bool wantSpec) {
+    if (!m_netIsHost || slot < 1 || slot > 2 || !m_seats[slot].present) return;
+    m_seats[slot].wantSpec = wantSpec;
+    broadcastSeats();
+}
+
+// 방장: 참가자의 READY 를 받았다
+void MainWindow::onNetLobbyReady(int slot, bool ready, int rev) {
+    if (!m_netIsHost || slot < 1 || slot > 2 || !m_seats[slot].present) return;
+    if ((rev & 0xFF) != (m_roomRev & 0xFF)) return;        // 방 설정이 바뀌기 전의 낡은 레디
+    if (m_seats[slot].ready == ready) return;
+    m_seats[slot].ready = ready;
+    const QString n = m_seats[slot].nick;
+    lobbyChatAdd(2, QString(), ready ? (isEn() ? QString("%1 is READY").arg(n) : QString("%1 님이 READY 했습니다").arg(n))
+                                     : (isEn() ? QString("%1 cancelled READY").arg(n) : QString("%1 님이 READY 를 취소했습니다").arg(n)));
+    broadcastSeats();
+}
+
+void MainWindow::onNetRoomInfo(const QString& rom, int delay, int rev, const QString& code) {
+    if (m_netIsHost) return;
+    const bool changed = (rom != m_roomGame || delay != m_roomDelay || rev != m_roomRev);
+    m_roomGame = rom; m_roomDelay = delay; m_roomRev = rev;
+    if (!code.isEmpty()) m_roomCodeShared = code;
+    if (changed) {
+        if (m_myLobbyReady) {
+            m_myLobbyReady = false;
+            lobbyChatAdd(2, QString(), isEn() ? QString("The host changed the room settings - press READY again")
+                                              : QString("방장이 방 설정을 바꿨습니다 — READY 를 다시 눌러 주세요"));
+        } else if (!rom.isEmpty()) {
+            lobbyChatAdd(2, QString(), isEn() ? QString("Game: %1").arg(getGameDisplayName(rom))
+                                              : QString("게임: %1").arg(getGameDisplayName(rom)));
+        }
+        pushLobby();
+    }
+}
+
+void MainWindow::lobbySendChat(const QString& text) {
+    if (!m_netConnected) {
+        lobbyChatAdd(2, QString(), isEn() ? QString("Not connected yet") : QString("아직 연결되지 않았습니다"));
+        return;
+    }
+    gNetplay().sendChat(text);
+    lobbyChatAdd(0, myNick(), text);
+}
+
+void MainWindow::onLobbyAction(const QString& id, int delta) {
+    if (id == QLatin1String("main")) {
+        if (m_netIsHost) {
+            if (!m_netConnected) { log(isEn() ? "🌐 Waiting for a player" : "🌐 참가자를 기다리는 중입니다"); return; }
+            netplayStartGame();                    // 레디·게임 선택 점검은 안에서 한다
+        } else {
+            if (!m_netConnected) return;
+            if (m_roomGame.isEmpty()) {
+                lobbyChatAdd(2, QString(), isEn() ? QString("The host has not picked a game yet") : QString("방장이 아직 게임을 고르지 않았습니다"));
+                return;
+            }
+            bool have = false;                     // 내가 이 게임의 ROM 을 가지고 있어야 한다
+            for (const auto& pr : m_allRoms) if (pr.second == m_roomGame) { have = true; break; }
+            if (!have) {
+                lobbyChatAdd(2, QString(), isEn() ? QString("You do not have this game's ROM") : QString("이 게임의 ROM 이 내 PC에 없습니다"));
+                return;
+            }
+            m_myLobbyReady = !m_myLobbyReady;
+            m_seats[m_mySeat].ready = m_myLobbyReady;
+            gNetplay().sendLobbyReady(m_myLobbyReady, m_roomRev);
+            pushLobby();
+        }
+    } else if (id == QLatin1String("seat")) {
+        if (m_netIsHost || !m_netConnected) return;
+        const bool want = !m_seats[m_mySeat].wantSpec;
+        m_seats[m_mySeat].wantSpec = want;
+        gNetplay().sendSeatMode(want);
+        pushLobby();
+    } else if (id == QLatin1String("delay")) {
+        if (!m_netIsHost || gNetplay().playing()) return;
+        const int d = qBound(0, m_netDelay + (delta < 0 ? -1 : 1), 8);
+        if (d == m_netDelay) return;
+        m_netDelay = d;
+        gSettings.netplayInputDelay = d;
+        gSettings.save();
+        lobbyRoomChanged();
+    } else if (id == QLatin1String("win")) {
+        gSettings.winCounter = !gSettings.winCounter;
+        gSettings.save();
+        pushLobby();
+    } else if (id == QLatin1String("nick")) {
+        bool ok = false;
+        const QString t = QInputDialog::getText(this, isEn() ? "NICKNAME" : "닉네임",
+                                                isEn() ? "Your nickname (shown in the room)" : "방에서 보일 내 닉네임",
+                                                QLineEdit::Normal, myNick(), &ok).trimmed().left(16);
+        if (ok && !t.isEmpty()) {
+            gSettings.netNick = t;
+            gSettings.save();
+            if (m_acct && m_acct->loggedIn()) m_acct->saveProfile(t, m_acct->me().parts);
+            if (m_netConnected) sendMyProfile();
+            refreshNetUi();
+        }
+    } else if (id == QLatin1String("chatprompt")) {
+        bool ok = false;
+        const QString t = QInputDialog::getText(this, isEn() ? "CHAT" : "채팅", isEn() ? "Message" : "보낼 말",
+                                                QLineEdit::Normal, QString(), &ok).trimmed();
+        if (ok && !t.isEmpty()) lobbySendChat(t);
+    } else if (id == QLatin1String("leave")) {
+        netDisconnect();
+    } else if (id == QLatin1String("copy")) {
+        netCopyRoomCode();
+        lobbyChatAdd(2, QString(), isEn() ? QString("Room code copied") : QString("룸 코드를 복사했습니다"));
+    }
+}
+
+// ── ROM 목록: 같은 방의 모든 사람이 가진 게임만 목록에 남긴다 ──────────
+//   방장: 모든 참가자의 목록 / 참가자: 방장의 목록 (참가자끼리는 방장이 걸러 준다)
+void MainWindow::onNetRomList(int slot, const QStringList& roms) {
+    if (slot < 0 || slot > 2) return;
+    m_seats[slot].roms = QSet<QString>(roms.begin(), roms.end());
+    m_seats[slot].romsKnown = true;
+    recomputeNetRoms();
+    int common = 0;
+    for (const auto& pr : m_allRoms) if (m_peerRomsKnown && m_peerRoms.contains(pr.second)) ++common;
+    log(isEn() ? QString("🌐 Peer has %1 ROMs - %2 games in common (list limited to these)").arg(roms.size()).arg(common)
+               : QString("🌐 상대 ROM %1개 확인 — 모두가 가진 게임 %2개만 목록에 표시합니다").arg(roms.size()).arg(common));
+    filterRoms();
+}
+
+void MainWindow::recomputeNetRoms() {
+    QSet<QString> inter; bool first = true, allKnown = true, any = false;
+    for (int i = 0; i < 3; ++i) {
+        if (i == m_mySeat) continue;
+        const Seat& s = m_seats[i];
+        // 참가자는 방장(0)의 목록만 안다. 방장은 들어와 있는 참가자 모두의 목록.
+        if (!m_netIsHost && i != 0) continue;
+        if (!s.present) continue;
+        any = true;
+        if (!s.romsKnown) { allKnown = false; continue; }
+        if (first) { inter = s.roms; first = false; } else inter.intersect(s.roms);
+    }
+    const bool known = any && allKnown && !first;
+    const bool changed = (known != m_peerRomsKnown) || (known && inter != m_peerRoms);
+    m_peerRoms = inter;
+    m_peerRomsKnown = known;
+    if (changed) filterRoms();
+}
+
+void MainWindow::clearNetRomFilter() {
+    const bool had = m_peerRomsKnown;
+    m_peerRoms.clear();
+    m_peerRomsKnown = false;
+    if (had) filterRoms();
+}
+
+// 연결됨: 참가자는 방장에게 연결됐다 / 방장은 첫 참가자가 들어왔다 (세부는 onNetPeerJoined)
+void MainWindow::onNetConnected(bool isHost) {
+    qDebug("[NP-conn] onNetConnected isHost=%d", isHost ? 1 : 0);
+    m_netIsHost = isHost;
+    m_mySeat = isHost ? 0 : gNetplay().mySlot();
+    m_netConnected = true;
+    m_net.status   = isHost ? "● HOSTING — 게임을 선택하세요" : "● CONNECTED — 호스트 대기 중";
+    m_net.canStart = isHost;
+    m_net.canDisc  = true;
+    m_net.canHost  = false;
+    m_net.canJoin  = false;
+    if (!isHost) {
+        log(QString("🌐 연결됨 — 자리 %1").arg(m_mySeat + 1));
+        for (Seat& s : m_seats) s = Seat();
+        m_seats[0].present = true;                    // 방장
+        m_seats[m_mySeat].present = true;
+        sendMyProfile();
+        QTimer::singleShot(500,  this, [this] { if (m_netConnected) sendMyProfile(); });
+        QTimer::singleShot(1500, this, [this] { if (m_netConnected) sendMyProfile(); });
+        clearNetRomFilter();
+        QStringList mine;
+        for (const auto& pr : m_allRoms) mine << pr.second;
+        gNetplay().sendRomList(mine);
+        QTimer::singleShot(3000, this, [this] {
+            if (gNetplay().active() && !m_seats[0].romsKnown) gNetplay().requestRomList();
+        });
+    }
+    refreshNetUi();
+}
+
+// 참가자: 방장과 연결이 끊겼다
+void MainWindow::onNetDisconnected() {
+    if (m_netConnected)
+        lobbyChatAdd(2, QString(), isEn() ? QString("Disconnected from the host") : QString("방장과 연결이 끊겼습니다"));
+    m_netConnected = false;
+    m_myLobbyReady = false;
+    for (Seat& s : m_seats) s = Seat();
+    clearNetRomFilter();
+    log("🌐 연결 끊김");
+    m_relayPeerHandled = false;
+    cleanupNetplay();
+    m_net.status   = "● DISCONNECTED";
+    m_net.canStart = false;
+    m_net.canDisc  = false;
+    m_net.canHost  = true;
+    m_net.canJoin  = true;
+    refreshNetUi();
+}
+
+// ── 게임 시작 ────────────────────────────────────────────────
+// 참가자: 방장이 고른 게임을 자동 로드 → 로딩 완료 시 READY 전송
+void MainWindow::onNetLoadGame(const QString& romName, int inputDelay, int playerMask) {
+    qDebug("[NP-conn] onNetLoadGame rom=%s delay=%d mask=%d",
+           romName.toUtf8().constData(), inputDelay, playerMask);
+
+    // ★ 중복 LOAD_GAME 무시: 방장이 신뢰성 위해 5회+재전송하므로 같은 메시지가 여러 번 온다.
+    if (m_npSelfLoaded && gState.gameLoaded && m_selectedGame == romName) {
+        gNetplay().sendReady();
+        return;
+    }
+
+    // 방장의 머신 세팅이 아직 안 왔으면 잠깐(최대 1.5초) 기다렸다가 로드한다.
+    if (!m_npHostVarsReady && !m_npSkipVarWait) {
+        if (!m_npLoadWaiting) {
+            m_npLoadWaiting = true;
+            m_npVarWaits = 0;
+            auto retry = std::make_shared<std::function<void()>>();
+            *retry = [this, romName, inputDelay, playerMask, retry] {
+                if (m_npHostVarsReady || ++m_npVarWaits > 15) {
+                    m_npLoadWaiting = false;
+                    m_npSkipVarWait = true;
+                    onNetLoadGame(romName, inputDelay, playerMask);
+                    m_npSkipVarWait = false;
+                    return;
+                }
+                QTimer::singleShot(100, this, *retry);
+            };
+            QTimer::singleShot(100, this, *retry);
+        }
+        return;
+    }
+
+    m_npSelfLoaded = false;
+    m_npStarted    = false;
+    m_npPlayerMask = playerMask;
+    gNetplay().setPlayers(playerMask, m_mySeat);
+
+    gSettings.netplayInputDelay = inputDelay;
+    m_npDelayQueue.clear();
+    m_netDelay = inputDelay;
+
+    log(QString("🌐 게임 수신: %1  (딜레이 %2f)").arg(romName).arg(inputDelay));
+    {
+        bool have = false;
+        for (const auto& pr : m_allRoms) if (pr.second == romName) { have = true; break; }
+        if (!have) {
+            log(isEn() ? QString("🌐 You do not have the ROM '%1' - the host must pick another game").arg(romName)
+                       : QString("🌐 '%1' ROM 이 이 PC에 없습니다 — 방장이 다른 게임을 골라야 합니다").arg(romName));
+            return;
+        }
+    }
+    m_selectedGame = romName;
+    if (loadRomInternal()) {
+        m_npSelfLoaded = true;
+        log("🌐 로딩 완료 → READY 전송");
+        gNetplay().sendReady();
+        m_npReadyRetry->start();                       // 방장 시작 신호가 올 때까지 300ms마다 재전송
+    } else {
+        log("🌐 ROM 없음 — 같은 ROM 파일을 ROM 폴더에 넣어주세요");
+    }
+}
+
+// 방장: 참가자 한 명의 로딩 완료. 모두 모이고 나도 끝났으면 시작한다.
+void MainWindow::onNetReady(int slot) {
+    qDebug("[NP-conn] onNetReady slot=%d host=%d selfLoaded=%d", slot,
+           gNetplay().isHost() ? 1 : 0, m_npSelfLoaded ? 1 : 0);
+    if (!gNetplay().isHost() || slot < 1 || slot > 2) return;
+    if (!(m_npReadyMask & (1 << slot))) log(isEn() ? "🌐 A player finished loading" : "🌐 상대 READY");
+    m_npReadyMask |= (1 << slot);
+    if (m_npSelfLoaded && !m_npStarted && (m_npReadyMask & m_npRequiredMask) == m_npRequiredMask) {
+        m_npReadyRetry->stop();
+        gNetplay().sendStart();
+        onNetStart();
+    }
+}
+
+// 모두: START 수신 → 프레임 0부터 동시 시작
+void MainWindow::onNetStart() {
+    if (m_npStarted) return;
+    m_npStarted = true;
+    qDebug("[NP] onNetStart() begin — gameLoaded=%d core=%p mask=%d seat=%d",
+           gState.gameLoaded ? 1 : 0, (void*)m_core, m_npPlayerMask, m_mySeat);
+    log(QString("🌐 START — Frame 0 동시 시작 (딜레이 %1f)").arg(gSettings.netplayInputDelay));
+    if (qEnvironmentVariableIsSet("FBNRX_NP_DEBUG")) {
+        QStringList ks = gState.variables.keys(); ks.sort();
+        for (const QString& k : ks) qDebug().noquote() << "[NPVAR]" << k << "=" << gState.variables.value(k);
+    }
+    if (m_npReadyRetry) m_npReadyRetry->stop();
+    gState.frameCount  = 0;
+    m_wc.setGame(m_selectedGame);
+    m_wcHist.clear();
+    m_expRep1 = m_expRep2 = 0; m_expSeq = 0;
+    m_npStates.clear(); m_npRamCrc.clear();
+    m_npInputHistory.clear();
+    m_npDelayQueue.clear();
+    m_frameDelay     = 0.0;
+    m_pendingSyncSf  = -1;
+    m_pendingSyncCur = -1;
+    m_pendingSyncData.clear();
+    startEmu();
+    // 시작 직후 방장의 상태를 참가자에게 한 번 보내 서로의 출발점을 같게 한다.
+    //   (네오지오는 시계(RTC) 값이 켠 시각마다 달라서, 그냥 두면 처음부터 상태가 어긋나 재동기가 반복된다)
+    if (gNetplay().isHost()) {
+        QTimer::singleShot(250, this, [this] {
+            if (!gNetplay().playing() || !m_npStarted) return;
+            for (int i = 1; i < 3; ++i)
+                if (gNetplay().seatConnected(i) && (m_npPlayerMask & (1 << i) || m_seats[i].present))
+                    onNetResyncReq(i, 0);
+        });
+    }
+}
+
+// ── GGPO desync 감지 (체크섬 비교 + 재동기) ───────────────────
+//   참가자는 방장의 체크섬과 비교한다. 방장은 참가자의 체크섬을 받아도 비교하지 않는다 (참가자가 스스로 요청한다).
+void MainWindow::onNetChecksum(int slot, quint32 frame, quint32 crc) {
+    Q_UNUSED(slot);
+    if (gNetplay().isHost()) return;
     m_remoteChecksums[frame] = crc;
     checkDesync(frame);
     while (m_remoteChecksums.size() > 16)
         m_remoteChecksums.erase(m_remoteChecksums.begin());
 }
 
-// 같은 프레임의 로컬/원격 CRC 비교 → 불일치면 desync
 void MainWindow::checkDesync(uint32_t frame) {
     auto itL = m_localChecksums.find(frame);
     auto itR = m_remoteChecksums.find(frame);
     if (itL == m_localChecksums.end() || itR == m_remoteChecksums.end())
-        return;   // 아직 양쪽 다 안 모임
+        return;
 
     if (itL->second == itR->second) {
-        // 일치 — 결정론 정상 (가끔 로그)
         static int s_okCount = 0;
         if ((++s_okCount % 20) == 1)
             qDebug("[GGPO] sync OK #%d frame=%u crc=%08x", s_okCount, frame, itL->second);
         return;
     }
 
-    // 불일치 = desync
     qDebug("[GGPO] DESYNC frame=%u local=%08x remote=%08x",
            frame, itL->second, itR->second);
     log(QString("⚠ desync 감지 (frame %1) → 재동기").arg(frame));
 
-    // 클라이언트: 호스트에 풀스테이트 재동기 요청 (중복 방지)
     if (!gNetplay().isHost() && !m_resyncPending) {
         m_resyncPending = true;
         gNetplay().sendResyncReq(frame);
     }
 }
 
-// 호스트: 클라의 재동기 요청 받음 → 현재 풀스테이트 1회 전송
-void MainWindow::onNetResyncReq(quint32 frame) {
+// 방장: 참가자의 재동기 요청 → 그 참가자에게만 풀스테이트 전송
+void MainWindow::onNetResyncReq(int slot, quint32 frame) {
     Q_UNUSED(frame);
     if (!gNetplay().isHost() || !m_core || !gState.gameLoaded) return;
     size_t sz = m_core->serializeSize();
     if (sz == 0) return;
     QByteArray buf(static_cast<int>(sz), Qt::Uninitialized);
     if (m_core->serialize(buf.data(), sz)) {
-        log(QString("🔄 재동기 요청 수신 → 풀스테이트 전송 (frame %1)")
-            .arg(gState.frameCount));
-        gNetplay().sendState(static_cast<uint32_t>(gState.frameCount), buf);
+        log(QString("🔄 재동기 요청 수신 (자리 %1) → 풀스테이트 전송 (frame %2)").arg(slot + 1).arg(gState.frameCount));
+        gNetplay().sendState(slot, static_cast<uint32_t>(gState.frameCount), buf);
     }
 }
 
-// ── 호스트: 게임 선택 후 START 버튼 ─────────────────────────
+// ── 방장: 게임 시작 버튼 ─────────────────────────────────────
 void MainWindow::netplayStartGame() {
-    qDebug("[NP-conn] netplayStartGame rom=%s",
-           m_selectedGame.toUtf8().constData());
+    qDebug("[NP-conn] netplayStartGame rom=%s", m_selectedGame.toUtf8().constData());
     if (m_selectedGame.isEmpty()) { log("게임을 먼저 선택하세요"); return; }
     if (!gNetplay().active() || !gNetplay().isHost()) return;
     if (gNetplay().netState() != NetplayManager::State::Lobby) {
         log("🌐 이미 게임 진행 중"); return;
     }
 
-    // 플래그 초기화
+    computeSeatRoles();
+    int playerMask = 1, required = 0;
+    for (int i = 1; i < 3; ++i) {
+        if (!m_seats[i].present) continue;
+        required |= (1 << i);
+        if (!m_seats[i].spectator) {
+            playerMask |= (1 << i);
+            if (!m_seats[i].ready) {                          // 플레이어는 READY 를 눌러야 한다
+                lobbyChatAdd(2, QString(), isEn() ? QString("Waiting for %1 to press READY").arg(m_seats[i].nick)
+                                                 : QString("%1 님이 READY 를 눌러야 시작할 수 있습니다").arg(m_seats[i].nick));
+                return;
+            }
+        }
+    }
+    if (playerMask == 1) {
+        lobbyChatAdd(2, QString(), isEn() ? QString("There is no one to play with yet") : QString("함께 플레이할 사람이 아직 없습니다"));
+        return;
+    }
+    // 모두가 가진 게임만 시작한다
+    if (m_peerRomsKnown && !m_peerRoms.contains(m_selectedGame)) {
+        log(isEn() ? "🌐 Someone does not have this ROM - pick another game"
+                   : "🌐 이 게임의 ROM 이 없는 사람이 있어 시작할 수 없습니다 — 다른 게임을 고르세요");
+        return;
+    }
+    if (!m_peerRomsKnown)
+        log(isEn() ? "🌐 (ROM lists not received yet - starting without checking)"
+                   : "🌐 (상대 ROM 목록을 아직 못 받아 확인 없이 시작합니다)");
+
     m_npSelfLoaded = false;
-    m_npPeerReady  = false;
+    m_npReadyMask  = 0;
+    m_npRequiredMask = required;
     m_npStarted    = false;
+    m_npPlayerMask = playerMask;
+    gNetplay().setPlayers(playerMask, 0);
 
     int delay = m_netDelay;
     gSettings.netplayInputDelay = delay;
     m_npDelayQueue.clear();
     log(QString("🌐 게임 선택 동기화 → %1  (딜레이 %2f)").arg(m_selectedGame).arg(delay));
 
-    // 조인에게 게임 이름 + 입력 지연 전송 (조인은 자동 로드 → sendReady)
-    gNetplay().sendLoadGame(m_selectedGame, delay);
-
-    // 호스트도 동시에 로드
+    // 방장이 먼저 로드한다 — 머신 세팅(딥스위치·BIOS 등)의 최종값은 로드한 뒤에야 알 수 있다.
     if (!loadRomInternal()) { log("🌐 ROM 로드 실패"); return; }
     m_npSelfLoaded = true;
-    log("🌐 호스트 로딩 완료 → READY 전송");
-    gNetplay().sendReady();
 
-    // 상대 READY 수신 전까지 300ms 마다 READY 재전송
-    m_npReadyRetry->start();
+    gNetplay().sendVars(netSyncVarLines());
+    gNetplay().sendLoadGame(m_selectedGame, delay, playerMask);
+    log("🌐 호스트 로딩 완료 → 참가자 READY 대기");
 
-    // 이미 onNetReady()가 먼저 실행된 경우 (빠른 join) → 즉시 시작
-    if (m_npPeerReady) {
-        m_npReadyRetry->stop();
+    if ((m_npReadyMask & m_npRequiredMask) == m_npRequiredMask) {     // 이미 모두 끝났다면
         gNetplay().sendStart();
         onNetStart();
     }
@@ -4663,6 +5929,7 @@ void MainWindow::netplayStartGame() {
 // ── CleanupNetplay: 소켓 유지 + 게임 상태만 초기화 ──────────
 // 게임 종료, 다른 게임 선택, GAME OVER 수신 시 호출
 void MainWindow::cleanupNetplay() {
+    if (m_npStarted) recordScores();
     // 에뮬 루프 정지
     if (m_timer) m_timer->stop();
     if (m_core && m_core->gameLoaded()) m_core->unloadGame();
@@ -4672,14 +5939,18 @@ void MainWindow::cleanupNetplay() {
     gState.netplayResim = false;
 
     // 롤백 버퍼 초기화 (소켓은 건드리지 않음)
-    m_npStates.clear();
+    m_npStates.clear(); m_npRamCrc.clear();
     m_npInputHistory.clear();
     m_npDelayQueue.clear();
     m_frameDelay = 0.0;
     m_pendingResimTo = -1;   // ← 재시뮬 상태 리셋 (다음 게임 속도 이상 방지)
     m_npSelfLoaded   = false;
-    m_npPeerReady    = false;
     m_npStarted      = false;
+    m_npHostVarsReady = false;
+    m_npLoadWaiting  = false;
+    m_npReadyMask    = 0;
+    m_myLobbyReady = false;       // 게임이 끝나면 다음 판을 위해 레디를 푼다
+    for (int i = 1; i < 3; ++i) m_seats[i].ready = false;
     m_pendingSyncSf  = -1;
     m_pendingSyncCur = -1;
     m_pendingSyncData.clear();
@@ -4708,6 +5979,8 @@ void MainWindow::cleanupNetplay() {
         leaveGameScreen();
 
     log("🌐 게임 정리 완료 — Lobby 대기 중");
+    if (m_netConnected) lobbyChatAdd(2, QString(), isEn() ? QString("Game ended - back to the room") : QString("게임이 끝났습니다 — 방으로 돌아왔습니다"));
+    pushLobby();
 }
 
 void MainWindow::log(const QString& msg) {

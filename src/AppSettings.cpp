@@ -256,6 +256,13 @@ void AppSettings::load(const QString& path) {
 
     uiLanguage        = jval(o, "ui_language",          uiLanguage);
     showIntro         = jval(o, "show_intro",           showIntro);
+    winCounter        = jval(o, "win_counter",          winCounter);
+    netId             = jval(o, "net_id",               netId);
+    netNick           = jval(o, "net_nick",             netNick);
+    serverUrl         = jval(o, "server_url",           serverUrl);
+    accountId         = jval(o, "account_id",           accountId);
+    accountToken      = jval(o, "account_token",        accountToken);
+    avatarParts       = jval(o, "avatar_parts",         avatarParts);
     videoRenderer     = jval(o, "video_renderer",       videoRenderer);
     netplayPort       = jval(o, "netplay_port",         netplayPort);
     netplayInputDelay = jval(o, "netplay_input_delay",  netplayInputDelay);
@@ -440,6 +447,13 @@ void AppSettings::save(const QString& path) const {
 
     o["ui_language"]          = uiLanguage;
     o["show_intro"]           = showIntro;
+    o["win_counter"]          = winCounter;
+    o["net_id"]               = netId;
+    o["net_nick"]             = netNick;
+    o["server_url"]           = serverUrl == builtinServerUrl() ? QString() : serverUrl;   // 내장 주소는 저장하지 않는다 (주소가 바뀌면 새 버전이 따라가도록)
+    o["account_id"]           = accountId;
+    o["account_token"]        = accountToken;
+    o["avatar_parts"]         = avatarParts;
     o["video_renderer"]       = videoRenderer;
     o["netplay_port"]         = netplayPort;
     o["netplay_input_delay"]  = netplayInputDelay;

@@ -6,6 +6,7 @@
 #include <QFontDatabase>
 #include <QFontMetrics>
 #include <QSet>
+#include <cmath>
 
 namespace {
 
@@ -137,6 +138,19 @@ QString bundledFamily() {
     return fam;
 }
 
+// 매끈한 본문용 글꼴 (Noto Sans KR SemiBold 서브셋, SIL OFL 1.1 — assets/fonts/LICENSE-NotoSansKR.txt)
+QString vectorFamily() {
+    static const QString fam = [] {
+        const int id = QFontDatabase::addApplicationFont(QStringLiteral(":/assets/fonts/NotoSansKR-SemiBold-subset.ttf"));
+        if (id < 0) return QString();
+        const QStringList fs = QFontDatabase::applicationFontFamilies(id);
+        if (fs.isEmpty()) return QString();
+        QFont probe(fs.first()); probe.setPixelSize(16);
+        return QFontMetrics(probe).inFontUcs4(0xD55C) ? fs.first() : QString();
+    }();
+    return fam;
+}
+
 // 내장 폰트가 안 읽힐 때만 쓰는 대체 글자체. 설치되어 있는 첫 번째를 쓴다.
 QString koreanFamily() {
     static const QString chosen = [] {
@@ -202,15 +216,44 @@ QString PixelFont::sanitize(const QString& text) {
     return out;
 }
 
+bool PixelFont::vectorAvailable() { return !vectorFamily().isEmpty(); }
+
+// 벡터 글꼴로 한 글자를 그린다 (부드러운 가장자리, 도트 확대 없음).
+static PixelFont::KoRun makeVectorRun(const QString& run, const QColor& color, int px) {
+    QFont f(vectorFamily());
+    f.setPixelSize(px);
+    f.setStyleStrategy(QFont::StyleStrategy(QFont::PreferAntialias | QFont::NoSubpixelAntialias));
+    f.setHintingPreference(QFont::PreferNoHinting);
+    const QFontMetrics fm(f);
+    PixelFont::KoRun r;
+    r.advance = fm.horizontalAdvance(run);
+    const int pad = 2;
+    QImage img(qMax(1, r.advance + 2 * pad), qMax(1, fm.height() + 2 * pad), QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    {
+        QPainter qp(&img);
+        qp.setRenderHint(QPainter::TextAntialiasing, true);
+        qp.setFont(f);
+        qp.setPen(color);
+        qp.drawText(pad, pad + fm.ascent(), run);
+    }
+    const QRect body = fm.tightBoundingRect(QStringLiteral("한"));
+    r.baselineY = pad + fm.ascent() + (body.top() + body.height() / 2);
+    r.pad = pad;
+    r.img = img;
+    return r;
+}
+
 const PixelFont::KoRun& PixelFont::koreanRun(const QString& run, const QColor& color, int px) {
     const QString key = run + QLatin1Char('\x1f') + QString::number(color.rgb(), 16)
                       + QLatin1Char('\x1f') + QString::number(px);
     auto it = m_ko.find(key);
     if (it != m_ko.end()) return it.value();
+    if (px < 0) return m_ko.insert(key, makeVectorRun(run, color, -px)).value();   // 음수 px = 벡터 글꼴 (-px 가 실제 크기)
 
     const bool bundled = !bundledFamily().isEmpty();
     // 내장 폰트는 14px 로만 그리고 정수 배로 키운다(도트가 뭉개지지 않는다). px 는 원하는 크기.
-    const int zoom = bundled ? qMax(1, px / BUNDLED_PX) : 1;
+    const int zoom = bundled ? qMax(1, (px + BUNDLED_PX - 1) / BUNDLED_PX) : 1;   // 목표보다 크게 만든 뒤 부드럽게 줄인다
     QFont f;
     if (bundled) {
         f.setFamily(bundledFamily());
@@ -273,6 +316,15 @@ const PixelFont::KoRun& PixelFont::koreanRun(const QString& run, const QColor& c
         r.baselineY *= zoom;
     }
     r.pad = pad * zoom;
+    // 목표 크기가 정수 배가 아니면 부드럽게 줄여서 맞춘다 (도트 모서리가 깎이지 않고 자연스럽다)
+    if (bundled && px != BUNDLED_PX * zoom) {
+        const double rr = double(px) / (BUNDLED_PX * zoom);
+        img = img.scaled(qMax(1, int(std::lround(img.width() * rr))), qMax(1, int(std::lround(img.height() * rr))),
+                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        r.advance   = int(std::lround(r.advance * rr));
+        r.baselineY = int(std::lround(r.baselineY * rr));
+        r.pad       = int(std::lround(r.pad * rr));
+    }
     r.img = img;
     return m_ko.insert(key, r).value();
 }
@@ -302,15 +354,18 @@ const QImage& PixelFont::atlas(const QColor& color) {
     return *m_atlas.insert(key, img);
 }
 
-void PixelFont::draw(QPainter& p, const QString& textIn, int x, int y,
-                     const QColor& color, int scale, int scaleY, bool retro) {
-    if (scale < 1) scale = 1;
+void PixelFont::drawQ(QPainter& p, const QString& textIn, int x, int y,
+                      const QColor& color, int q, int scaleY, bool retro) {
+    if (q < 2) q = 2;
     if (scaleY < 1) scaleY = 1;
+    const bool smooth = !retro || (q % 8) != 0;
+    const bool oldSmooth = p.renderHints().testFlag(QPainter::SmoothPixmapTransform);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
     const QString text = sanitize(textIn);
     const QImage& a = atlas(color);
 
-    const int dw = CELL_W * scale;
-    const int dh = CELL_H * scale * scaleY;
+    const int dw = q;                                   // 한 칸 폭 = 8 * q / 8
+    const int dh = cellHQ(q) * scaleY;
 
     // 8x8 표에 없는 글자(한글 등)는 시스템 폰트로 대신 그린다.
     //   이 프로그램은 로그와 메뉴가 한국어라, 없는 글자를 그냥 버리면
@@ -320,7 +375,7 @@ void PixelFont::draw(QPainter& p, const QString& textIn, int x, int y,
     //   글자 크기는 두 칸 폭(dw*2)을 넘지 않게, 높이는 줄 간격 안에서 정한다.
     //   (줄 간격에 여유가 있어 위아래로 조금 넘쳐도 다른 줄을 침범하지 않는다)
     //   내장 폰트는 셀 배율(scale) 그대로 정수 배로 키운다 (영문 8x8 글자와 같은 배율).
-    const int px = !bundledFamily().isEmpty() ? BUNDLED_PX * scale
+    const int px = !bundledFamily().isEmpty() ? qMax(8, int(std::lround(BUNDLED_PX * q / 8.0)))
                                               : qMax(12, qMin(int(dh * 1.4), int(dw * 2 * 0.95)));
 
     auto cellOf = [](ushort u) -> int {
@@ -329,9 +384,11 @@ void PixelFont::draw(QPainter& p, const QString& textIn, int x, int y,
         return -1;
     };
 
+    const bool vecMode = !retro && vectorAvailable();
+    const int vpx = qMax(9, int(std::lround(q * 1.6)));       // 벡터 글꼴 크기 (한글 두 칸 = 2q 안에 들어가게)
     int col = 0, i = 0;
     while (i < text.size()) {
-        const int cell = (m_unified && !retro) ? -1 : cellOf(text.at(i).unicode());
+        const int cell = ((m_unified || vecMode) && !retro) ? -1 : cellOf(text.at(i).unicode());
         if (cell >= 0) {
             // 확대는 최근접 보간이어야 픽셀이 뭉개지지 않는다 (기본값이 그렇다)
             p.drawImage(QRect(x + col * dw, y, dw, dh), a,
@@ -346,7 +403,7 @@ void PixelFont::draw(QPainter& p, const QString& textIn, int x, int y,
         const ushort u = text.at(i).unicode();
         const int nslot = unitCells(text.at(i));
         if (u > 0x20) {
-            const KoRun& k = koreanRun(QString(text.at(i)), color, px);
+            const KoRun& k = koreanRun(QString(text.at(i)), color, vecMode ? -vpx : px);
             const int slotW = nslot * dw;
             const int ox = (slotW - k.advance) / 2;
             // 이미지 안의 몸통 중앙이 셀 세로 중앙(y + dh/2)에 오게 놓는다
@@ -355,5 +412,6 @@ void PixelFont::draw(QPainter& p, const QString& textIn, int x, int y,
         col += nslot;
         ++i;
     }
+    p.setRenderHint(QPainter::SmoothPixmapTransform, oldSmooth);
 }
 

@@ -1,0 +1,16 @@
+name = "nrx-play"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# 계정(AccountsDO) 과 방(RoomDO) 은 둘 다 Durable Object (SQLite 저장, 무료 플랜 가능)
+[[durable_objects.bindings]]
+name       = "ACCOUNTS"
+class_name = "AccountsDO"
+
+[[durable_objects.bindings]]
+name       = "ROOMS"
+class_name = "RoomDO"
+
+[[migrations]]
+tag                = "v1"
+new_sqlite_classes = ["AccountsDO", "RoomDO"]
